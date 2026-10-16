@@ -85,9 +85,12 @@ fn save_png(path: &std::path::Path, img: &egui::ColorImage) -> anyhow::Result<()
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext, firmware: Option<PathBuf>, gdb_addr: Option<String>) -> Self {
+    pub fn new(cc: &eframe::CreationContext, firmware: Option<PathBuf>, gdb_addr: Option<String>, ideal_colors: bool) -> Self {
         let ctx = cc.egui_ctx.clone();
         let emu = emu::spawn(move || ctx.request_repaint(), gdb_addr);
+        if ideal_colors {
+            emu.send(Command::IdealColors(true));
+        }
         if let Some(path) = firmware {
             emu.send(Command::Load(path));
         }
