@@ -161,12 +161,16 @@ Progress beyond the spike (Phase 2/3):
   with LEDs/buttons/display/touch, Nucleo LEDs/USER/RESET, serial console,
   pause/reset/speed, drag & drop; adaptive layout. `ITS_EMU_GUI_SCREENSHOT`
   saves a picture of the window for docs/CI.
-- Next candidates: GDB stub (Phase 7), speed of timer-polling loops, CI on
-  Linux/Windows/macOS, LICENSE file before publishing.
-- Performance gap: loops that poll time-dependent registers (TIM2 CNT) while
-  doing SPI output run at ~85 MIPS (about half real time). Idea: let timers
-  report when a read value changes next, so polling loops can be skipped to
-  that point.
+- Next candidates: GDB stub (Phase 7), CI on Linux/Windows/macOS, LICENSE
+  file before publishing.
+- Polling loops: peripherals report until when a read value stays the same
+  (`Peripheral::read_stable_until`), so loops polling a prescaled timer or
+  SysTick are skipped in whole iterations up to the next counter change.
+  Final `b .` self-loops are now recognised as loops (A1ASM, PrimzahlSiebASM:
+  30–70 → ~7000 MIPS). Remaining gap: loops that do SPI output on every
+  iteration (StoppuhrASM running, TestNewFont) are real work and run at
+  ~250 MIPS (≈1.4× real time); TIM2 without prescaler changes every 2 cycles,
+  so polling it cannot be skipped.
 
 Findings:
 - Unicorn 2 contains QEMU's M-profile code but never calls its `do_interrupt`;
@@ -183,3 +187,6 @@ Findings:
 - Idle-loop fast-forwarding: a loop iteration without stores/MMIO/exceptions
   whose registers at the loop head are unchanged repeats identically, so time
   jumps to the next event. Verified to give identical results (`--no-idle-skip`).
+  Reads of time-dependent registers are allowed if their value holds until a
+  known cycle; then only whole loop iterations before that cycle are skipped,
+  which keeps the timing identical to running them.

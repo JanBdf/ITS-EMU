@@ -77,6 +77,20 @@ impl SysTick {
         false
     }
 
+    /// COUNTFLAG is set (reading CSR clears it).
+    pub fn countflag(&self) -> bool {
+        self.csr & CSR_COUNTFLAG != 0
+    }
+
+    /// Cycle at which the counter value changes next, if the timer runs.
+    pub fn next_tick(&self, now: u64) -> Option<u64> {
+        if !self.enabled() || self.load == 0 {
+            return None;
+        }
+        let div = self.div();
+        Some(self.base + (now.saturating_sub(self.base) / div + 1) * div)
+    }
+
     /// Cycle of the next counter wrap, if the timer runs.
     pub fn next_event(&self) -> Option<u64> {
         if !self.enabled() || self.load == 0 {

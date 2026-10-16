@@ -52,6 +52,14 @@ impl Clock {
         self.seg_ps + (delta * PS_PER_S / u128::from(self.cpu_hz)) as u64
     }
 
+    /// First cycle (not before the last frequency change) at which
+    /// [`Self::time_ps`] reaches `ps`, assuming the frequency stays the same.
+    pub fn cycle_at_ps(&self, ps: u64) -> u64 {
+        let dt = u128::from(ps.saturating_sub(self.seg_ps));
+        let delta = (dt * u128::from(self.cpu_hz)).div_ceil(PS_PER_S);
+        self.seg_cycles.saturating_add(u64::try_from(delta).unwrap_or(u64::MAX))
+    }
+
     pub fn time_ns(&self) -> u64 {
         self.time_ps() / 1000
     }
@@ -75,5 +83,25 @@ mod tests {
         c.advance(90_000_000); // 0.5 s at 180 MHz
         assert_eq!(c.time_ns(), 1_500_000_000);
         assert_eq!(c.cycles(), 106_000_000);
+    }
+
+    #[test]
+    fn cycle_at_ps_inverts_time_ps() {
+        let mut c = Clock::new(16_000_000);
+        c.advance(1000);
+        c.set_cpu_hz(180_000_000);
+        for ps in [0, 62_500_000, 62_500_001, 62_505_555, 62_505_556, 72_500_000, 1_000_000_000_007] {
+            let cycle = c.cycle_at_ps(ps);
+            let mut probe = c.clone();
+            if cycle > probe.cycles() {
+                probe.advance(cycle - probe.cycles());
+                assert!(probe.time_ps() >= ps, "{ps}");
+                let mut before = c.clone();
+                before.advance(cycle - 1 - c.cycles());
+                assert!(before.time_ps() < ps, "{ps}");
+            } else {
+                assert!(probe.time_ps() >= ps, "{ps}");
+            }
+        }
     }
 }

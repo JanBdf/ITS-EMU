@@ -85,3 +85,18 @@ fn idle_skipping_does_not_change_behaviour() {
     }
     assert!(a.system().idle_skipped_cycles() > 0);
 }
+
+#[test]
+fn idle_skipping_of_final_self_loop_does_not_change_behaviour() {
+    // Both programs end in `b .` (a block that branches to itself).
+    for name in ["A1ASM.axf", "PrimzahlSiebASM.axf"] {
+        let (mut a, mcu_a) = boot!(name, true);
+        let (mut b, mcu_b) = boot!(name, false);
+        run_until_ms(&mut a, 300);
+        run_until_ms(&mut b, 300);
+        assert_eq!(leds(&mcu_a), leds(&mcu_b), "{name}");
+        assert_eq!(a.pc(), b.pc(), "{name}");
+        assert_eq!(a.clock().cycles(), b.clock().cycles(), "{name}");
+        assert!(a.system().idle_skipped_cycles() > a.clock().cycles() / 2, "{name}: loop not skipped");
+    }
+}

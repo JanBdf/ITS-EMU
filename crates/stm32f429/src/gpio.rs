@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use emu_core::bus::{extract_read, merge_write};
-use emu_core::{DeviceCtx, Peripheral};
+use emu_core::{Clock, DeviceCtx, Peripheral};
 
 use crate::rcc::SharedClocks;
 
@@ -237,8 +237,8 @@ impl Peripheral for GpioPort {
         "GPIO"
     }
 
-    fn read_depends_on_time(&self, _offset: u32) -> bool {
-        false
+    fn read_stable_until(&self, _offset: u32, _clock: &Clock) -> u64 {
+        u64::MAX
     }
 
     fn read(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
