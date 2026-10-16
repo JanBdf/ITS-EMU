@@ -15,4 +15,4 @@ clap.workspace = true
 eframe = "0.37"
 rfd = "0.17"
 png.workspace = true
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+resvg = { version = "0.48", default-features = false }

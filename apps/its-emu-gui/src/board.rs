@@ -1,33 +1,35 @@
 //! Drawing of the ITS-Board and its interactive parts.
 //!
-//! The board is a photo of the real board (Rev 02, 15.12.2020), focus- and
-//! exposure-stacked from 35 shots (7 focus points × 5 exposures) and rectified (tools/hw/stack-capture.sh,
-//! boardstack.py, boardasset.py; the lit IN LEDs are retouched to off).
+//! The board (Rev 02, 15.12.2020, with the Nucleo and the display shield) is a
+//! vector drawing, assets/board.svg, made by tools/hw/boarddraw.py after the
+//! focus- and exposure-stacked photo of the real board (stack-capture.sh,
+//! boardstack.py, boardasset.py).  It is rendered at the size it is shown at.
 //! LEDs, pressed buttons and the display are drawn on top of it.  Positions are
-//! in design units (the photo is 1000 units wide) and were measured in the
+//! in design units (the board is 1000 units wide) and were measured in the
 //! photo by boardasset.py.
 
 use eframe::egui::{
-    self, Color32, CornerRadius, Mesh, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2,
+    self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2, epaint::Vertex,
 };
 
 pub const BOARD_W: f32 = 1000.0;
 pub const BOARD_H: f32 = 648.55;
 
-const PHOTO: &[u8] = include_bytes!("../assets/board.jpg");
-/// Rounded corners of the PCB.
-const CORNER: f32 = 11.3;
+const SVG: &str = include_str!("../assets/board.svg");
+/// A new size is rendered once the board has kept it for this long (seconds).
+const RESIZE_SETTLE: f64 = 0.15;
 
 const LED_YELLOW: Color32 = Color32::from_rgb(0xFF, 0xC4, 0x10);
 const LED_BLUE: Color32 = Color32::from_rgb(0x30, 0x70, 0xFF);
 const LED_RED: Color32 = Color32::from_rgb(0xFF, 0x20, 0x30);
 
 /// OUT0..OUT15 LEDs (D8..D23), x of the package centre; all at `LED_Y`.
+/// These positions are shared with tools/hw/boarddraw.py, which reads them from here.
 const OUT_X: [f32; 16] =
-    [579.9, 548.3, 516.6, 484.7, 452.9, 421.2, 389.5, 357.6, 326.0, 294.2, 262.8, 231.2, 199.6, 167.6, 135.5, 103.1];
+    [580.7, 549.0, 517.3, 485.7, 454.1, 422.4, 390.4, 358.7, 327.2, 295.7, 264.3, 233.1, 201.6, 169.8, 137.9, 105.4];
 /// IN0..IN7 LEDs (D0..D7).
-const IN_X: [f32; 8] = [909.6, 877.8, 845.8, 813.3, 780.9, 748.2, 716.1, 684.1];
-const LED_Y: f32 = 538.0;
+const IN_X: [f32; 8] = [909.1, 877.2, 845.4, 813.4, 781.8, 749.6, 718.0, 686.3];
+const LED_Y: f32 = 539.0;
 /// Caps of S0..S7; all at `BUTTON_Y`.
 const BUTTON_X: [f32; 8] = [911.2, 878.7, 846.6, 814.2, 782.0, 749.8, 717.6, 685.8];
 const BUTTON_Y: f32 = 620.1;
@@ -42,48 +44,57 @@ const RESET: (f32, f32) = (290.6, 318.1);
 /// bottom left.  Not quite a rectangle: the glass is ~15 mm above the PCB.
 const GLASS: [(f32, f32); 4] = [(515.0, 61.9), (895.9, 63.5), (898.4, 314.5), (518.6, 317.2)];
 
-/// The board photo and the LED glow sprite.
+/// The board drawing and its rendering at the current size.
 pub struct Textures {
-    photo: TextureHandle,
-    glow: TextureHandle,
+    tree: resvg::usvg::Tree,
+    board: Option<(TextureHandle, [u32; 2])>,
+    /// Size the board is shown at that differs from the rendered one, since when.
+    pending: Option<([u32; 2], f64)>,
 }
 
 impl Textures {
-    pub fn load(ctx: &egui::Context) -> Self {
-        let mut img =
-            image::load_from_memory_with_format(PHOTO, image::ImageFormat::Jpeg).expect("board photo").to_rgba8();
-        let max = ctx.input(|i| i.max_texture_side) as u32;
-        if img.width() > max {
-            img = image::imageops::resize(
-                &img,
-                max,
-                img.height() * max / img.width(),
-                image::imageops::FilterType::Triangle,
-            );
-        }
-        let photo =
-            egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
-        // mipmaps: the 4096 px photo is usually shown at a third of its size
-        let options = TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..TextureOptions::LINEAR };
+    pub fn load(_ctx: &egui::Context) -> Self {
+        let tree = resvg::usvg::Tree::from_str(SVG, &resvg::usvg::Options::default()).expect("board drawing");
+        Self { tree, board: None, pending: None }
+    }
 
-        // Radial glow, premultiplied white; drawn with a tint of alpha 0 it adds light.
-        const N: usize = 128;
-        let glow = egui::ColorImage::new(
-            [N, N],
-            (0..N * N)
-                .map(|i| {
-                    let (x, y) = ((i % N) as f32 + 0.5, (i / N) as f32 + 0.5);
-                    let d2 = ((x / N as f32 - 0.5).powi(2) + (y / N as f32 - 0.5).powi(2)) * 4.0;
-                    let v = if d2 < 1.0 { (-4.0 * d2).exp() * (1.0 - d2) } else { 0.0 };
-                    let v = (v * 255.0) as u8;
-                    Color32::from_rgba_premultiplied(v, v, v, v)
-                })
-                .collect(),
-        );
-        Self {
-            photo: ctx.load_texture("board", photo, options),
-            glow: ctx.load_texture("glow", glow, TextureOptions::LINEAR),
+    /// The board rendered at `size` pixels, re-rendered when the size has settled.
+    fn board(&mut self, ctx: &egui::Context, size: [u32; 2]) -> &TextureHandle {
+        let now = ctx.input(|i| i.time);
+        let rendered = self.board.as_ref().map(|b| b.1);
+        if rendered == Some(size) {
+            self.pending = None;
+        } else if rendered.is_some() {
+            match self.pending {
+                Some((s, since)) if s == size => {
+                    if now - since < RESIZE_SETTLE {
+                        ctx.request_repaint_after(std::time::Duration::from_secs_f64(RESIZE_SETTLE));
+                    } else {
+                        self.board = None;
+                    }
+                }
+                _ => {
+                    self.pending = Some((size, now));
+                    ctx.request_repaint_after(std::time::Duration::from_secs_f64(RESIZE_SETTLE));
+                }
+            }
         }
+        if self.board.is_none() {
+            self.pending = None;
+            let image = self.render(size);
+            self.board = Some((ctx.load_texture("board", image, TextureOptions::LINEAR), size));
+        }
+        &self.board.as_ref().unwrap().0
+    }
+
+    fn render(&self, [w, h]: [u32; 2]) -> egui::ColorImage {
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).expect("board size");
+        let tree_size = self.tree.size();
+        let transform =
+            resvg::tiny_skia::Transform::from_scale(w as f32 / tree_size.width(), h as f32 / tree_size.height());
+        resvg::render(&self.tree, transform, &mut pixmap.as_mut());
+        // tiny-skia gives premultiplied RGBA, as egui wants it
+        egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], pixmap.data())
     }
 }
 
@@ -114,7 +125,6 @@ pub struct BoardInput {
 /// Maps design units to screen coordinates.
 struct Pcb<'a> {
     painter: &'a egui::Painter,
-    tex: &'a Textures,
     origin: Pos2,
     s: f32,
 }
@@ -130,13 +140,40 @@ impl Pcb<'_> {
         v * self.s
     }
 
-    /// Adds light: the glow sprite over `rx` × `ry` units, `color` scaled by `k`.
+    /// Adds light: a radial falloff over `rx` × `ry` units, `color` scaled by `k`
+    /// (a fan of rings with vertex colours; alpha 0 makes the colour additive).
     fn glow(&self, x: f32, y: f32, rx: f32, ry: f32, color: Color32, k: f32) {
+        const RINGS: usize = 12;
+        const SEGMENTS: usize = 48;
         let k = k.clamp(0.0, 1.0);
-        let c = |v: u8| (f32::from(v) * k) as u8;
-        let tint = Color32::from_rgba_premultiplied(c(color.r()), c(color.g()), c(color.b()), 0);
-        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-        self.painter.image(self.tex.glow.id(), self.r(x - rx, y - ry, x + rx, y + ry), uv, tint);
+        let light = |d2: f32| {
+            let v = if d2 < 1.0 { (-4.0 * d2).exp() * (1.0 - d2) * k } else { 0.0 };
+            let c = |c: u8| (f32::from(c) * v) as u8;
+            Color32::from_rgba_premultiplied(c(color.r()), c(color.g()), c(color.b()), 0)
+        };
+        let mut mesh = Mesh::default();
+        mesh.vertices.push(Vertex { pos: self.p(x, y), uv: egui::epaint::WHITE_UV, color: light(0.0) });
+        for ring in 1..=RINGS {
+            // rings closer together near the centre, where the light changes fastest
+            let r = (ring as f32 / RINGS as f32).powf(1.5);
+            for seg in 0..SEGMENTS {
+                let a = seg as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+                let pos = self.p(x + a.cos() * rx * r, y + a.sin() * ry * r);
+                mesh.vertices.push(Vertex { pos, uv: egui::epaint::WHITE_UV, color: light(r * r) });
+            }
+        }
+        let at = |ring: usize, seg: usize| (1 + (ring - 1) * SEGMENTS + seg % SEGMENTS) as u32;
+        for seg in 0..SEGMENTS {
+            mesh.indices.extend([0, at(1, seg), at(1, seg + 1)]);
+        }
+        for ring in 1..RINGS {
+            for seg in 0..SEGMENTS {
+                let (a, b) = (at(ring, seg), at(ring, seg + 1));
+                let (c, d) = (at(ring + 1, seg), at(ring + 1, seg + 1));
+                mesh.indices.extend([a, c, b, b, c, d]);
+            }
+        }
+        self.painter.add(Shape::mesh(mesh));
     }
 
     /// SMD LED (vertical package, about 11 × 20 units) lit with `brightness`.
@@ -149,7 +186,7 @@ impl Pcb<'_> {
         // the beige package takes the colour of the light (additive light alone would only whiten it)
         self.painter.rect_filled(
             self.r(x - 5.0, y - 7.0, x + 5.0, y + 7.0),
-            CornerRadius::same(self.len(1.5) as u8),
+            egui::CornerRadius::same(self.len(1.5) as u8),
             color.gamma_multiply(0.6 * b),
         );
         self.glow(x, y, 42.0, 42.0, color, 0.9 * b); // light on the solder mask
@@ -190,20 +227,21 @@ fn glass_pixel(x: f32, y: f32) -> (f32, f32) {
     (u * 480.0, v * 320.0)
 }
 
-pub fn show(ui: &mut egui::Ui, tex: &Textures, state: &BoardState) -> BoardInput {
+pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState) -> BoardInput {
     let avail = ui.available_size();
     let s = (avail.x / BOARD_W).min(avail.y / BOARD_H).max(0.4);
     let (outer, _) = ui.allocate_exact_size(Vec2::new(BOARD_W, BOARD_H) * s, Sense::hover());
     let painter = ui.painter_at(outer);
-    let pcb = Pcb { painter: &painter, tex, origin: outer.min, s };
+    let pcb = Pcb { painter: &painter, origin: outer.min, s };
     let mut input = BoardInput::default();
 
-    // ---- the photo
+    // ---- the drawing, rendered in physical pixels
+    let max = ui.ctx().input(|i| i.max_texture_side) as f32;
+    let px = (outer.size() * ui.ctx().pixels_per_point()).round();
+    let fit = (max / px.x.max(px.y)).min(1.0);
+    let size = [(px.x * fit).max(1.0) as u32, (px.y * fit).max(1.0) as u32];
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-    painter.add(
-        egui::epaint::RectShape::filled(outer, CornerRadius::same(pcb.len(CORNER) as u8), Color32::WHITE)
-            .with_texture(tex.photo.id(), uv),
-    );
+    painter.image(tex.board(ui.ctx(), size).id(), outer, uv, Color32::WHITE);
 
     // ---- display
     let quad = GLASS.map(|(x, y)| pcb.p(x, y));

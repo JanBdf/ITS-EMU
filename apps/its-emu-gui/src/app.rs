@@ -19,7 +19,7 @@ const NUCLEO_RED: Color32 = Color32::from_rgb(0xFF, 0x2A, 0x22);
 pub struct App {
     emu: EmuHandle,
     display: Option<egui::TextureHandle>,
-    /// Board photo; loaded in the first frame, when the maximum texture size is known.
+    /// Board drawing; rendered at the size it is shown at.
     board: Option<board::Textures>,
     display_generation: u64,
     /// Buttons S0..S7 latched by right click.
