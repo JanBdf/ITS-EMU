@@ -1,0 +1,13 @@
+[package]
+name = "itsboard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+stm32f429.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+emu-core.workspace = true
+png.workspace = true

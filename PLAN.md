@@ -146,8 +146,16 @@ Progress beyond the spike (Phase 2/3):
   unaligned peripheral accesses split like the core does.
 - `initITSboard()` reaches 180 MHz; LauflichtASM runs correctly (integration
   tests in `crates/stm32f429/tests/ac6_programs.rs`).
-- Next blocker for display programs: SPI1 + ILI9486 + XPT2046 (StoppuhrASM and
-  TestNewFont wait in the LCD SPI driver), then USART3 (initITSboard touches it).
+- Display path: SPI1 (RXNE/OVR exact), ILI9486 (GRAM, CASET/PASET/RAMWR,
+  MADCTL, B6 scan mirroring, panel mounting), XPT2046 touch (inverse of the
+  library's default calibration), TIM4 PWM backlight, ETH register stub.
+  TestNewFont and StoppuhrASM run correctly (golden-image and timing tests in
+  `crates/itsboard/tests/display.rs`). CLI: `--screenshot`, `--input`.
+- Next: USART3 (printf/scanf), then the GUI.
+- Performance gap: loops that poll time-dependent registers (TIM2 CNT) while
+  doing SPI output run at ~85 MIPS (about half real time). Idea: let timers
+  report when a read value changes next, so polling loops can be skipped to
+  that point.
 
 Findings:
 - Unicorn 2 contains QEMU's M-profile code but never calls its `do_interrupt`;

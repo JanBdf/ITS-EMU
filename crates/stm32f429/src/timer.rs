@@ -5,10 +5,16 @@
 //! interrupt, `CNT` reads/writes. Capture/compare, down/center-aligned counting
 //! and slave modes are not modelled yet (a warning is logged when used).
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use emu_core::bus::{extract_read, merge_write};
 use emu_core::{DeviceCtx, Peripheral};
 
 use crate::rcc::SharedClocks;
+
+/// Duty cycle (0.0–1.0) of each output channel in PWM mode, `None` otherwise.
+pub type SharedPwm = Rc<Cell<[Option<f32>; 4]>>;
 
 const PS_PER_S: u128 = 1_000_000_000_000;
 
@@ -35,6 +41,7 @@ pub struct GpTimer {
     bus: ApbBus,
     enable_bit: u32,
     clocks: SharedClocks,
+    pwm: SharedPwm,
 
     cr1: u32,
     cr2: u32,
@@ -67,6 +74,7 @@ impl GpTimer {
             bus,
             enable_bit,
             clocks,
+            pwm: SharedPwm::default(),
             cr1: 0,
             cr2: 0,
             smcr: 0,
@@ -98,6 +106,7 @@ impl GpTimer {
             bus: self.bus,
             enable_bit: self.enable_bit,
             clocks: self.clocks.clone(),
+            pwm: self.pwm.clone(),
             cr1: 0,
             cr2: 0,
             smcr: 0,
@@ -116,6 +125,34 @@ impl GpTimer {
             next_event: None,
             warned: false,
         };
+    }
+
+    /// Handle to the PWM duty cycles of the output channels.
+    pub fn pwm(&self) -> SharedPwm {
+        self.pwm.clone()
+    }
+
+    fn update_pwm(&self) {
+        let mut duty = [None; 4];
+        if self.running() {
+            for (ch, d) in duty.iter_mut().enumerate() {
+                let ccmr = self.ccmr[ch / 2] >> (8 * (ch % 2));
+                let mode = (ccmr >> 4) & 7;
+                let enabled = self.ccer & (1 << (4 * ch)) != 0;
+                if !enabled || !matches!(mode, 6 | 7) {
+                    continue;
+                }
+                let mut v = (f64::from(self.ccr[ch]) / (f64::from(self.arr_active) + 1.0)).clamp(0.0, 1.0) as f32;
+                if mode == 7 {
+                    v = 1.0 - v; // PWM mode 2
+                }
+                if self.ccer & (2 << (4 * ch)) != 0 {
+                    v = 1.0 - v; // active low
+                }
+                *d = Some(v);
+            }
+        }
+        self.pwm.set(duty);
     }
 
     fn max(&self) -> u32 {
@@ -279,6 +316,11 @@ impl Peripheral for GpTimer {
         self.name
     }
 
+    fn read_depends_on_time(&self, off: u32) -> bool {
+        // CNT and SR (update flag) advance on their own while the timer runs.
+        self.running() && matches!(off & !3, 0x10 | 0x24)
+    }
+
     fn read(&mut self, ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
         if !self.clock_enabled() {
             return 0;
@@ -356,6 +398,7 @@ impl Peripheral for GpTimer {
         }
         self.schedule(ctx);
         self.sync_irq(ctx);
+        self.update_pwm();
     }
 
     fn update(&mut self, ctx: &mut DeviceCtx) {
@@ -371,6 +414,7 @@ impl Peripheral for GpTimer {
 
     fn reset(&mut self) {
         self.reset_regs();
+        self.update_pwm();
     }
 }
 

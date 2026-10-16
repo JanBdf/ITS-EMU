@@ -208,6 +208,10 @@ impl Peripheral for Rcc {
         "RCC"
     }
 
+    fn read_depends_on_time(&self, _offset: u32) -> bool {
+        false
+    }
+
     fn read(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
         extract_read(self.reg(off & !3), off, size)
     }
@@ -288,6 +292,10 @@ impl Peripheral for Pwr {
         "PWR"
     }
 
+    fn read_depends_on_time(&self, _offset: u32) -> bool {
+        false
+    }
+
     fn read(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
         let reg = match off & !3 {
             0x0 => self.cr,
@@ -338,6 +346,10 @@ impl FlashInterface {
 impl Peripheral for FlashInterface {
     fn name(&self) -> &str {
         "FLASH"
+    }
+
+    fn read_depends_on_time(&self, _offset: u32) -> bool {
+        false
     }
 
     fn read(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
