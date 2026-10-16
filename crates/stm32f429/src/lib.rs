@@ -4,6 +4,7 @@ pub mod gpio;
 pub mod rcc;
 pub mod spi;
 pub mod timer;
+pub mod usart;
 
 use emu_core::{Bus, MachineConfig, MemoryMap};
 
@@ -11,6 +12,7 @@ use gpio::{GPIOA_BASE, GpioPort, NUM_PORTS, PORT_STRIDE, SharedGpio};
 use rcc::{FlashInterface, Pwr, Rcc, SharedClocks};
 use spi::{Spi, SpiSlot};
 use timer::{ApbBus, GpTimer, SharedPwm};
+use usart::{SharedSerial, Usart};
 
 pub const FLASH_BASE: u32 = 0x0800_0000;
 pub const FLASH_SIZE: u32 = 2 * 1024 * 1024;
@@ -52,6 +54,8 @@ pub struct Stm32f429 {
     pub spi1: SpiSlot,
     /// PWM outputs of TIM2..TIM5 (index 0 = TIM2).
     pub tim_pwm: [SharedPwm; 4],
+    /// USART3, connected to the ST-LINK virtual COM port on the Nucleo board.
+    pub usart3: SharedSerial,
 }
 
 /// Ethernet MAC/DMA registers: reads as idle, writes ignored. The LCD driver
@@ -80,6 +84,7 @@ pub fn build() -> (Bus, Stm32f429) {
     let mut bus = Bus::new();
 
     let spi1 = SpiSlot::default();
+    let usart3 = SharedSerial::default();
     let mut tim_pwm: Vec<SharedPwm> = Vec::new();
     let timers = [
         ("TIM2", 0x4000_0000, 28, true, 0),
@@ -92,6 +97,7 @@ pub fn build() -> (Bus, Stm32f429) {
         tim_pwm.push(t.pwm());
         bus.attach(base, 0x400, Box::new(t));
     }
+    bus.attach(0x4000_4800, 0x400, Box::new(Usart::new("USART3", 39, ApbBus::Apb1, 18, clocks.clone(), usart3.clone())));
     bus.attach(0x4000_7000, 0x400, Box::new(Pwr::new()));
     bus.attach(0x4001_3000, 0x400, Box::new(Spi::new("SPI1", 35, ApbBus::Apb2, 12, clocks.clone(), spi1.clone())));
     for i in 0..NUM_PORTS {
@@ -102,5 +108,5 @@ pub fn build() -> (Bus, Stm32f429) {
     bus.attach(0x4002_8000, 0x1400, Box::new(EthStub));
 
     let tim_pwm: [SharedPwm; 4] = tim_pwm.try_into().unwrap_or_else(|_| unreachable!());
-    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm })
+    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3 })
 }

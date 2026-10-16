@@ -1,55 +1,9 @@
 //! End-to-end tests of the board with course programs built by AC6.
 
-use emu_core::{ElfImage, Machine, StopReason};
-use itsboard::{ItsBoard, SCREEN_HEIGHT, SCREEN_WIDTH};
+mod common;
 
-const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/ac6");
-const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/golden");
-
-struct Sim {
-    machine: Machine,
-    board: ItsBoard,
-    image: ElfImage,
-}
-
-impl Sim {
-    /// Boots a fixture, or `None` if it is not available (personal lab solutions).
-    fn boot(name: &str) -> Option<Sim> {
-        let Ok(data) = std::fs::read(format!("{FIXTURES}/{name}")) else {
-            eprintln!("skipping: {name} not available (run tools/build-fixtures.sh)");
-            return None;
-        };
-        let image = ElfImage::parse(&data).unwrap();
-        let (bus, mcu) = stm32f429::build();
-        let board = ItsBoard::attach(&mcu);
-        let mut machine = Machine::new(stm32f429::machine_config(), bus).unwrap();
-        machine.load_elf(&image).unwrap();
-        machine.load_bin(0x0810_0000, &std::fs::read(format!("{FIXTURES}/fonts.bin")).unwrap()).unwrap();
-        machine.reset();
-        Some(Sim { machine, board, image })
-    }
-
-    fn run_until_ms(&mut self, ms: u64) {
-        let target = ms * 1_000_000;
-        while self.machine.clock().time_ns() < target {
-            let budget = self.machine.clock().ns_to_cycles(target - self.machine.clock().time_ns()).max(1);
-            assert_eq!(self.machine.run(budget), StopReason::Budget, "pc {:#x}", self.machine.pc());
-        }
-    }
-
-    fn screen(&self) -> Vec<u8> {
-        let mut rgba = vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
-        self.board.render_display(&mut rgba);
-        rgba
-    }
-
-    fn c_string(&self, symbol: &str, len: usize) -> String {
-        let addr = self.image.symbol(symbol).unwrap().addr;
-        let mut buf = vec![0u8; len];
-        assert!(self.machine.read_mem(addr, &mut buf));
-        String::from_utf8_lossy(&buf).trim_end_matches('\0').to_owned()
-    }
-}
+use common::{GOLDEN, Sim};
+use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
 /// Compares against a golden PNG; set UPDATE_GOLDEN=1 to (re)create it.
 fn assert_golden(name: &str, rgba: &[u8]) {

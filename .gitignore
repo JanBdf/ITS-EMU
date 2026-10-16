@@ -12,3 +12,5 @@
 !/tests/fixtures/ac6/TestNewFont.axf
 !/tests/fixtures/ac6/TestNewFontAssembler.axf
 !/tests/fixtures/ac6/TestStdinoutUSART.axf
+# own test programs (sources in tests/fixtures/ac6-src)
+!/tests/fixtures/ac6/SerialEcho.axf
