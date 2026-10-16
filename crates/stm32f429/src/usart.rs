@@ -87,7 +87,14 @@ pub struct Usart {
 }
 
 impl Usart {
-    pub fn new(name: &'static str, irq: u32, bus: ApbBus, enable_bit: u32, clocks: SharedClocks, port: SharedSerial) -> Self {
+    pub fn new(
+        name: &'static str,
+        irq: u32,
+        bus: ApbBus,
+        enable_bit: u32,
+        clocks: SharedClocks,
+        port: SharedSerial,
+    ) -> Self {
         Self {
             name,
             irq,
@@ -132,7 +139,8 @@ impl Usart {
         let mantissa = f64::from(self.brr >> 4);
         let fraction = f64::from(self.brr & 0xF);
         let pclk = f64::from(self.pclk());
-        let div = if self.cr1 & CR1_OVER8 != 0 { mantissa + (fraction.min(7.0)) / 8.0 } else { mantissa + fraction / 16.0 };
+        let div =
+            if self.cr1 & CR1_OVER8 != 0 { mantissa + (fraction.min(7.0)) / 8.0 } else { mantissa + fraction / 16.0 };
         let over = if self.cr1 & CR1_OVER8 != 0 { 8.0 } else { 16.0 };
         if div <= 0.0 { 0.0 } else { pclk / (over * div) }
     }

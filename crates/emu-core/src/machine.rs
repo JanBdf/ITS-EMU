@@ -751,7 +751,8 @@ impl Machine {
     pub fn write_mem(&mut self, addr: u32, data: &[u8]) -> bool {
         let mem = &self.uc.get_data().config.memory;
         let fb = mem.flash_base;
-        let in_flash = |a: u32| a >= fb && u64::from(a) + data.len() as u64 <= u64::from(fb) + u64::from(mem.flash_size);
+        let in_flash =
+            |a: u32| a >= fb && u64::from(a) + data.len() as u64 <= u64::from(fb) + u64::from(mem.flash_size);
         let ok = if in_flash(addr) {
             let off = (addr - fb) as usize;
             self.flash[off..off + data.len()].copy_from_slice(data);
@@ -779,11 +780,7 @@ impl Machine {
 
     /// Loads a raw binary at `addr` (e.g. the font table at 0x0810_0000).
     pub fn load_bin(&mut self, addr: u32, data: &[u8]) -> Result<(), MachineError> {
-        if self.write_mem(addr, data) {
-            Ok(())
-        } else {
-            Err(MachineError::SegmentOutOfRange { addr, len: data.len() })
-        }
+        if self.write_mem(addr, data) { Ok(()) } else { Err(MachineError::SegmentOutOfRange { addr, len: data.len() }) }
     }
 
     /// Resets the core and the system peripherals (memory contents are kept).
@@ -1003,8 +1000,8 @@ impl Machine {
     fn on_idle_return(&mut self) {
         let pc = self.pc();
         let mut prev = [0u8; 2];
-        let is_wait = self.read_mem(pc.wrapping_sub(2), &mut prev)
-            && matches!(u16::from_le_bytes(prev), 0xBF30 | 0xBF20); // WFI / WFE
+        let is_wait =
+            self.read_mem(pc.wrapping_sub(2), &mut prev) && matches!(u16::from_le_bytes(prev), 0xBF30 | 0xBF20); // WFI / WFE
         if is_wait {
             // Sleep until the next timed event.
             let sys = self.uc.get_data_mut();

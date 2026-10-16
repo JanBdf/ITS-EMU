@@ -206,7 +206,11 @@ impl GpTimer {
             return self.cnt_base;
         }
         let pos = u128::from(self.cnt_base) + ticks;
-        if pos <= u128::from(self.arr_active) { pos as u32 } else { ((pos - u128::from(self.arr_active) - 1) % self.period()) as u32 }
+        if pos <= u128::from(self.arr_active) {
+            pos as u32
+        } else {
+            ((pos - u128::from(self.arr_active) - 1) % self.period()) as u32
+        }
     }
 
     /// Re-anchors the lazy counter at `now_ps` with value `cnt`, keeping the

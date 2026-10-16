@@ -201,7 +201,10 @@ impl Client {
 /// Little-endian u32 from a hex reply.
 fn le_u32(hex: &str) -> u32 {
     let bytes: Vec<u8> = (0..4)
-        .map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2).unwrap_or("??"), 16).unwrap_or_else(|_| panic!("reply {hex:?}")))
+        .map(|i| {
+            u8::from_str_radix(hex.get(2 * i..2 * i + 2).unwrap_or("??"), 16)
+                .unwrap_or_else(|_| panic!("reply {hex:?}"))
+        })
         .collect();
     u32::from_le_bytes(bytes.try_into().unwrap())
 }

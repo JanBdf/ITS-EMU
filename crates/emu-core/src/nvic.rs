@@ -40,9 +40,10 @@ impl Bits {
         }
     }
     fn iter(&self) -> impl Iterator<Item = u32> + '_ {
-        self.0.iter().enumerate().flat_map(|(i, &w)| {
-            (0..32).filter(move |b| w & (1 << b) != 0).map(move |b| i as u32 * 32 + b)
-        })
+        self.0
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &w)| (0..32).filter(move |b| w & (1 << b) != 0).map(move |b| i as u32 * 32 + b))
     }
     fn any(&self) -> bool {
         self.0.iter().any(|&w| w != 0)
@@ -214,10 +215,7 @@ impl Nvic {
 
     /// Highest priority pending and enabled exception, regardless of masking.
     pub fn highest_pending(&self) -> Option<u32> {
-        self.pending
-            .iter()
-            .filter(|&e| self.is_enabled(e))
-            .min_by_key(|&e| (self.full_priority(e), e))
+        self.pending.iter().filter(|&e| self.is_enabled(e)).min_by_key(|&e| (self.full_priority(e), e))
     }
 
     /// The exception that preempts the current execution, if any.

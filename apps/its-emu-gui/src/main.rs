@@ -33,5 +33,9 @@ fn main() -> eframe::Result {
             .with_drag_and_drop(true),
         ..Default::default()
     };
-    eframe::run_native("ITS-Board Emulator", options, Box::new(|cc| Ok(Box::new(app::App::new(cc, args.firmware, (!args.no_gdb).then_some(args.gdb))))))
+    eframe::run_native(
+        "ITS-Board Emulator",
+        options,
+        Box::new(|cc| Ok(Box::new(app::App::new(cc, args.firmware, (!args.no_gdb).then_some(args.gdb))))),
+    )
 }

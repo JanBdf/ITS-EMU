@@ -77,7 +77,12 @@ impl Pcb<'_> {
         self.painter.rect_filled(self.r(x0, y0, x1, y1), CornerRadius::same(self.len(radius) as u8), fill);
     }
     fn outline(&self, x0: f32, y0: f32, x1: f32, y1: f32, color: Color32, width: f32) {
-        self.painter.rect_stroke(self.r(x0, y0, x1, y1), CornerRadius::ZERO, Stroke::new(self.len(width).max(1.0), color), StrokeKind::Middle);
+        self.painter.rect_stroke(
+            self.r(x0, y0, x1, y1),
+            CornerRadius::ZERO,
+            Stroke::new(self.len(width).max(1.0), color),
+            StrokeKind::Middle,
+        );
     }
     fn circle(&self, x: f32, y: f32, r: f32, fill: Color32) {
         self.painter.circle_filled(self.p(x, y), self.len(r), fill);
@@ -124,7 +129,11 @@ impl Pcb<'_> {
             self.circle(x - 2.0, y - 2.0, 2.2, Color32::from_white_alpha(60));
         }
         if latched {
-            self.painter.circle_stroke(self.p(x, y), self.len(13.5), Stroke::new(self.len(1.5).max(1.0), Color32::from_rgb(0xFF, 0xE0, 0x40)));
+            self.painter.circle_stroke(
+                self.p(x, y),
+                self.len(13.5),
+                Stroke::new(self.len(1.5).max(1.0), Color32::from_rgb(0xFF, 0xE0, 0x40)),
+            );
         }
     }
 }
@@ -208,7 +217,9 @@ pub fn show(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
         pcb.label(x, 356.0, format!("{name} {pin}").trim_end(), 7.5);
     }
     pcb.section(30.0, 378.0, 315.0, 462.0, "SPI3");
-    for (i, (name, pin)) in [("SPI3_CS", "PA15"), ("SPI3_MISO", "PC11"), ("SPI3_MOSI", "PC12"), ("SPI3_SCK", "PC10")].iter().enumerate() {
+    for (i, (name, pin)) in
+        [("SPI3_CS", "PA15"), ("SPI3_MISO", "PC11"), ("SPI3_MOSI", "PC12"), ("SPI3_SCK", "PC10")].iter().enumerate()
+    {
         let x = 70.0 + i as f32 * 68.0;
         pcb.pad(x, 418.0, 6.0);
         pcb.label(x, 436.0, name, 7.5);
@@ -257,7 +268,14 @@ pub fn show(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
         CornerRadius::ZERO,
         Color32::from_white_alpha(6),
     );
-    pcb.text(gx0, gy1 + 16.0, "4inch TFT Touch Shield  ·  480 × 320  ·  ILI9486 / XPT2046", 8.0, SILK.gamma_multiply(0.7), Align2::LEFT_CENTER);
+    pcb.text(
+        gx0,
+        gy1 + 16.0,
+        "4inch TFT Touch Shield  ·  480 × 320  ·  ILI9486 / XPT2046",
+        8.0,
+        SILK.gamma_multiply(0.7),
+        Align2::LEFT_CENTER,
+    );
 
     // ---- Aux (INT0..5 = PG0..5) and Analog
     pcb.section(330.0, 390.0, 500.0, 462.0, "Aux");
@@ -304,14 +322,19 @@ pub fn show(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
     pcb.section(40.0, 472.0, 640.0, 624.0, "Out");
     for bit in 0..16u32 {
         let x = out_x(bit);
-        let (color, pin) = if bit >= 8 { (LED_YELLOW, format!("PE{}", bit - 8)) } else { (LED_BLUE, format!("PD{bit}")) };
+        let (color, pin) =
+            if bit >= 8 { (LED_YELLOW, format!("PE{}", bit - 8)) } else { (LED_BLUE, format!("PD{bit}")) };
         pcb.label(x, 496.0, &format!("D{}", bit + 8), 8.5);
         pcb.led(x, 513.0, color, state.led_duty[bit as usize]);
         pcb.label(x, 533.0, &pin, 8.0);
         pcb.pad(x, 552.0, 7.5);
         pcb.label(x, 572.0, &format!("OUT{bit}"), 8.5);
         ui.interact(pcb.r(x - 15.0, 488.0, x + 15.0, 580.0), ui.scope_id().with(("out", bit)), Sense::hover())
-            .on_hover_text(format!("OUT{bit} = {pin} (LED D{}): {:.0} %", bit + 8, state.led_duty[bit as usize] * 100.0));
+            .on_hover_text(format!(
+                "OUT{bit} = {pin} (LED D{}): {:.0} %",
+                bit + 8,
+                state.led_duty[bit as usize] * 100.0
+            ));
     }
     pcb.pad(66.0, 602.0, 6.0);
     pcb.text(78.0, 602.0, "GND", 8.0, SILK, Align2::LEFT_CENTER);
@@ -338,17 +361,28 @@ pub fn show(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
     }
 
     // ---- Nucleo buttons (drawn last so their hit areas are on top)
-    let user = ui.interact(pcb.r(422.0, 80.0, 450.0, 108.0), ui.scope_id().with("user"), Sense::click_and_drag()).on_hover_text("USER button (PC13)");
+    let user = ui
+        .interact(pcb.r(422.0, 80.0, 450.0, 108.0), ui.scope_id().with("user"), Sense::click_and_drag())
+        .on_hover_text("USER button (PC13)");
     input.user = user.is_pointer_button_down_on();
     pcb.tact(436.0, 94.0, Color32::from_rgb(0x1F, 0x6F, 0xE5), input.user, false);
-    let reset = ui.interact(pcb.r(348.0, 80.0, 376.0, 108.0), ui.scope_id().with("reset"), Sense::click()).on_hover_text("RESET button");
+    let reset = ui
+        .interact(pcb.r(348.0, 80.0, 376.0, 108.0), ui.scope_id().with("reset"), Sense::click())
+        .on_hover_text("RESET button");
     input.reset_clicked = reset.clicked();
     pcb.tact(362.0, 94.0, Color32::from_gray(25), reset.is_pointer_button_down_on(), false);
 
     // ---- touch on the display glass
-    let touch = ui.interact(glass, ui.scope_id().with("display"), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::Crosshair);
+    let touch = ui
+        .interact(glass, ui.scope_id().with("display"), Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::Crosshair);
     let to_px = |p: Pos2| ((p.x - glass.min.x) / glass.width() * 480.0, (p.y - glass.min.y) / glass.height() * 320.0);
-    input.touch = touch.is_pointer_button_down_on().then(|| touch.interact_pointer_pos()).flatten().filter(|p| glass.contains(*p)).map(to_px);
+    input.touch = touch
+        .is_pointer_button_down_on()
+        .then(|| touch.interact_pointer_pos())
+        .flatten()
+        .filter(|p| glass.contains(*p))
+        .map(to_px);
     if let Some((x, y)) = input.touch.or_else(|| touch.hover_pos().map(to_px)) {
         touch.on_hover_text_at_pointer(format!("x = {:.0}, y = {:.0}", x.floor(), y.floor()));
     }
