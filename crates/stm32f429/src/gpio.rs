@@ -45,6 +45,11 @@ pub struct PortState {
     /// Number of rising edges per pin caused by output writes. Lets devices
     /// detect pulses (e.g. chip-select frames) between two of their accesses.
     pub rises: [u32; 16],
+    /// Time-averaged levels: cycles each pin was high since `duty_since`,
+    /// accounted up to `duty_last` (used for LED brightness).
+    high_cycles: [u64; 16],
+    duty_since: u64,
+    duty_last: u64,
 }
 
 impl PortState {
@@ -98,8 +103,41 @@ impl PortState {
         }
     }
 
+    /// Accounts the time since the last change to the pins that are high.
+    fn accumulate(&mut self, now: u64) {
+        let dt = now.saturating_sub(self.duty_last);
+        if dt > 0 {
+            let levels = self.idr();
+            for (pin, high) in self.high_cycles.iter_mut().enumerate() {
+                if levels & (1 << pin) != 0 {
+                    *high += dt;
+                }
+            }
+        }
+        self.duty_last = now;
+    }
+
+    /// Fraction of time each pin was high since the previous call (or reset).
+    fn take_duty(&mut self, now: u64) -> [f32; 16] {
+        self.accumulate(now);
+        let window = now.saturating_sub(self.duty_since);
+        let levels = self.idr();
+        let mut duty = [0.0; 16];
+        for (pin, d) in duty.iter_mut().enumerate() {
+            *d = if window == 0 {
+                if levels & (1 << pin) != 0 { 1.0 } else { 0.0 }
+            } else {
+                (self.high_cycles[pin] as f64 / window as f64) as f32
+            };
+        }
+        self.high_cycles = [0; 16];
+        self.duty_since = now;
+        duty
+    }
+
     /// Changes ODR and counts rising edges of the resulting pin levels.
-    fn set_odr(&mut self, odr: u32) {
+    fn set_odr(&mut self, odr: u32, now: u64) {
+        self.accumulate(now);
         let before = self.idr();
         self.odr = odr & 0xFFFF;
         let rising = self.idr() & !before;
@@ -146,6 +184,12 @@ impl GpioBank {
 
     pub fn level(&self, port: usize, pin: u32) -> bool {
         self.ports[port].level(pin)
+    }
+
+    /// Fraction of time (0.0–1.0) each pin of `port` was high since the
+    /// previous call. `now` is the current cycle count.
+    pub fn take_duty(&mut self, port: usize, now: u64) -> [f32; 16] {
+        self.ports[port].take_duty(now)
     }
 
     /// Rising edges of a pin caused by output writes since reset (wrapping).
@@ -218,7 +262,8 @@ impl Peripheral for GpioPort {
         extract_read(reg, off, size)
     }
 
-    fn write(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32, value: u32) {
+    fn write(&mut self, ctx: &mut DeviceCtx, off: u32, size: u32, value: u32) {
+        let now = ctx.now();
         if !self.clock_enabled() {
             return;
         }
@@ -231,14 +276,14 @@ impl Peripheral for GpioPort {
             0x0C => p.pupdr = merge_write(p.pupdr, off, size, value),
             0x14 => {
                 let odr = merge_write(p.odr, off, size, value);
-                p.set_odr(odr);
+                p.set_odr(odr, now);
             }
             0x18 => {
                 // Narrow writes only touch their own bits; the rest is zero.
                 let v = merge_write(0, off, size, value);
                 let set = v & 0xFFFF;
                 let reset = v >> 16;
-                p.set_odr((p.odr & !reset) | set); // set wins over reset
+                p.set_odr((p.odr & !reset) | set, now); // set wins over reset
             }
             0x1C => p.lckr = merge_write(p.lckr, off, size, value) & 0x1_FFFF,
             0x20 => p.afr[0] = merge_write(p.afr[0], off, size, value),
@@ -295,6 +340,25 @@ mod tests {
         assert_eq!(gpio.read(&mut ctx, 0x10, 4) & 0xFF, 0xFF);
         bank.borrow_mut().drive(port('F'), 3, Some(false)); // S3 pressed
         assert_eq!(gpio.read(&mut ctx, 0x10, 4) & 0xFF, 0xF7);
+    }
+
+    #[test]
+    fn duty_cycle_of_a_toggled_pin() {
+        let (mut gpio, bank) = setup(port('D'));
+        let mut clock = Clock::new(1);
+        let mut nvic = Nvic::new();
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        gpio.write(&mut ctx, 0x00, 4, 0x1); // PD0 output
+        bank.borrow_mut().take_duty(port('D'), 0);
+        for _ in 0..10 {
+            gpio.write(&mut ctx, 0x18, 4, 1); // on for 25 cycles
+            ctx.clock.advance(25);
+            gpio.write(&mut ctx, 0x18, 4, 1 << 16); // off for 75 cycles
+            ctx.clock.advance(75);
+        }
+        let duty = bank.borrow_mut().take_duty(port('D'), ctx.now());
+        assert!((duty[0] - 0.25).abs() < 1e-6, "{}", duty[0]);
+        assert_eq!(duty[1], 0.0);
     }
 
     #[test]

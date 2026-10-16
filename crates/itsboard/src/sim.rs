@@ -55,6 +55,11 @@ impl Simulator {
         StopReason::Budget
     }
 
+    /// See [`ItsBoard::take_led_duty`].
+    pub fn take_led_duty(&self) -> crate::LedDuty {
+        self.board.take_led_duty(self.machine.clock().cycles())
+    }
+
     /// Presses the reset button: the MCU restarts, flash content stays.
     pub fn reset(&mut self) {
         self.machine.reset();
