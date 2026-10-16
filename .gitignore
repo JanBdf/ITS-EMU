@@ -1,0 +1,14 @@
+/target
+*.o
+
+# Personal files — not for publication
+/hardware_img/
+# AC6 builds of my own lab solutions (tools/build-fixtures.sh regenerates them).
+# Only the course demo programs (BSD-2, HAW Hamburg) are published.
+/tests/fixtures/ac6/*
+!/tests/fixtures/ac6/README.md
+!/tests/fixtures/ac6/fonts.bin
+!/tests/fixtures/ac6/Stack.axf
+!/tests/fixtures/ac6/TestNewFont.axf
+!/tests/fixtures/ac6/TestNewFontAssembler.axf
+!/tests/fixtures/ac6/TestStdinoutUSART.axf
