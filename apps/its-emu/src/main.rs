@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use emu_core::gdb::{Execution, GdbServer};
 use emu_core::{CoreReg, ElfImage, Machine, StopReason};
 
 #[derive(Parser, Debug)]
@@ -21,9 +22,10 @@ struct Args {
     #[arg(long, conflicts_with = "fonts")]
     no_fonts: bool,
 
-    /// Stop after this many seconds of virtual time (0 = no limit)
-    #[arg(long, default_value_t = 10.0)]
-    seconds: f64,
+    /// Stop after this many seconds of virtual time (0 = no limit).
+    /// Default: 10, no limit with --gdb
+    #[arg(long)]
+    seconds: Option<f64>,
 
     /// Report and step over `BKPT #n` with n != 0 instead of stopping
     /// (`BKPT #0` always stops)
@@ -52,7 +54,15 @@ struct Args {
     /// Forward the terminal's standard input to the virtual COM port
     #[arg(long)]
     stdin: bool,
+
+    /// Start a GDB server (default address 127.0.0.1:3333) and wait for a
+    /// debugger before running. Use `--gdb 0.0.0.0:3333` to accept remote clients
+    #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:3333")]
+    gdb: Option<String>,
 }
+
+/// Virtual time slice while a debugger is attached (Ctrl-C latency).
+const GDB_SLICE_NS: u64 = 1_000_000;
 
 
 #[derive(Debug, Clone)]
@@ -129,7 +139,17 @@ fn main() -> Result<()> {
     let mcu = board.mcu().clone();
     machine.system_mut().idle_skipping = !args.no_idle_skip;
 
-    let limit_ns = if args.seconds > 0.0 { (args.seconds * 1e9) as u64 } else { u64::MAX };
+    let mut gdb = match &args.gdb {
+        Some(addr) => {
+            let server = GdbServer::bind(addr.as_str()).with_context(|| format!("starting GDB server on {addr}"))?;
+            println!("waiting for GDB on {} (target remote {0})", server.local_addr()?);
+            Some(server)
+        }
+        None => None,
+    };
+    let seconds = args.seconds.unwrap_or(if gdb.is_some() { 0.0 } else { 10.0 });
+    let limit_ns = if seconds > 0.0 { (seconds * 1e9) as u64 } else { u64::MAX };
+    let mut waiting_for_debugger = gdb.is_some();
     let stdin_rx = args.stdin.then(spawn_stdin_reader);
     let mut inputs = args.input.clone().map(|s| s.0).unwrap_or_default().into_iter().peekable();
     let start = Instant::now();
@@ -144,15 +164,39 @@ fn main() -> Result<()> {
             log::info!("input at {:.3} s: {:?}", now_ns as f64 / 1e9, ev.input);
             apply_input(&board, &ev.input);
         }
+        let execution = match &mut gdb {
+            Some(server) => {
+                let e = server.poll(&mut machine);
+                waiting_for_debugger &= !server.has_controller();
+                if waiting_for_debugger { Execution::Halted } else { e }
+            }
+            None => Execution::Free,
+        };
+        if execution == Execution::Halted {
+            forward_serial(&mcu, stdin_rx.as_ref());
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
+        }
+        let clock = machine.clock();
         let mut slice_ns = if args.realtime { REALTIME_SLICE_NS } else { limit_ns - now_ns }.min(limit_ns - now_ns);
+        if gdb.is_some() {
+            slice_ns = slice_ns.min(GDB_SLICE_NS);
+        }
         if let Some(ev) = inputs.peek() {
             slice_ns = slice_ns.min(ev.at_ns - now_ns);
         }
         let budget = clock.ns_to_cycles(slice_ns).max(1);
         let result = machine.run(budget);
         forward_serial(&mcu, stdin_rx.as_ref());
+        if execution == Execution::Running {
+            // The debugger decides what happens after a stop.
+            gdb.as_mut().unwrap().report_stop(&mut machine, &result);
+            continue;
+        }
         match result {
             StopReason::Budget => {}
+            // Left over from a detached debugger.
+            StopReason::DebugBreakpoint { .. } | StopReason::Step | StopReason::Watchpoint { .. } => {}
             StopReason::Breakpoint { pc } if args.continue_on_bkpt && bkpt_imm(&machine, pc) != 0 => {
                 bkpts += 1;
                 report_progress(&machine, &image, start, &format!("BKPT #{bkpts} at {}", describe(&image, pc)));
@@ -172,7 +216,9 @@ fn main() -> Result<()> {
         None => "time limit reached".to_owned(),
         Some(StopReason::Breakpoint { pc }) => format!("BKPT at {}", describe(&image, pc)),
         Some(StopReason::Lockup { pc, reason }) => format!("LOCKUP at {}: {reason}", describe(&image, pc)),
-        Some(StopReason::Budget) => unreachable!(),
+        Some(StopReason::Budget | StopReason::DebugBreakpoint { .. } | StopReason::Step | StopReason::Watchpoint { .. }) => {
+            unreachable!()
+        }
     };
     report_progress(&machine, &image, start, &what);
     report_board(&board);

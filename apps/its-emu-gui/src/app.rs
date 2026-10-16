@@ -85,9 +85,9 @@ fn save_png(path: &std::path::Path, img: &egui::ColorImage) -> anyhow::Result<()
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext, firmware: Option<PathBuf>) -> Self {
+    pub fn new(cc: &eframe::CreationContext, firmware: Option<PathBuf>, gdb_addr: Option<String>) -> Self {
         let ctx = cc.egui_ctx.clone();
-        let emu = emu::spawn(move || ctx.request_repaint());
+        let emu = emu::spawn(move || ctx.request_repaint(), gdb_addr);
         if let Some(path) = firmware {
             emu.send(Command::Load(path));
         }
@@ -121,7 +121,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
 
         // ---- take the latest snapshot
-        let (state, firmware, led_duty, inputs, nucleo_duty, virtual_ns, core_mhz, speed) = {
+        let (state, firmware, led_duty, inputs, nucleo_duty, virtual_ns, core_mhz, speed, gdb) = {
             let mut snap = self.emu.snapshot.lock().unwrap();
             if snap.display_generation != self.display_generation {
                 self.display_generation = snap.display_generation;
@@ -149,6 +149,7 @@ impl eframe::App for App {
                 snap.virtual_ns,
                 snap.core_mhz,
                 snap.speed,
+                (snap.gdb.clone(), snap.gdb_attached),
             )
         };
 
@@ -184,6 +185,7 @@ impl eframe::App for App {
                     RunState::NoFirmware => ("no firmware loaded — open an .axf file".to_owned(), ui.visuals().weak_text_color()),
                     RunState::Running => ("running".to_owned(), OK_GREEN),
                     RunState::Paused => ("paused".to_owned(), Color32::YELLOW),
+                    RunState::Halted => ("halted by debugger".to_owned(), Color32::YELLOW),
                     RunState::Stopped(why) => (format!("stopped: {why}"), ERR_RED),
                     RunState::Error(e) => (e.clone(), ERR_RED),
                 };
@@ -198,6 +200,12 @@ impl eframe::App for App {
                 ui.label(format!("{core_mhz} MHz"));
                 ui.separator();
                 ui.label(format!("{speed:.2}× real time"));
+                ui.separator();
+                match &gdb {
+                    (Ok(addr), true) => ui.label(RichText::new(format!("GDB attached ({addr})")).color(OK_GREEN)),
+                    (Ok(addr), false) => ui.label(format!("GDB: {addr}")),
+                    (Err(e), _) => ui.label(RichText::new(format!("GDB: {e}")).color(ui.visuals().weak_text_color())),
+                };
             });
         });
 

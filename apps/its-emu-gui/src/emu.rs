@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use emu_core::StopReason;
+use emu_core::gdb::{Execution, GdbServer};
 use itsboard::sim::DEFAULT_FONTS;
 use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH, Simulator};
 
@@ -39,6 +40,8 @@ pub enum RunState {
     NoFirmware,
     Running,
     Paused,
+    /// A debugger (GDB) halted the core.
+    Halted,
     /// The core stopped (breakpoint, lockup); reset to continue.
     Stopped(String),
     Error(String),
@@ -63,6 +66,10 @@ pub struct Snapshot {
     pub speed: f64,
     /// Serial output not yet taken by the UI.
     pub serial: Vec<u8>,
+    /// GDB server address, or why it is not available.
+    pub gdb: Result<String, String>,
+    /// A debugger is connected.
+    pub gdb_attached: bool,
 }
 
 impl Default for Snapshot {
@@ -82,6 +89,8 @@ impl Default for Snapshot {
             core_mhz: 0,
             speed: 0.0,
             serial: Vec::new(),
+            gdb: Err("off".into()),
+            gdb_attached: false,
         }
     }
 }
@@ -109,14 +118,15 @@ impl Drop for EmuHandle {
     }
 }
 
-/// Starts the emulator thread. `repaint` is called whenever the snapshot changed.
-pub fn spawn(repaint: impl Fn() + Send + 'static) -> EmuHandle {
+/// Starts the emulator thread. `repaint` is called whenever the snapshot
+/// changed. With `gdb_addr`, a GDB server listens there.
+pub fn spawn(repaint: impl Fn() + Send + 'static, gdb_addr: Option<String>) -> EmuHandle {
     let (tx, rx) = channel();
     let snapshot = SharedSnapshot::default();
     let shared = snapshot.clone();
     let thread = std::thread::Builder::new()
         .name("emulator".into())
-        .spawn(move || Worker::new(rx, shared, Box::new(repaint)).run())
+        .spawn(move || Worker::new(rx, shared, Box::new(repaint), gdb_addr).run())
         .expect("spawn emulator thread");
     EmuHandle { commands: tx, snapshot, thread: Some(thread) }
 }
@@ -143,11 +153,34 @@ struct Worker {
     /// External inputs, re-applied when new firmware is loaded.
     buttons: [bool; 8],
     ints: [Option<bool>; 6],
+    gdb: Option<GdbServer>,
+    gdb_status: Result<String, String>,
+    /// How the debugger wants the core to run (`Free` without debugger).
+    execution: Execution,
 }
 
 impl Worker {
-    fn new(commands: Receiver<Command>, snapshot: SharedSnapshot, repaint: Box<dyn Fn() + Send>) -> Self {
+    fn new(
+        commands: Receiver<Command>,
+        snapshot: SharedSnapshot,
+        repaint: Box<dyn Fn() + Send>,
+        gdb_addr: Option<String>,
+    ) -> Self {
         let now = Instant::now();
+        let (gdb, gdb_status) = match gdb_addr {
+            None => (None, Err("off".to_owned())),
+            Some(addr) => match GdbServer::bind(addr.as_str()) {
+                Ok(server) => {
+                    let addr = server.local_addr().map_or(addr, |a| a.to_string());
+                    log::info!("GDB server on {addr}");
+                    (Some(server), Ok(addr))
+                }
+                Err(e) => {
+                    log::warn!("cannot start GDB server on {addr}: {e}");
+                    (None, Err(format!("{addr}: {e}")))
+                }
+            },
+        };
         Self {
             commands,
             snapshot,
@@ -163,6 +196,9 @@ impl Worker {
             published_generation: u64::MAX,
             buttons: [false; 8],
             ints: [None; 6],
+            gdb,
+            gdb_status,
+            execution: Execution::Free,
         }
     }
 
@@ -177,8 +213,10 @@ impl Worker {
 
     fn run(mut self) {
         loop {
-            // While not running, block on the command queue.
-            let wait = if self.state == RunState::Running { Duration::ZERO } else { Duration::from_millis(50) };
+            // While not running, block on the command queue (shortly while a
+            // debugger may send packets).
+            let idle_wait = if self.gdb.is_some() { Duration::from_millis(5) } else { Duration::from_millis(50) };
+            let wait = if self.state == RunState::Running { Duration::ZERO } else { idle_wait };
             match self.commands.recv_timeout(wait) {
                 Ok(Command::Quit) | Err(RecvTimeoutError::Disconnected) => return,
                 Ok(cmd) => {
@@ -192,6 +230,7 @@ impl Worker {
                 }
                 Err(RecvTimeoutError::Timeout) => {}
             }
+            self.poll_gdb();
             if self.state == RunState::Running {
                 self.step();
             }
@@ -239,6 +278,28 @@ impl Worker {
         self.publish(true);
     }
 
+    /// Lets the debugger talk to the target and follows its run/halt requests.
+    fn poll_gdb(&mut self) {
+        let (Some(gdb), Some(sim)) = (&mut self.gdb, &mut self.sim) else { return };
+        let execution = gdb.poll(&mut sim.machine);
+        let changed = execution != self.execution;
+        self.execution = execution;
+        match execution {
+            // Also after a reset from the UI: the debugger keeps the core halted.
+            Execution::Halted if self.state == RunState::Running => self.state = RunState::Halted,
+            Execution::Halted => return,
+            Execution::Running | Execution::Free if changed => {
+                // Continuing or detaching resumes the core, as on the real board.
+                if matches!(self.state, RunState::Halted | RunState::Paused | RunState::Stopped(_)) {
+                    self.state = RunState::Running;
+                    self.reanchor();
+                }
+            }
+            Execution::Running | Execution::Free => return,
+        }
+        self.publish(true);
+    }
+
     fn with_board(&mut self, f: impl FnOnce(&itsboard::ItsBoard)) {
         if let Some(sim) = &self.sim {
             f(&sim.board);
@@ -275,8 +336,16 @@ impl Worker {
     fn step(&mut self) {
         let Some(sim) = &mut self.sim else { return };
         let stop = sim.run_for_ns(SLICE.as_nanos() as u64);
+        if self.execution == Execution::Running {
+            // The debugger decides what happens after a stop.
+            if let Some(gdb) = &mut self.gdb {
+                gdb.report_stop(&mut sim.machine, &stop);
+            }
+            self.pace();
+            return;
+        }
         match stop {
-            StopReason::Budget => {}
+            StopReason::Budget | StopReason::DebugBreakpoint { .. } | StopReason::Step | StopReason::Watchpoint { .. } => {}
             StopReason::Breakpoint { pc } => {
                 self.state = RunState::Stopped(format!("BKPT at {}", sim.describe_pc(pc)));
             }
@@ -284,6 +353,11 @@ impl Worker {
                 self.state = RunState::Stopped(format!("core locked up at {}: {reason}", sim.describe_pc(pc)));
             }
         }
+        self.pace();
+    }
+
+    /// Keeps virtual time in step with the wall clock.
+    fn pace(&mut self) {
         if let Speed::Factor(f) = self.speed {
             let (wall0, virt0) = self.anchor;
             let virtual_elapsed = Duration::from_nanos(self.virtual_ns() - virt0).as_secs_f64();
@@ -316,6 +390,8 @@ impl Worker {
         snap.state = self.state.clone();
         snap.virtual_ns = virt;
         snap.speed = if self.state == RunState::Running { self.measured_speed } else { 0.0 };
+        snap.gdb = self.gdb_status.clone();
+        snap.gdb_attached = self.gdb.as_ref().is_some_and(GdbServer::has_controller);
         if let Some(sim) = &self.sim {
             let b = &sim.board;
             let generation = b.display_generation() ^ (b.backlight().to_bits() as u64);

@@ -13,6 +13,14 @@ use clap::Parser;
 struct Args {
     /// Firmware image (.axf / .elf) to start with
     firmware: Option<PathBuf>,
+
+    /// Address of the GDB server (`target remote` in GDB / port in the VS Code debug configuration)
+    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:3333")]
+    gdb: String,
+
+    /// Do not start the GDB server
+    #[arg(long)]
+    no_gdb: bool,
 }
 
 fn main() -> eframe::Result {
@@ -25,5 +33,5 @@ fn main() -> eframe::Result {
             .with_drag_and_drop(true),
         ..Default::default()
     };
-    eframe::run_native("ITS-Board Emulator", options, Box::new(|cc| Ok(Box::new(app::App::new(cc, args.firmware)))))
+    eframe::run_native("ITS-Board Emulator", options, Box::new(|cc| Ok(Box::new(app::App::new(cc, args.firmware, (!args.no_gdb).then_some(args.gdb))))))
 }

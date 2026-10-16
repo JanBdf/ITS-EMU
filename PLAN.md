@@ -137,7 +137,7 @@ unmapped memory raises a BusFault. HardFaults produce a readable report
 | 2 | Unicorn runs Thumb code from ELF | ✅ `emu-core` + clang-built fixtures (`tests/fixtures/micro`) |
 | 3 | Exceptions + SysTick | ✅ SysTick IRQ, SVC, STIR/NVIC IRQ, BusFault with BFAR and handler return, extended FP frame (mutation-tested) |
 | 4 | Throughput | ✅ Linux x86-64 (release): ~300–380 MIPS compute-bound, ~100 MIPS in tight MMIO polling loops. Idle loops (`HAL_Delay`) are fast-forwarded: LauflichtASM runs ~200× faster than real time. Windows/macOS not measured yet (needs CI). |
-| 5 | GDB stub | open |
+| 5 | GDB stub | ✅ `emu_core::gdb` (feature `gdb`): gdbstub target + non-blocking multi-client server in GUI and CLI; tested with GDB 18.1 against micro fixture and AC6 programs |
 
 Progress beyond the spike (Phase 2/3):
 - RCC (clock tree → virtual core clock), PWR (over-drive handshake), flash
@@ -161,8 +161,15 @@ Progress beyond the spike (Phase 2/3):
   with LEDs/buttons/display/touch, Nucleo LEDs/USER/RESET, serial console,
   pause/reset/speed, drag & drop; adaptive layout. `ITS_EMU_GUI_SCREENSHOT`
   saves a picture of the window for docs/CI.
-- Next candidates: GDB stub (Phase 7), CI on Linux/Windows/macOS, LICENSE
-  file before publishing.
+- GDB (Phase 7): breakpoints (Unicorn exits), single step, write/read/access
+  watchpoints, registers incl. d0–d15/FPSCR and MSP/PSP/PRIMASK/BASEPRI/
+  FAULTMASK/CONTROL, memory incl. flash and peripherals, `monitor reset
+  [halt]`, Ctrl-C. Several clients: the first controls execution, further
+  ones (CDT `auxiliaryGdb` live watch) observe. VS Code attach still to be
+  tried with the real CDT adapter.
+- Next candidates: CI on Linux/Windows/macOS, LICENSE file before publishing,
+  reloading the firmware in the GUI when the `.axf` changes (rebuild while
+  debugging), `load` over GDB.
 - Polling loops: peripherals report until when a read value stays the same
   (`Peripheral::read_stable_until`), so loops polling a prescaled timer or
   SysTick are skipped in whole iterations up to the next counter change.
@@ -173,6 +180,19 @@ Progress beyond the spike (Phase 2/3):
   so polling it cannot be skipped.
 
 Findings:
+- Breakpoints use Unicorn *exits* (`ctl_exits_enable`/`ctl_set_exits`): checked
+  per instruction at translation time, so they cost nothing at run time. A run
+  that starts at an exit stops immediately, so resuming steps over it first.
+  TBs around a changed breakpoint must be invalidated (`ctl_remove_cache`).
+- Single step = `emu_start(count = 1)`; Unicorn drops its count hook (and
+  flushes all TBs) on the next normal run. The block hook may fire twice in a
+  step (branch), so `step` accounts the cycle itself.
+- Watchpoints: memory hooks fire before the access; `emu_stop` only takes
+  effect at the next TB, but Unicorn checks for stop requests after every code
+  hook. A code hook on all instructions (only while watchpoints exist) stops
+  right after the accessing instruction.
+- CDT's `auxiliaryGdb` opens a second `target remote` to the same port while
+  the first session is connected; the session fails if the server refuses it.
 - Unicorn 2 contains QEMU's M-profile code but never calls its `do_interrupt`;
   exception entry **and** return are implemented in Rust (`exception.rs`), driven
   by Unicorn's interrupt hook (`intno 8` = EXC_RETURN, `2` = SVC, `7` = BKPT, …).

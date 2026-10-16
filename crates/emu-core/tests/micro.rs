@@ -1,6 +1,6 @@
 //! Runs the clang-built self-test firmware in `tests/fixtures/micro`.
 
-use emu_core::{Bus, ElfImage, Machine, MachineConfig, MemoryMap, StopReason};
+use emu_core::{Bus, ElfImage, Machine, MachineConfig, MemoryMap, StopReason, WatchKind};
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!("{}/../../tests/fixtures/micro/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -92,4 +92,90 @@ fn debug_probe() {
             m.reg(emu_core::CoreReg::Control),
         );
     }
+}
+
+fn boot_exceptions() -> (Machine, ElfImage) {
+    let image = ElfImage::parse(&fixture("exceptions.elf")).unwrap();
+    let mut m = Machine::new(stm32f4_config(), Bus::new()).unwrap();
+    m.load_elf(&image).unwrap();
+    m.reset();
+    (m, image)
+}
+
+#[test]
+fn breakpoint_in_interrupt_handler() {
+    let (mut m, image) = boot_exceptions();
+    let results = image.symbol("results").unwrap().addr;
+    let handler = image.symbol("SysTick_Handler").unwrap().addr & !1;
+    // Run first, so that the handler is already translated when the breakpoint is set.
+    assert_eq!(m.run(50_000), StopReason::Budget);
+    m.add_breakpoint(handler);
+
+    assert_eq!(m.run(10_000_000), StopReason::DebugBreakpoint { pc: handler });
+    assert_eq!(m.pc(), handler);
+    let ticks = m.read_u32(results + 4).unwrap();
+    // Resuming executes the handler once and stops at its next invocation.
+    assert_eq!(m.run(10_000_000), StopReason::DebugBreakpoint { pc: handler });
+    assert_eq!(m.read_u32(results + 4).unwrap(), ticks + 1);
+
+    m.remove_breakpoint(handler);
+    assert!(matches!(m.run(10_000_000), StopReason::Breakpoint { .. }), "runs to the final BKPT");
+    assert_eq!(m.read_u32(results + 40), Some(1), "done");
+}
+
+#[test]
+fn single_step_executes_one_instruction() {
+    let (mut m, image) = boot_exceptions();
+    let entry = image.symbol("Reset_Handler").unwrap().addr & !1;
+    assert_eq!(m.pc(), entry);
+    let mut pcs = vec![m.pc()];
+    for i in 0..20 {
+        let cycles = m.clock().cycles();
+        assert_eq!(m.step(), StopReason::Step);
+        assert_eq!(m.clock().cycles(), cycles + 1, "step {i}");
+        pcs.push(m.pc());
+    }
+    // Running to a breakpoint at the 21st PC takes the same path.
+    let (mut r, _) = boot_exceptions();
+    r.add_breakpoint(pcs[20]);
+    assert_eq!(r.run(1_000_000), StopReason::DebugBreakpoint { pc: pcs[20] });
+    // Stepping from a breakpoint executes the instruction there.
+    assert_eq!(r.step(), StopReason::Step);
+    assert_ne!(r.pc(), pcs[20]);
+    assert_eq!(r.breakpoints().collect::<Vec<_>>(), vec![pcs[20]]);
+    // Normal execution works again afterwards (Unicorn's count hook is dropped).
+    r.remove_breakpoint(pcs[20]);
+    assert!(matches!(r.run(10_000_000), StopReason::Breakpoint { .. }));
+}
+
+#[test]
+fn write_watchpoint_stops_after_the_store() {
+    let (mut m, image) = boot_exceptions();
+    let ticks = image.symbol("results").unwrap().addr + 4;
+    let handler = image.symbol("SysTick_Handler").unwrap();
+    assert_eq!(m.run(50_000), StopReason::Budget);
+    assert!(m.add_watchpoint(ticks, 4, WatchKind::Write));
+    for _ in 0..3 {
+        let before = m.read_u32(ticks).unwrap();
+        let stop = m.run(10_000_000);
+        assert!(
+            matches!(stop, StopReason::Watchpoint { addr, kind: WatchKind::Write, .. } if addr == ticks),
+            "{stop:?}"
+        );
+        assert_eq!(m.read_u32(ticks).unwrap(), before + 1, "the store has completed");
+        let pc = m.pc();
+        assert!((handler.addr & !1..(handler.addr & !1) + handler.size).contains(&pc), "pc {pc:#x}");
+    }
+    // Reads do not trigger a write watchpoint; removing it lets the program finish.
+    assert!(m.remove_watchpoint(ticks, 4, WatchKind::Write));
+    assert!(matches!(m.run(10_000_000), StopReason::Breakpoint { .. }));
+}
+
+#[test]
+fn breakpoint_at_current_pc_does_not_block_run() {
+    let (mut m, _) = boot_exceptions();
+    let pc = m.pc();
+    m.add_breakpoint(pc);
+    assert_eq!(m.run(1_000), StopReason::Budget);
+    assert!(m.clock().cycles() >= 1_000);
 }
