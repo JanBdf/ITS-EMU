@@ -85,6 +85,15 @@ impl SpiDevice for Spi1Router {
     }
 }
 
+/// Time-averaged LED brightness, see [`ItsBoard::take_led_duty`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LedDuty {
+    /// OUT0..OUT15
+    pub out: [f32; 16],
+    /// LD1 (green), LD2 (blue), LD3 (red)
+    pub nucleo: [f32; 3],
+}
+
 pub struct ItsBoard {
     mcu: Stm32f429,
     lcd: Rc<RefCell<Ili9486>>,
@@ -153,6 +162,20 @@ impl ItsBoard {
     pub fn nucleo_leds(&self) -> [bool; 3] {
         let g = self.mcu.gpio.borrow();
         [g.level(port('B'), 0), g.level(port('B'), 7), g.level(port('B'), 14)]
+    }
+
+    /// Average brightness (0.0–1.0) of OUT0–15 and of the Nucleo LEDs
+    /// LD1–LD3 since the previous call; `now` is the current cycle count.
+    /// Shows PWM-dimmed or multiplexed LEDs the way the eye sees them.
+    pub fn take_led_duty(&self, now: u64) -> LedDuty {
+        let mut g = self.mcu.gpio.borrow_mut();
+        let d = g.take_duty(port('D'), now);
+        let e = g.take_duty(port('E'), now);
+        let b = g.take_duty(port('B'), now);
+        let mut out = [0.0; 16];
+        out[..8].copy_from_slice(&d[..8]);
+        out[8..].copy_from_slice(&e[..8]);
+        LedDuty { out, nucleo: [b[0], b[7], b[14]] }
     }
 
     /// Touches the screen at a position in screen coordinates (as seen on the

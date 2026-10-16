@@ -3,18 +3,14 @@
 
 use std::path::PathBuf;
 
-use eframe::egui::{self, Color32, Key, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Color32, Key, RichText};
 use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
+use crate::board::{self, BoardState};
 use crate::emu::{self, Command, EmuHandle, RunState, Speed};
 
-const BOARD_BLUE: Color32 = Color32::from_rgb(0x1B, 0x3A, 0x7A);
-const SILK: Color32 = Color32::from_rgb(0xE8, 0xEC, 0xF4);
-const LED_OFF: Color32 = Color32::from_rgb(0x55, 0x5B, 0x66);
-const LED_RED: Color32 = Color32::from_rgb(0xFF, 0x3B, 0x30);
-const LED_GREEN: Color32 = Color32::from_rgb(0x34, 0xD3, 0x59);
-const LED_BLUE: Color32 = Color32::from_rgb(0x3B, 0x82, 0xF6);
-const LED_YELLOW: Color32 = Color32::from_rgb(0xFF, 0xD6, 0x0A);
+const OK_GREEN: Color32 = Color32::from_rgb(0x34, 0xD3, 0x59);
+const ERR_RED: Color32 = Color32::from_rgb(0xFF, 0x5B, 0x50);
 const MAX_CONSOLE: usize = 200_000;
 
 pub struct App {
@@ -31,7 +27,8 @@ pub struct App {
     speed: Speed,
     console: String,
     console_input: String,
-    scale: f32,
+    /// Levels set on the AUX0–5 pads (`None` = open).
+    ints: [Option<bool>; 6],
     self_screenshot: Option<SelfScreenshot>,
 }
 
@@ -106,7 +103,7 @@ impl App {
             speed: Speed::Factor(1.0),
             console: String::new(),
             console_input: String::new(),
-            scale: 1.5,
+            ints: [None; 6],
             self_screenshot: SelfScreenshot::from_env(),
         }
     }
@@ -119,160 +116,19 @@ impl App {
     }
 }
 
-/// Draws a round LED with a label below it.
-fn led(ui: &mut egui::Ui, on: bool, color: Color32, label: &str) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(32.0, 30.0), Sense::hover());
-    let center = Pos2::new(rect.center().x, rect.top() + 9.0);
-    let painter = ui.painter();
-    if on {
-        painter.circle_filled(center, 11.0, color.gamma_multiply(0.25));
-    }
-    painter.circle_filled(center, 6.5, if on { color } else { LED_OFF });
-    painter.circle_stroke(center, 6.5, Stroke::new(1.0, Color32::from_black_alpha(120)));
-    painter.text(
-        Pos2::new(rect.center().x, rect.bottom() - 4.0),
-        egui::Align2::CENTER_BOTTOM,
-        label,
-        egui::FontId::proportional(10.0),
-        SILK,
-    );
-}
-
-/// A tactile push button; returns (held down, right-clicked).
-fn push_button(ui: &mut egui::Ui, label: &str, color: Color32, latched: bool) -> (bool, bool) {
-    let (outer, response) = ui.allocate_exact_size(Vec2::new(32.0, 46.0), Sense::click_and_drag());
-    let rect = Rect::from_min_size(outer.min, Vec2::new(32.0, 32.0));
-    let down = response.is_pointer_button_down_on() || latched;
-    let painter = ui.painter();
-    painter.rect_filled(rect.shrink(2.0), 4.0, Color32::from_rgb(0x2B, 0x2F, 0x36));
-    let cap = rect.shrink(if down { 8.0 } else { 6.0 });
-    painter.circle_filled(cap.center(), cap.width() / 2.0, if down { color.gamma_multiply(0.6) } else { color });
-    if latched {
-        painter.circle_stroke(cap.center(), cap.width() / 2.0 + 2.0, Stroke::new(2.0, Color32::YELLOW));
-    }
-    painter.text(
-        outer.center_bottom() - Vec2::new(0.0, 2.0),
-        egui::Align2::CENTER_BOTTOM,
-        label,
-        egui::FontId::proportional(10.0),
-        SILK,
-    );
-    (down, response.secondary_clicked())
-}
-
-const BOARD_MARGIN: f32 = 16.0;
-const NUCLEO_WIDTH: f32 = 130.0;
-const GAP: f32 = 20.0;
-const LCD_BEZEL: f32 = 16.0;
-
-impl App {
-    /// The row along the bottom edge of the PCB: OUT15..OUT8 (yellow),
-    /// OUT7..OUT0 (blue), then IN7..IN0 (red) with the buttons S7..S0 below.
-    fn io_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, leds: u16, inputs: u8, typing: bool) {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.label(RichText::new("Out").color(SILK).size(16.0));
-                ui.horizontal(|ui| {
-                    for i in (0..16u32).rev() {
-                        let color = if i >= 8 { LED_YELLOW } else { LED_BLUE };
-                        led(ui, leds & (1 << i) != 0, color, &format!("OUT{i}"));
-                    }
-                });
-            });
-            ui.add_space(GAP);
-            ui.vertical(|ui| {
-                ui.label(RichText::new("In").color(SILK).size(16.0));
-                ui.horizontal(|ui| {
-                    for i in (0..8u32).rev() {
-                        led(ui, inputs & (1 << i) != 0, LED_RED, &format!("IN{i}"));
-                    }
-                });
-                ui.horizontal(|ui| {
-                    for i in (0..8usize).rev() {
-                        let (mut down, toggled) = push_button(ui, &format!("S{i}"), Color32::from_rgb(0xE5, 0x48, 0x5A), self.latched[i]);
-                        if toggled {
-                            self.latched[i] = !self.latched[i];
-                        }
-                        let key = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7][i];
-                        down |= !typing && ctx.input(|inp| inp.key_down(key));
-                        if down != self.sent_buttons[i] {
-                            self.sent_buttons[i] = down;
-                            self.emu.send(Command::Button(i as u32, down));
-                        }
-                    }
-                });
-                ui.label(RichText::new("keys 0–7 = S0–S7 · right click latches a button").color(SILK.gamma_multiply(0.6)).size(10.0));
-            });
-        });
-    }
-
-    /// The TFT; mouse presses are touches.
-    fn display_section(&mut self, ui: &mut egui::Ui, scale: f32) {
-        let size = Vec2::new(SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32) * scale;
-        let (rect, response) = ui.allocate_exact_size(size + Vec2::splat(LCD_BEZEL), Sense::click_and_drag());
-        let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 6.0, Color32::from_gray(15));
-        let screen = Rect::from_center_size(rect.center(), size);
-        if let Some(tex) = &self.display {
-            painter.image(tex.id(), screen, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-        }
-        let to_screen = |p: Pos2| ((p.x - screen.left()) / scale, (p.y - screen.top()) / scale);
-        let touch = response
-            .is_pointer_button_down_on()
-            .then(|| response.interact_pointer_pos())
-            .flatten()
-            .filter(|p| screen.contains(*p))
-            .map(to_screen);
-        if touch != self.sent_touch {
-            self.sent_touch = touch;
-            self.emu.send(Command::Touch(touch));
-        }
-        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-        if let Some((x, y)) = touch.or_else(|| response.hover_pos().filter(|p| screen.contains(*p)).map(to_screen)) {
-            response.on_hover_text_at_pointer(format!("x = {:.0}, y = {:.0}", x.floor(), y.floor()));
-        }
-    }
-
-    /// LEDs and buttons of the Nucleo board.
-    fn nucleo_section(&mut self, ui: &mut egui::Ui, nucleo: [bool; 3]) {
-        ui.vertical(|ui| {
-            ui.set_width(NUCLEO_WIDTH);
-            ui.label(RichText::new("NUCLEO-F429ZI").color(SILK).size(14.0));
-            ui.horizontal(|ui| {
-                led(ui, nucleo[0], LED_GREEN, "LD1");
-                led(ui, nucleo[1], LED_BLUE, "LD2");
-                led(ui, nucleo[2], LED_RED, "LD3");
-            });
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                let (down, _) = push_button(ui, "USER", LED_BLUE, false);
-                if down != self.sent_user {
-                    self.sent_user = down;
-                    self.emu.send(Command::UserButton(down));
-                }
-                let (reset, _) = push_button(ui, "RESET", Color32::from_gray(20), false);
-                if reset && ui.input(|i| i.pointer.primary_pressed()) {
-                    self.emu.send(Command::Reset);
-                }
-            });
-        });
-    }
-}
-
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
         // ---- take the latest snapshot
-        let (state, firmware, leds, inputs, nucleo, virtual_ns, core_mhz, speed) = {
+        let (state, firmware, led_duty, inputs, nucleo_duty, virtual_ns, core_mhz, speed) = {
             let mut snap = self.emu.snapshot.lock().unwrap();
             if snap.display_generation != self.display_generation {
                 self.display_generation = snap.display_generation;
                 let image = egui::ColorImage::from_rgba_unmultiplied([SCREEN_WIDTH, SCREEN_HEIGHT], &snap.display);
                 match &mut self.display {
-                    Some(tex) => tex.set(image, egui::TextureOptions::NEAREST),
-                    None => self.display = Some(ctx.load_texture("display", image, egui::TextureOptions::NEAREST)),
+                    Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
+                    None => self.display = Some(ctx.load_texture("display", image, egui::TextureOptions::LINEAR)),
                 }
             }
             if !snap.serial.is_empty() {
@@ -287,9 +143,9 @@ impl eframe::App for App {
             (
                 snap.state.clone(),
                 snap.firmware.clone(),
-                snap.leds,
+                snap.led_duty,
                 snap.inputs,
-                snap.nucleo_leds,
+                snap.nucleo_duty,
                 snap.virtual_ns,
                 snap.core_mhz,
                 snap.speed,
@@ -318,9 +174,6 @@ impl eframe::App for App {
                         self.emu.send(Command::SetSpeed(s));
                     }
                 }
-                ui.separator();
-                ui.label("Max. display zoom:");
-                ui.add(egui::Slider::new(&mut self.scale, 1.0..=3.0).step_by(0.25));
             });
         });
 
@@ -329,10 +182,10 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 let (text, color) = match &state {
                     RunState::NoFirmware => ("no firmware loaded — open an .axf file".to_owned(), ui.visuals().weak_text_color()),
-                    RunState::Running => ("running".to_owned(), LED_GREEN),
+                    RunState::Running => ("running".to_owned(), OK_GREEN),
                     RunState::Paused => ("paused".to_owned(), Color32::YELLOW),
-                    RunState::Stopped(why) => (format!("stopped: {why}"), LED_RED),
-                    RunState::Error(e) => (e.clone(), LED_RED),
+                    RunState::Stopped(why) => (format!("stopped: {why}"), ERR_RED),
+                    RunState::Error(e) => (e.clone(), ERR_RED),
                 };
                 ui.label(RichText::new(text).color(color));
                 ui.separator();
@@ -381,24 +234,56 @@ impl eframe::App for App {
 
         // ---- the board
         let typing = ctx.memory(|m| m.focused().is_some());
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_gray(30)).inner_margin(8.0)).show(ui, |ui| {
-            egui::ScrollArea::both().show(ui, |ui| {
-                // As on the real board: display (with the Nucleo next to it)
-                // above, the row of LEDs and buttons along the bottom edge.
-                let avail = ui.available_width() - 2.0 * BOARD_MARGIN;
-                let fit = (avail - NUCLEO_WIDTH - GAP - LCD_BEZEL) / SCREEN_WIDTH as f32;
-                let scale = self.scale.min(fit).max(0.5);
-                egui::Frame::new().fill(BOARD_BLUE).corner_radius(10.0).inner_margin(BOARD_MARGIN).show(ui, |ui| {
-                    ui.horizontal_top(|ui| {
-                        self.display_section(ui, scale);
-                        ui.add_space(GAP);
-                        self.nucleo_section(ui, nucleo);
-                    });
-                    ui.add_space(GAP);
-                    self.io_section(ui, &ctx, leds, inputs, typing);
-                });
-            });
-        });
+        let input = egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(Color32::from_gray(28)).inner_margin(10.0))
+            .show(ui, |ui| {
+                ui.centered_and_justified(|ui| {
+                    board::show(
+                        ui,
+                        &BoardState {
+                            led_duty: &led_duty,
+                            inputs,
+                            nucleo_duty: &nucleo_duty,
+                            display: self.display.as_ref(),
+                            ints: &self.ints,
+                            latched: &self.latched,
+                        },
+                    )
+                })
+                .inner
+            })
+            .inner;
+
+        const KEYS: [Key; 8] = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7];
+        for (i, key) in KEYS.into_iter().enumerate() {
+            if input.latch_toggled[i] {
+                self.latched[i] = !self.latched[i];
+            }
+            let down = input.buttons[i] || self.latched[i] || (!typing && ctx.input(|inp| inp.key_down(key)));
+            if down != self.sent_buttons[i] {
+                self.sent_buttons[i] = down;
+                self.emu.send(Command::Button(i as u32, down));
+            }
+        }
+        if input.user != self.sent_user {
+            self.sent_user = input.user;
+            self.emu.send(Command::UserButton(input.user));
+        }
+        if input.reset_clicked {
+            self.emu.send(Command::Reset);
+        }
+        if input.touch != self.sent_touch {
+            self.sent_touch = input.touch;
+            self.emu.send(Command::Touch(input.touch));
+        }
+        if let Some(n) = input.int_clicked {
+            self.ints[n] = match self.ints[n] {
+                None => Some(false),
+                Some(false) => Some(true),
+                Some(true) => None,
+            };
+            self.emu.send(Command::Int(n as u32, self.ints[n]));
+        }
 
         if let Some(shot) = &mut self.self_screenshot {
             shot.tick(&ctx);

@@ -1,6 +1,7 @@
 //! Graphical ITS-Board emulator.
 
 mod app;
+mod board;
 mod emu;
 
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("ITS-Board Emulator")
-            .with_inner_size([1400.0, 900.0])
+            .with_inner_size([1280.0, 1000.0])
             .with_drag_and_drop(true),
         ..Default::default()
     };

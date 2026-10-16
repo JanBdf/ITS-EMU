@@ -28,6 +28,8 @@ pub enum Command {
     Button(u32, bool),
     UserButton(bool),
     Touch(Option<(f32, f32)>),
+    /// Level of INT0–5 / AUX0–5 (PG0–5): `None` = open.
+    Int(u32, Option<bool>),
     Serial(Vec<u8>),
     Quit,
 }
@@ -49,8 +51,11 @@ pub struct Snapshot {
     pub display: Vec<u8>,
     pub display_generation: u64,
     pub leds: u16,
+    /// Time-averaged brightness of OUT0..15 since the previous snapshot.
+    pub led_duty: [f32; 16],
     pub inputs: u8,
     pub nucleo_leds: [bool; 3],
+    pub nucleo_duty: [f32; 3],
     pub backlight: f32,
     pub virtual_ns: u64,
     pub core_mhz: u32,
@@ -68,8 +73,10 @@ impl Default for Snapshot {
             display: vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * 4],
             display_generation: 0,
             leds: 0,
+            led_duty: [0.0; 16],
             inputs: 0xFF,
             nucleo_leds: [false; 3],
+            nucleo_duty: [0.0; 3],
             backlight: 0.0,
             virtual_ns: 0,
             core_mhz: 0,
@@ -133,6 +140,9 @@ struct Worker {
     rate_sample: (Instant, u64),
     measured_speed: f64,
     published_generation: u64,
+    /// External inputs, re-applied when new firmware is loaded.
+    buttons: [bool; 8],
+    ints: [Option<bool>; 6],
 }
 
 impl Worker {
@@ -151,6 +161,8 @@ impl Worker {
             rate_sample: (now, 0),
             measured_speed: 0.0,
             published_generation: u64::MAX,
+            buttons: [false; 8],
+            ints: [None; 6],
         }
     }
 
@@ -211,9 +223,16 @@ impl Worker {
                 self.speed = speed;
                 self.reanchor();
             }
-            Command::Button(n, pressed) => self.with_board(|b| b.set_button(n, pressed)),
+            Command::Button(n, pressed) => {
+                self.buttons[n as usize] = pressed;
+                self.with_board(|b| b.set_button(n, pressed));
+            }
             Command::UserButton(pressed) => self.with_board(|b| b.set_user_button(pressed)),
             Command::Touch(pos) => self.with_board(|b| b.set_touch(pos)),
+            Command::Int(n, level) => {
+                self.ints[n as usize] = level;
+                self.with_board(|b| b.set_int(n, level));
+            }
             Command::Serial(data) => self.with_board(|b| b.mcu().usart3.borrow_mut().send(&data)),
             Command::Quit => {}
         }
@@ -232,6 +251,12 @@ impl Worker {
             .and_then(|data| Simulator::new(&data, Some(DEFAULT_FONTS)).map_err(|e| e.to_string()));
         match result {
             Ok(sim) => {
+                for (n, &pressed) in self.buttons.iter().enumerate() {
+                    sim.board.set_button(n as u32, pressed);
+                }
+                for (n, &level) in self.ints.iter().enumerate() {
+                    sim.board.set_int(n as u32, level);
+                }
                 self.sim = Some(sim);
                 self.state = RunState::Running;
                 log::info!("loaded {}", path.display());
@@ -300,6 +325,9 @@ impl Worker {
                 self.published_generation = generation;
             }
             snap.leds = b.leds();
+            let duty = sim.take_led_duty();
+            snap.led_duty = duty.out;
+            snap.nucleo_duty = duty.nucleo;
             snap.inputs = b.inputs();
             snap.nucleo_leds = b.nucleo_leds();
             snap.backlight = b.backlight();
