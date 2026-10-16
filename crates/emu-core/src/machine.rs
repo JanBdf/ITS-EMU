@@ -124,6 +124,9 @@ pub struct System {
     /// a branch. A conditional branch was taken (pipeline refill) when the
     /// next block does not start at the fall-through address.
     branch_from: Option<(u64, bool)>,
+    /// End address of the previous block and the destination register of its
+    /// final load, if it ended without a branch (see `continuation_saving`).
+    fell_through: Option<(u64, Option<u8>)>,
     /// Division instructions found in new blocks, waiting for their timing hook.
     new_divs: Vec<DivSite>,
     /// Division instructions that have a timing hook.
@@ -569,6 +572,7 @@ impl Machine {
             slice_end: 0,
             slice_limit: 0,
             branch_from: None,
+            fell_through: None,
             new_divs: Vec::new(),
             hooked_divs: std::collections::HashSet::new(),
             block_insns: BlockCache::new(),
@@ -754,7 +758,14 @@ impl Machine {
             }
             let sys = uc.get_data_mut();
             let refill = if entered_by_branch { info.entry_penalty } else { 0 };
-            sys.clock.advance(u64::from(info.cycles + refill));
+            let saving = match sys.fell_through.take() {
+                Some((end, rt)) if end == addr => info.continuation_saving(rt),
+                _ => 0,
+            };
+            sys.clock.advance(u64::from(info.cycles + refill - saving));
+            if !info.ends_with_branch && !info.ends_with_jump {
+                sys.fell_through = Some((addr + u64::from(size), info.last_load_rt));
+            }
             sys.branch_from = if info.ends_with_branch {
                 Some((addr + u64::from(size), true))
             } else if info.ends_with_jump {
