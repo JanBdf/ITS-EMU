@@ -136,7 +136,7 @@ unmapped memory raises a BusFault. HardFaults produce a readable report
 | 1 | AC6 toolchain + reference `.axf` | ✅ all 10 `Programs/*` built with AC6 6.24 (`tools/build-fixtures.sh` → `tests/fixtures/ac6/`) |
 | 2 | Unicorn runs Thumb code from ELF | ✅ `emu-core` + clang-built fixtures (`tests/fixtures/micro`) |
 | 3 | Exceptions + SysTick | ✅ SysTick IRQ, SVC, STIR/NVIC IRQ, BusFault with BFAR and handler return, extended FP frame (mutation-tested) |
-| 4 | Throughput | ✅ Linux x86-64 (release): ~300–380 MIPS compute-bound, ~100 MIPS in tight MMIO polling loops. Idle loops (`HAL_Delay`) are fast-forwarded: LauflichtASM runs ~200× faster than real time. Windows/macOS not measured yet (needs CI). |
+| 4 | Throughput | ✅ Linux x86-64 (release): ~300–380 MIPS compute-bound, ~100 MIPS in tight MMIO polling loops. Idle loops (`HAL_Delay`) are fast-forwarded: LauflichtASM runs ~200× faster than real time. Windows/macOS: measured by CI (job summary), first run pending. |
 | 5 | GDB stub | ✅ `emu_core::gdb` (feature `gdb`): gdbstub target + non-blocking multi-client server in GUI and CLI; tested with GDB 18.1 against micro fixture and AC6 programs |
 
 Progress beyond the spike (Phase 2/3):
@@ -167,7 +167,12 @@ Progress beyond the spike (Phase 2/3):
   [halt]`, Ctrl-C. Several clients: the first controls execution, further
   ones (CDT `auxiliaryGdb` live watch) observe. VS Code attach still to be
   tried with the real CDT adapter.
-- Next candidates: CI on Linux/Windows/macOS, LICENSE file before publishing,
+- CI: GitHub Actions workflow (fmt, clippy, build + test on Linux/Windows/
+  macOS × x64/arm64, throughput summary, binaries as artifacts). Not run yet:
+  the repository has no GitHub remote. Without the unpublished lab solutions
+  the LauflichtASM/StoppuhrASM/A*ASM tests skip; idle-skip equivalence is
+  covered by TestNewFont as well.
+- Next candidates: first CI run (push to GitHub), LICENSE file before publishing,
   reloading the firmware in the GUI when the `.axf` changes (rebuild while
   debugging), `load` over GDB.
 - Polling loops: peripherals report until when a read value stays the same
