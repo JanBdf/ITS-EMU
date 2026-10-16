@@ -77,6 +77,40 @@ impl emu_core::Peripheral for EthStub {
     fn write(&mut self, _: &mut emu_core::DeviceCtx, _: u32, _: u32, _: u32) {}
 }
 
+/// Wait states of peripheral accesses through the AHB/APB bridges, fitted
+/// to measurements at 180 MHz (APB1 = HCLK/4, APB2 = HCLK/2) with
+/// DWT->CYCCNT: back-to-back APB reads take 2 APB clocks (2·div - 1 extra
+/// core cycles), writes one core cycle less; the first access after other
+/// work also waits for the bridge (div cycles for reads, 2·div - 1 for writes,
+/// which stall behind the write buffer). E.g. 10 TIM2->CNT reads in a loop
+/// take 88 cycles per iteration, 10 SPI1->SR reads 46, 10 TIM5 writes 80.
+/// AHB peripherals (GPIO, RCC, ETH, ...) cost about one cycle more than
+/// SRAM when other memory accesses or users of the loaded value follow
+/// (GPIO store + SRAM load 4.1 instead of 3, GPIO load + dependent add 4
+/// instead of 3), which is the common case.
+fn bus_wait_states(clocks: SharedClocks) -> impl Fn(u32, bool, u64) -> u64 {
+    let last_end = std::cell::Cell::new(u64::MAX);
+    move |addr, write, now| {
+        let c = clocks.get();
+        let pclk = match addr {
+            0x4000_0000..=0x4000_7FFF => c.pclk1,
+            0x4001_0000..=0x4001_6BFF => c.pclk2,
+            0x4002_0000..=0x5FFF_FFFF => return 1,
+            _ => return 0,
+        };
+        let div = u64::from(c.hclk / pclk.max(1)).max(1);
+        if div == 1 {
+            return 0;
+        }
+        let mut ws = if write { 2 * div - 2 } else { 2 * div - 1 };
+        if now != last_end.get() {
+            ws += if write { 2 * div - 1 } else { div };
+        }
+        last_end.set(now + ws);
+        ws
+    }
+}
+
 /// Builds the peripheral bus with all modelled STM32F429 peripherals.
 pub fn build() -> (Bus, Stm32f429) {
     let gpio = SharedGpio::default();
@@ -106,6 +140,7 @@ pub fn build() -> (Bus, Stm32f429) {
     bus.attach(0x4002_3800, 0x400, Box::new(Rcc::new(clocks.clone())));
     bus.attach(0x4002_3C00, 0x400, Box::new(FlashInterface::new()));
     bus.attach(0x4002_8000, 0x1400, Box::new(EthStub));
+    bus.set_wait_states(Box::new(bus_wait_states(clocks.clone())));
 
     let tim_pwm: [SharedPwm; 4] = tim_pwm.try_into().unwrap_or_else(|_| unreachable!());
     (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3 })

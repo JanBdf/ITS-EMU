@@ -1,0 +1,7 @@
+T clear 39325428
+T str24 2456762
+T circle 133334972
+T delay100 9045076
+T loop100k 800344
+T asm100k 150198
+T printf41 320572
