@@ -99,7 +99,11 @@ stored in `tests/hardware`.
 phone camera over adb (`camera-pro.sh`, `snap.sh`, Samsung camera in Pro
 mode with fixed exposure); `boardphoto.py` extracts the display (perspective
 corrected) and the LED states from a photo, `compare.sh` puts photo and
-emulator screenshot side by side.
+emulator screenshot side by side. The board in the GUI is a vector drawing
+(`apps/its-emu-gui/assets/board.svg`) made by `boarddraw.py` after the
+stacked board photo (`stack-capture.sh`, `boardstack.py`, `boardasset.py`);
+`boardlabelfit.py` and `boardtraces.py` fit the silkscreen labels and trace
+the copper under the mask in that photo.
 
 ```sh
 tools/hw/flash.sh tests/fixtures/ac6/HwCheck.axf
