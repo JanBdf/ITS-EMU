@@ -1811,6 +1811,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -1870,6 +1872,7 @@ dependencies = [
  "eframe",
  "emu-core",
  "env_logger",
+ "image",
  "itsboard",
  "log",
  "png",

@@ -12,10 +12,15 @@ use crate::emu::{self, Command, EmuHandle, RunState, Speed};
 const OK_GREEN: Color32 = Color32::from_rgb(0x34, 0xD3, 0x59);
 const ERR_RED: Color32 = Color32::from_rgb(0xFF, 0x5B, 0x50);
 const MAX_CONSOLE: usize = 200_000;
+const NUCLEO_GREEN: Color32 = Color32::from_rgb(0x2E, 0xE0, 0x5A);
+const NUCLEO_BLUE: Color32 = Color32::from_rgb(0x2F, 0x7B, 0xFF);
+const NUCLEO_RED: Color32 = Color32::from_rgb(0xFF, 0x2A, 0x22);
 
 pub struct App {
     emu: EmuHandle,
     display: Option<egui::TextureHandle>,
+    /// Board photo; loaded in the first frame, when the maximum texture size is known.
+    board: Option<board::Textures>,
     display_generation: u64,
     /// Buttons S0..S7 latched by right click.
     latched: [bool; 8],
@@ -94,6 +99,7 @@ impl App {
         Self {
             emu,
             display: None,
+            board: None,
             display_generation: u64::MAX,
             latched: [false; 8],
             sent_buttons: [false; 8],
@@ -175,6 +181,16 @@ impl eframe::App for App {
                         self.emu.send(Command::SetSpeed(s));
                     }
                 }
+                ui.separator();
+                // The Nucleo user LEDs are hidden under the display on the real board.
+                for (i, (name, pin, color)) in [("LD1", "PB0", NUCLEO_GREEN), ("LD2", "PB7", NUCLEO_BLUE), ("LD3", "PB14", NUCLEO_RED)].into_iter().enumerate() {
+                    let duty = nucleo_duty[i];
+                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    let b = duty.clamp(0.0, 1.0).powf(1.0 / 2.2);
+                    ui.painter().circle_filled(rect.center(), 5.5, Color32::from_gray(60).lerp_to_gamma(color, b));
+                    resp.on_hover_text(format!("Nucleo {name} ({pin}): {:.0} % — under the display on the real board", duty * 100.0));
+                    ui.label(name);
+                }
             });
         });
 
@@ -246,12 +262,13 @@ impl eframe::App for App {
             .frame(egui::Frame::new().fill(Color32::from_gray(28)).inner_margin(10.0))
             .show(ui, |ui| {
                 ui.centered_and_justified(|ui| {
+                    let tex = self.board.get_or_insert_with(|| board::Textures::load(ui.ctx()));
                     board::show(
                         ui,
+                        tex,
                         &BoardState {
                             led_duty: &led_duty,
                             inputs,
-                            nucleo_duty: &nucleo_duty,
                             display: self.display.as_ref(),
                             ints: &self.ints,
                             latched: &self.latched,
