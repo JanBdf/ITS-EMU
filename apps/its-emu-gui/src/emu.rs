@@ -345,7 +345,10 @@ impl Worker {
             return;
         }
         match stop {
-            StopReason::Budget | StopReason::DebugBreakpoint { .. } | StopReason::Step | StopReason::Watchpoint { .. } => {}
+            StopReason::Budget
+            | StopReason::DebugBreakpoint { .. }
+            | StopReason::Step
+            | StopReason::Watchpoint { .. } => {}
             StopReason::Breakpoint { pc } => {
                 self.state = RunState::Stopped(format!("BKPT at {}", sim.describe_pc(pc)));
             }
@@ -386,7 +389,8 @@ impl Worker {
         }
 
         let mut snap = self.snapshot.lock().unwrap();
-        snap.firmware = self.firmware.as_ref().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned());
+        snap.firmware =
+            self.firmware.as_ref().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned());
         snap.state = self.state.clone();
         snap.virtual_ns = virt;
         snap.speed = if self.state == RunState::Running { self.measured_speed } else { 0.0 };

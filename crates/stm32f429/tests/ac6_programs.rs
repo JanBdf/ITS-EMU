@@ -53,7 +53,9 @@ fn run_until_ms(m: &mut Machine, ms: u64) {
 /// OUT15..OUT0 of the ITS-Board (PD0–7 = OUT0–7, PE0–7 = OUT8–15).
 fn leds(mcu: &stm32f429::Stm32f429) -> u16 {
     let g = mcu.gpio.borrow();
-    (0..16).filter(|&i| if i < 8 { g.level(port('D'), i) } else { g.level(port('E'), i - 8) }).fold(0, |a, i| a | (1 << i))
+    (0..16)
+        .filter(|&i| if i < 8 { g.level(port('D'), i) } else { g.level(port('E'), i - 8) })
+        .fold(0, |a, i| a | (1 << i))
 }
 
 #[test]

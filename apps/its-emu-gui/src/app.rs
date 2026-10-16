@@ -109,7 +109,8 @@ impl App {
     }
 
     fn open_dialog(&self) {
-        let file = rfd::FileDialog::new().add_filter("Firmware", &["axf", "elf"]).add_filter("All files", &["*"]).pick_file();
+        let file =
+            rfd::FileDialog::new().add_filter("Firmware", &["axf", "elf"]).add_filter("All files", &["*"]).pick_file();
         if let Some(path) = file {
             self.emu.send(Command::Load(path));
         }
@@ -169,7 +170,12 @@ impl eframe::App for App {
                 }
                 ui.separator();
                 ui.label("Speed:");
-                for (label, s) in [("1×", Speed::Factor(1.0)), ("0.1×", Speed::Factor(0.1)), ("10×", Speed::Factor(10.0)), ("max", Speed::Max)] {
+                for (label, s) in [
+                    ("1×", Speed::Factor(1.0)),
+                    ("0.1×", Speed::Factor(0.1)),
+                    ("10×", Speed::Factor(10.0)),
+                    ("max", Speed::Max),
+                ] {
                     if ui.selectable_label(self.speed == s, label).clicked() {
                         self.speed = s;
                         self.emu.send(Command::SetSpeed(s));
@@ -182,7 +188,9 @@ impl eframe::App for App {
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (text, color) = match &state {
-                    RunState::NoFirmware => ("no firmware loaded — open an .axf file".to_owned(), ui.visuals().weak_text_color()),
+                    RunState::NoFirmware => {
+                        ("no firmware loaded — open an .axf file".to_owned(), ui.visuals().weak_text_color())
+                    }
                     RunState::Running => ("running".to_owned(), OK_GREEN),
                     RunState::Paused => ("paused".to_owned(), Color32::YELLOW),
                     RunState::Halted => ("halted by debugger".to_owned(), Color32::YELLOW),
@@ -298,7 +306,9 @@ impl eframe::App for App {
         }
 
         // Drag & drop of firmware files
-        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
+        });
         if let Some(path) = dropped.into_iter().next() {
             self.emu.send(Command::Load(path));
         }

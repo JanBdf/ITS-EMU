@@ -97,11 +97,19 @@ pub fn build() -> (Bus, Stm32f429) {
         tim_pwm.push(t.pwm());
         bus.attach(base, 0x400, Box::new(t));
     }
-    bus.attach(0x4000_4800, 0x400, Box::new(Usart::new("USART3", 39, ApbBus::Apb1, 18, clocks.clone(), usart3.clone())));
+    bus.attach(
+        0x4000_4800,
+        0x400,
+        Box::new(Usart::new("USART3", 39, ApbBus::Apb1, 18, clocks.clone(), usart3.clone())),
+    );
     bus.attach(0x4000_7000, 0x400, Box::new(Pwr::new()));
     bus.attach(0x4001_3000, 0x400, Box::new(Spi::new("SPI1", 35, ApbBus::Apb2, 12, clocks.clone(), spi1.clone())));
     for i in 0..NUM_PORTS {
-        bus.attach(GPIOA_BASE + PORT_STRIDE * i as u32, PORT_STRIDE, Box::new(GpioPort::new(i, gpio.clone(), clocks.clone())));
+        bus.attach(
+            GPIOA_BASE + PORT_STRIDE * i as u32,
+            PORT_STRIDE,
+            Box::new(GpioPort::new(i, gpio.clone(), clocks.clone())),
+        );
     }
     bus.attach(0x4002_3800, 0x400, Box::new(Rcc::new(clocks.clone())));
     bus.attach(0x4002_3C00, 0x400, Box::new(FlashInterface::new()));
