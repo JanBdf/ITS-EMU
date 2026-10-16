@@ -14,6 +14,7 @@
  *   nled N          Nucleo LD1/LD2/LD3 = bits 0/1/2 of N
  *   bl N            backlight PWM compare value 0..1000 (TIM4->CCR4)
  *   in              prints GPIOF/GPIOG/GPIOC input levels
+ *   pins            prints external levels of all input pins (ports A..I)
  *   time            prints durations (TIM2 ticks, 90 per us) of library calls
  *   cyc             prints core cycles (DWT->CYCCNT) of instruction kernels
  *   div             prints UDIV/SDIV cycles for a range of operands
@@ -371,6 +372,42 @@ static void cmd_cyc(void) {
     printf("F afr_save_restore %lu\n", (unsigned long)(t1 - t0));
 }
 
+/* External levels of input pins: pins configured as plain inputs are read
+ * with the internal pull-down and pull-up; a pin that stays high against the
+ * pull-down (low against the pull-up) is driven externally. */
+static void cmd_pins(void) {
+    GPIO_TypeDef *const ports[] = {GPIOA, GPIOB, GPIOC, GPIOD, GPIOE, GPIOF, GPIOG, GPIOH, GPIOI};
+    RCC->AHB1ENR |= 0x1FF;
+    for (unsigned p = 0; p < sizeof(ports) / sizeof(ports[0]); p++) {
+        GPIO_TypeDef *g = ports[p];
+        uint32_t moder = g->MODER, pupdr = g->PUPDR, inputs = 0, pd = 0, pu = 0;
+        for (int pin = 0; pin < 16; pin++) {
+            if (((moder >> (2 * pin)) & 3) == 0) {
+                inputs |= 1u << pin;
+                pd |= 2u << (2 * pin);
+                pu |= 1u << (2 * pin);
+            }
+        }
+        uint32_t keep = pupdr;
+        for (int pin = 0; pin < 16; pin++) {
+            if (inputs & (1u << pin)) {
+                keep &= ~(3u << (2 * pin));
+            }
+        }
+        uint32_t idr = g->IDR & 0xFFFF;
+        g->PUPDR = keep | pd;
+        HAL_Delay(2);
+        uint32_t idr_pd = g->IDR & 0xFFFF;
+        g->PUPDR = keep | pu;
+        HAL_Delay(2);
+        uint32_t idr_pu = g->IDR & 0xFFFF;
+        g->PUPDR = pupdr;
+        printf("P %c moder %08lx pupdr %08lx odr %04lx inputs %04lx idr %04lx pd %04lx pu %04lx\n",
+               'A' + p, (unsigned long)moder, (unsigned long)pupdr, (unsigned long)(g->ODR & 0xFFFF),
+               (unsigned long)inputs, (unsigned long)idr, (unsigned long)idr_pd, (unsigned long)idr_pu);
+    }
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -400,6 +437,8 @@ static void execute(char *line) {
         TIM4->CCR4 = (uint32_t)strtoul(arg ? arg : "0", NULL, 10);
     } else if (!strcmp(line, "in")) {
         cmd_in();
+    } else if (!strcmp(line, "pins")) {
+        cmd_pins();
     } else if (!strcmp(line, "cyc")) {
         cmd_cyc();
     } else if (!strcmp(line, "div")) {

@@ -6,7 +6,7 @@
 
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 
-pub const BOARD_W: f32 = 1000.0;
+pub const BOARD_W: f32 = 1040.0;
 pub const BOARD_H: f32 = 650.0;
 
 const PCB: Color32 = Color32::from_rgb(0x1E, 0x40, 0x8E);
@@ -159,7 +159,7 @@ pub fn show(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
     // ---- PCB
     pcb.rect(0.0, 0.0, BOARD_W, BOARD_H, 16.0, PCB_EDGE);
     pcb.rect(3.0, 3.0, BOARD_W - 3.0, BOARD_H - 3.0, 14.0, PCB);
-    for (x, y) in [(20.0, 20.0), (980.0, 20.0), (20.0, 630.0), (980.0, 630.0)] {
+    for (x, y) in [(20.0, 20.0), (BOARD_W - 20.0, 20.0), (20.0, 630.0), (BOARD_W - 20.0, 630.0)] {
         pcb.circle(x, y, 11.0, GOLD.gamma_multiply(0.8));
         pcb.circle(x, y, 7.5, HOLE);
     }
@@ -258,6 +258,13 @@ pub fn show(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
         Color32::from_white_alpha(6),
     );
     pcb.text(gx0, gy1 + 16.0, "4inch TFT Touch Shield  ·  480 × 320  ·  ILI9486 / XPT2046", 8.0, SILK.gamma_multiply(0.7), Align2::LEFT_CENTER);
+
+    // ---- supply indicators beside the display (lit while the board is powered)
+    for (x, name, supply) in [(1000.0, "D25", "5V"), (1022.0, "D24", "3V3")] {
+        pcb.label(x, 54.0, name, 7.0);
+        pcb.led(x, 72.0, LED_YELLOW, 1.0);
+        pcb.label(x, 91.0, supply, 7.5);
+    }
 
     // ---- Aux (INT0..5 = PG0..5) and Analog
     pcb.section(330.0, 390.0, 500.0, 462.0, "Aux");

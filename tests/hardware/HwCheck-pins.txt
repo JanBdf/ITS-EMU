@@ -1,0 +1,9 @@
+P A moder a800a800 pupdr 64000800 odr 0000 inputs 1f1f idr a5c4 pd a0c4 pu bddd
+P B moder 00000280 pupdr 00000100 odr 0000 inputs ffe7 idr 3f58 pd 0318 pu bfff
+P C moder 00000000 pupdr 00000000 odr 0000 inputs ffff idr 97c2 pd 0000 pu ffcf
+P D moder 900a5555 pupdr 00055555 odr 4000 inputs 3c00 idr fe00 pd 4300 pu ff00
+P E moder 00005555 pupdr 00005555 odr 0000 inputs ff00 idr 7d00 pd 2800 pu ff00
+P F moder 15000000 pupdr 00005555 odr 7000 inputs 8fff idr fcff pd 70ff pu ffff
+P G moder 00000000 pupdr 00000555 odr 0000 inputs ffff idr b7bf pd 0280 pu ffbf
+P H moder 00000000 pupdr 00000000 odr 0000 inputs ffff idr 0000 pd 0000 pu 0000
+P I moder 00000000 pupdr 00000000 odr 0000 inputs ffff idr 0000 pd 0000 pu 0000

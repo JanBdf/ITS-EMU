@@ -42,6 +42,11 @@ pub struct PortState {
     /// Pins driven from outside (buttons, devices) and their levels.
     pub ext_mask: u16,
     pub ext_level: u16,
+    /// Level read from inputs that are neither driven nor pulled (floating
+    /// pins keep a board-specific level, see the board crate).
+    pub float_level: u16,
+    /// Pins that exist in the package (others always read 0).
+    pub bonded: u16,
     /// Number of rising edges per pin caused by output writes. Lets devices
     /// detect pulses (e.g. chip-select frames) between two of their accesses.
     pub rises: [u32; 16],
@@ -59,7 +64,13 @@ impl PortState {
             1 => (0x0000_0280, 0x0000_00C0, 0x0000_0100),
             _ => (0, 0, 0),
         };
-        Self { moder, ospeedr, pupdr, ..Default::default() }
+        // STM32F429ZI (LQFP144): ports A..G complete; PH0/PH1 are the HSE
+        // clock input from the ST-LINK; ports I..K are not bonded out.
+        let bonded = match port {
+            0..=6 => 0xFFFF,
+            _ => 0,
+        };
+        Self { moder, ospeedr, pupdr, bonded, ..Default::default() }
     }
 
     pub fn mode(&self, pin: u32) -> PinMode {
@@ -82,14 +93,20 @@ impl PortState {
     /// Electrical level of a pin as seen by the input buffer.
     pub fn level(&self, pin: u32) -> bool {
         let bit = 1u32 << pin;
+        if self.bonded & bit as u16 == 0 {
+            return false;
+        }
         let ext = (self.ext_mask & bit as u16 != 0).then_some(self.ext_level & bit as u16 != 0);
         let pulled = || match self.pull(pin) {
             Pull::Up => true,
             Pull::Down => false,
-            Pull::None => false,
+            Pull::None => self.float_level & bit as u16 != 0,
         };
         match self.mode(pin) {
-            PinMode::Output | PinMode::Alternate => {
+            // The peripheral's output level is not modelled: alternate
+            // function pins read their idle level (pull or floating level).
+            PinMode::Alternate => ext.unwrap_or_else(pulled),
+            PinMode::Output => {
                 let open_drain = self.otyper & bit != 0;
                 let driven_high = self.odr & bit != 0;
                 if open_drain && driven_high {
@@ -184,6 +201,11 @@ impl GpioBank {
 
     pub fn level(&self, port: usize, pin: u32) -> bool {
         self.ports[port].level(pin)
+    }
+
+    /// Sets the levels that floating inputs (no pull, not driven) of `port` read.
+    pub fn set_floating_levels(&mut self, port: usize, levels: u16) {
+        self.ports[port].float_level = levels;
     }
 
     /// Fraction of time (0.0–1.0) each pin of `port` was high since the
@@ -294,11 +316,12 @@ impl Peripheral for GpioPort {
 
     fn reset(&mut self) {
         let mut bank = self.bank.borrow_mut();
-        let ext = (bank.ports[self.index].ext_mask, bank.ports[self.index].ext_level);
+        let old = &bank.ports[self.index];
+        let (ext_mask, ext_level, float_level) = (old.ext_mask, old.ext_level, old.float_level);
         bank.ports[self.index] = PortState::reset_for(self.index);
         // External drivers (buttons held down, ...) survive a reset of the MCU.
-        bank.ports[self.index].ext_mask = ext.0;
-        bank.ports[self.index].ext_level = ext.1;
+        let new = &mut bank.ports[self.index];
+        (new.ext_mask, new.ext_level, new.float_level) = (ext_mask, ext_level, float_level);
         self.warned_clock = false;
     }
 }
