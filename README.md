@@ -80,13 +80,21 @@ also work in flash. Watchpoints slow emulation down while they are set.
 
 ## Building
 
-Rust (stable) and a C toolchain with CMake (for Unicorn). On Linux the usual
-X11/Wayland development libraries are needed for the GUI.
+Rust (stable), a C toolchain, CMake and libclang (for Unicorn and its
+bindings). The GUI loads the X11/Wayland libraries at run time, so the CI
+builds on the stock GitHub runners without extra packages.
 
 ```sh
 cargo build --release
 cargo test --release
 ```
+
+CI (`.github/workflows/ci.yml`) checks formatting and clippy, and builds and
+tests on Linux, Windows and macOS, each on x64 and arm64 (Windows on Arm is
+experimental). It installs `gdb-multiarch` on Linux for the GDB server tests,
+records throughput in the job summary and keeps the binaries as artifacts for
+14 days. The tests that need the personal lab solutions in `tests/fixtures/ac6`
+(not published) skip themselves there.
 
 Test fixtures in `tests/fixtures/ac6` are rebuilt from a checkout of
 ITS-BRD-VSC with `tools/build-fixtures.sh` (needs the CMSIS-Toolbox and Arm
