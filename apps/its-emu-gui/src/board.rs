@@ -1,7 +1,7 @@
 //! Drawing of the ITS-Board and its interactive parts.
 //!
 //! The board is a photo of the real board (Rev 02, 15.12.2020), focus- and
-//! exposure-stacked from 30 shots and rectified (tools/hw/stack-capture.sh,
+//! exposure-stacked from 35 shots (7 focus points × 5 exposures) and rectified (tools/hw/stack-capture.sh,
 //! boardstack.py, boardasset.py; the lit IN LEDs are retouched to off).
 //! LEDs, pressed buttons and the display are drawn on top of it.  Positions are
 //! in design units (the photo is 1000 units wide) and were measured in the
@@ -12,11 +12,11 @@ use eframe::egui::{
 };
 
 pub const BOARD_W: f32 = 1000.0;
-pub const BOARD_H: f32 = 651.37;
+pub const BOARD_H: f32 = 648.55;
 
 const PHOTO: &[u8] = include_bytes!("../assets/board.jpg");
 /// Rounded corners of the PCB.
-const CORNER: f32 = 15.0;
+const CORNER: f32 = 11.3;
 
 const LED_YELLOW: Color32 = Color32::from_rgb(0xFF, 0xC4, 0x10);
 const LED_BLUE: Color32 = Color32::from_rgb(0x30, 0x70, 0xFF);
@@ -24,23 +24,23 @@ const LED_RED: Color32 = Color32::from_rgb(0xFF, 0x20, 0x30);
 
 /// OUT0..OUT15 LEDs (D8..D23), x of the package centre; all at `LED_Y`.
 const OUT_X: [f32; 16] =
-    [579.1, 547.8, 516.4, 484.9, 453.5, 421.9, 390.5, 359.0, 327.6, 296.1, 265.0, 233.7, 202.3, 170.9, 139.1, 107.1];
+    [579.9, 548.3, 516.6, 484.7, 452.9, 421.2, 389.5, 357.6, 326.0, 294.2, 262.8, 231.2, 199.6, 167.6, 135.5, 103.1];
 /// IN0..IN7 LEDs (D0..D7).
-const IN_X: [f32; 8] = [905.9, 874.2, 842.9, 811.3, 779.5, 747.4, 715.8, 683.9];
-const LED_Y: f32 = 536.8;
+const IN_X: [f32; 8] = [909.6, 877.8, 845.8, 813.3, 780.9, 748.2, 716.1, 684.1];
+const LED_Y: f32 = 538.0;
 /// Caps of S0..S7; all at `BUTTON_Y`.
-const BUTTON_X: [f32; 8] = [907.6, 875.6, 843.6, 811.6, 779.7, 747.9, 715.9, 684.5];
-const BUTTON_Y: f32 = 617.5;
+const BUTTON_X: [f32; 8] = [911.2, 878.7, 846.6, 814.2, 782.0, 749.8, 717.6, 685.8];
+const BUTTON_Y: f32 = 620.1;
 const BUTTON_CAP_R: f32 = 7.2;
 /// AUX0..AUX5 pads (INT0..5 = PG0..5).
-const AUX_X: f32 = 940.8;
-const AUX_Y: [f32; 6] = [287.2, 318.4, 349.6, 380.8, 412.1, 448.1];
+const AUX_X: f32 = 945.8;
+const AUX_Y: [f32; 6] = [285.5, 317.0, 348.6, 380.1, 411.7, 448.6];
 /// Nucleo buttons B1 (USER, blue) and B2 (RESET, black).
-const USER: (f32, f32) = (294.0, 77.0);
-const RESET: (f32, f32) = (297.0, 318.9);
+const USER: (f32, f32) = (289.2, 71.7);
+const RESET: (f32, f32) = (290.6, 318.1);
 /// Active area of the display (480 × 320): top left, top right, bottom right,
 /// bottom left.  Not quite a rectangle: the glass is ~15 mm above the PCB.
-const GLASS: [(f32, f32); 4] = [(518.8, 68.6), (896.6, 67.3), (897.9, 317.5), (521.4, 319.8)];
+const GLASS: [(f32, f32); 4] = [(515.0, 61.9), (895.9, 63.5), (898.4, 314.5), (518.6, 317.2)];
 
 /// The board photo and the LED glow sprite.
 pub struct Textures {
