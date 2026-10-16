@@ -7,7 +7,9 @@
 //! in design units (the photo is 1000 units wide) and were measured in the
 //! photo by boardasset.py.
 
-use eframe::egui::{self, Color32, CornerRadius, Mesh, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2};
+use eframe::egui::{
+    self, Color32, CornerRadius, Mesh, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2,
+};
 
 pub const BOARD_W: f32 = 1000.0;
 pub const BOARD_H: f32 = 651.37;
@@ -21,9 +23,8 @@ const LED_BLUE: Color32 = Color32::from_rgb(0x30, 0x70, 0xFF);
 const LED_RED: Color32 = Color32::from_rgb(0xFF, 0x20, 0x30);
 
 /// OUT0..OUT15 LEDs (D8..D23), x of the package centre; all at `LED_Y`.
-const OUT_X: [f32; 16] = [
-    579.1, 547.8, 516.4, 484.9, 453.5, 421.9, 390.5, 359.0, 327.6, 296.1, 265.0, 233.7, 202.3, 170.9, 139.1, 107.1,
-];
+const OUT_X: [f32; 16] =
+    [579.1, 547.8, 516.4, 484.9, 453.5, 421.9, 390.5, 359.0, 327.6, 296.1, 265.0, 233.7, 202.3, 170.9, 139.1, 107.1];
 /// IN0..IN7 LEDs (D0..D7).
 const IN_X: [f32; 8] = [905.9, 874.2, 842.9, 811.3, 779.5, 747.4, 715.8, 683.9];
 const LED_Y: f32 = 536.8;
@@ -49,12 +50,19 @@ pub struct Textures {
 
 impl Textures {
     pub fn load(ctx: &egui::Context) -> Self {
-        let mut img = image::load_from_memory_with_format(PHOTO, image::ImageFormat::Jpeg).expect("board photo").to_rgba8();
+        let mut img =
+            image::load_from_memory_with_format(PHOTO, image::ImageFormat::Jpeg).expect("board photo").to_rgba8();
         let max = ctx.input(|i| i.max_texture_side) as u32;
         if img.width() > max {
-            img = image::imageops::resize(&img, max, img.height() * max / img.width(), image::imageops::FilterType::Triangle);
+            img = image::imageops::resize(
+                &img,
+                max,
+                img.height() * max / img.width(),
+                image::imageops::FilterType::Triangle,
+            );
         }
-        let photo = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+        let photo =
+            egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
         // mipmaps: the 4096 px photo is usually shown at a third of its size
         let options = TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..TextureOptions::LINEAR };
 
@@ -72,7 +80,10 @@ impl Textures {
                 })
                 .collect(),
         );
-        Self { photo: ctx.load_texture("board", photo, options), glow: ctx.load_texture("glow", glow, TextureOptions::LINEAR) }
+        Self {
+            photo: ctx.load_texture("board", photo, options),
+            glow: ctx.load_texture("glow", glow, TextureOptions::LINEAR),
+        }
     }
 }
 
@@ -136,7 +147,11 @@ impl Pcb<'_> {
         }
         let hot = lerp(color, Color32::WHITE, 0.6);
         // the beige package takes the colour of the light (additive light alone would only whiten it)
-        self.painter.rect_filled(self.r(x - 5.0, y - 7.0, x + 5.0, y + 7.0), CornerRadius::same(self.len(1.5) as u8), color.gamma_multiply(0.6 * b));
+        self.painter.rect_filled(
+            self.r(x - 5.0, y - 7.0, x + 5.0, y + 7.0),
+            CornerRadius::same(self.len(1.5) as u8),
+            color.gamma_multiply(0.6 * b),
+        );
         self.glow(x, y, 42.0, 42.0, color, 0.9 * b); // light on the solder mask
         self.glow(x, y, 10.0, 13.0, color, 0.9 * b); // the package lights up
         self.glow(x, y, 4.5, 4.5, hot, b); // the die
@@ -145,7 +160,11 @@ impl Pcb<'_> {
     /// Shading of a pressed tact switch / latch marker.
     fn pressed(&self, x: f32, y: f32, r: f32) {
         self.painter.circle_filled(self.p(x, y), self.len(r), Color32::from_black_alpha(95));
-        self.painter.circle_stroke(self.p(x, y - 0.4), self.len(r - 0.6), Stroke::new(self.len(1.0), Color32::from_black_alpha(110)));
+        self.painter.circle_stroke(
+            self.p(x, y - 0.4),
+            self.len(r - 0.6),
+            Stroke::new(self.len(1.0), Color32::from_black_alpha(110)),
+        );
     }
 }
 
@@ -181,7 +200,10 @@ pub fn show(ui: &mut egui::Ui, tex: &Textures, state: &BoardState) -> BoardInput
 
     // ---- the photo
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-    painter.add(egui::epaint::RectShape::filled(outer, CornerRadius::same(pcb.len(CORNER) as u8), Color32::WHITE).with_texture(tex.photo.id(), uv));
+    painter.add(
+        egui::epaint::RectShape::filled(outer, CornerRadius::same(pcb.len(CORNER) as u8), Color32::WHITE)
+            .with_texture(tex.photo.id(), uv),
+    );
 
     // ---- display
     let quad = GLASS.map(|(x, y)| pcb.p(x, y));
@@ -198,22 +220,35 @@ pub fn show(ui: &mut egui::Ui, tex: &Textures, state: &BoardState) -> BoardInput
 
     // ---- Out: OUT15..OUT8 (PE7..PE0, yellow), OUT7..OUT0 (PD7..PD0, blue)
     for (bit, &x) in OUT_X.iter().enumerate() {
-        let (color, pin) = if bit >= 8 { (LED_YELLOW, format!("PE{}", bit - 8)) } else { (LED_BLUE, format!("PD{bit}")) };
+        let (color, pin) =
+            if bit >= 8 { (LED_YELLOW, format!("PE{}", bit - 8)) } else { (LED_BLUE, format!("PD{bit}")) };
         pcb.led(x, LED_Y, color, state.led_duty[bit]);
-        ui.interact(pcb.r(x - 14.0, LED_Y - 22.0, x + 14.0, LED_Y + 52.0), ui.scope_id().with(("out", bit)), Sense::hover())
-            .on_hover_text(format!("OUT{bit} = {pin} (LED D{}): {:.0} %", bit + 8, state.led_duty[bit] * 100.0));
+        ui.interact(
+            pcb.r(x - 14.0, LED_Y - 22.0, x + 14.0, LED_Y + 52.0),
+            ui.scope_id().with(("out", bit)),
+            Sense::hover(),
+        )
+        .on_hover_text(format!("OUT{bit} = {pin} (LED D{}): {:.0} %", bit + 8, state.led_duty[bit] * 100.0));
     }
 
     // ---- In: IN7..IN0 (PF7..PF0), red LEDs show the line level, buttons S7..S0
     for bit in 0..8 {
         let high = state.inputs & (1 << bit) != 0;
         pcb.led(IN_X[bit], LED_Y, LED_RED, if high { 1.0 } else { 0.0 });
-        ui.interact(pcb.r(IN_X[bit] - 14.0, LED_Y - 22.0, IN_X[bit] + 14.0, LED_Y + 52.0), ui.scope_id().with(("in", bit)), Sense::hover())
-            .on_hover_text(format!("IN{bit} = PF{bit} (LED D{bit}): {}", if high { "high" } else { "low" }));
+        ui.interact(
+            pcb.r(IN_X[bit] - 14.0, LED_Y - 22.0, IN_X[bit] + 14.0, LED_Y + 52.0),
+            ui.scope_id().with(("in", bit)),
+            Sense::hover(),
+        )
+        .on_hover_text(format!("IN{bit} = PF{bit} (LED D{bit}): {}", if high { "high" } else { "low" }));
 
         let (x, y) = (BUTTON_X[bit], BUTTON_Y);
         let resp = ui
-            .interact(pcb.r(x - 14.0, y - 14.0, x + 14.0, y + 14.0), ui.scope_id().with(("button", bit)), Sense::click_and_drag())
+            .interact(
+                pcb.r(x - 14.0, y - 14.0, x + 14.0, y + 14.0),
+                ui.scope_id().with(("button", bit)),
+                Sense::click_and_drag(),
+            )
             .on_hover_text(format!("S{bit} → IN{bit} (PF{bit}) · key {bit} · right click latches"));
         let held = resp.is_pointer_button_down_on();
         input.buttons[bit] = held;
@@ -222,7 +257,11 @@ pub fn show(ui: &mut egui::Ui, tex: &Textures, state: &BoardState) -> BoardInput
             pcb.pressed(x, y, BUTTON_CAP_R);
         }
         if state.latched[bit] {
-            painter.circle_stroke(pcb.p(x, y), pcb.len(16.5), Stroke::new(pcb.len(1.6).max(1.0), Color32::from_rgb(0xFF, 0xE0, 0x40)));
+            painter.circle_stroke(
+                pcb.p(x, y),
+                pcb.len(16.5),
+                Stroke::new(pcb.len(1.6).max(1.0), Color32::from_rgb(0xFF, 0xE0, 0x40)),
+            );
         }
     }
 
@@ -232,7 +271,11 @@ pub fn show(ui: &mut egui::Ui, tex: &Textures, state: &BoardState) -> BoardInput
         if let Some(high) = level {
             let wire = if high { Color32::from_rgb(0xE8, 0x30, 0x28) } else { Color32::from_rgb(0x2A, 0x5C, 0xD8) };
             painter.circle_filled(pcb.p(AUX_X, y), pcb.len(4.6), wire);
-            painter.circle_stroke(pcb.p(AUX_X, y), pcb.len(4.6), Stroke::new(pcb.len(0.8), Color32::from_white_alpha(150)));
+            painter.circle_stroke(
+                pcb.p(AUX_X, y),
+                pcb.len(4.6),
+                Stroke::new(pcb.len(0.8), Color32::from_white_alpha(150)),
+            );
         }
         let txt = match level {
             None => "open",
@@ -240,7 +283,11 @@ pub fn show(ui: &mut egui::Ui, tex: &Textures, state: &BoardState) -> BoardInput
             Some(true) => "3V3",
         };
         let hit = ui
-            .interact(pcb.r(AUX_X - 10.0, y - 10.0, AUX_X + 30.0, y + 10.0), ui.scope_id().with(("aux", n)), Sense::click())
+            .interact(
+                pcb.r(AUX_X - 10.0, y - 10.0, AUX_X + 30.0, y + 10.0),
+                ui.scope_id().with(("aux", n)),
+                Sense::click(),
+            )
             .on_hover_text(format!("AUX{n} / INT{n} = PG{n}: {txt} — click: open → GND → 3V3"));
         if hit.clicked() {
             input.int_clicked = Some(n);
@@ -248,12 +295,24 @@ pub fn show(ui: &mut egui::Ui, tex: &Textures, state: &BoardState) -> BoardInput
     }
 
     // ---- Nucleo buttons
-    let user = ui.interact(pcb.r(USER.0 - 13.0, USER.1 - 13.0, USER.0 + 13.0, USER.1 + 13.0), ui.scope_id().with("user"), Sense::click_and_drag()).on_hover_text("USER button B1 (PC13)");
+    let user = ui
+        .interact(
+            pcb.r(USER.0 - 13.0, USER.1 - 13.0, USER.0 + 13.0, USER.1 + 13.0),
+            ui.scope_id().with("user"),
+            Sense::click_and_drag(),
+        )
+        .on_hover_text("USER button B1 (PC13)");
     input.user = user.is_pointer_button_down_on();
     if input.user {
         pcb.pressed(USER.0, USER.1, 8.5);
     }
-    let reset = ui.interact(pcb.r(RESET.0 - 13.0, RESET.1 - 13.0, RESET.0 + 13.0, RESET.1 + 13.0), ui.scope_id().with("reset"), Sense::click()).on_hover_text("RESET button B2");
+    let reset = ui
+        .interact(
+            pcb.r(RESET.0 - 13.0, RESET.1 - 13.0, RESET.0 + 13.0, RESET.1 + 13.0),
+            ui.scope_id().with("reset"),
+            Sense::click(),
+        )
+        .on_hover_text("RESET button B2");
     input.reset_clicked = reset.clicked();
     if reset.is_pointer_button_down_on() {
         pcb.pressed(RESET.0, RESET.1, 8.5);
@@ -263,12 +322,19 @@ pub fn show(ui: &mut egui::Ui, tex: &Textures, state: &BoardState) -> BoardInput
     let xs = GLASS.map(|p| p.0);
     let ys = GLASS.map(|p| p.1);
     let glass = pcb.r(xs[0].max(xs[3]), ys[0].max(ys[1]), xs[1].min(xs[2]), ys[2].min(ys[3]));
-    let touch = ui.interact(glass, ui.scope_id().with("display"), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::Crosshair);
+    let touch = ui
+        .interact(glass, ui.scope_id().with("display"), Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::Crosshair);
     let to_px = |p: Pos2| {
         let (x, y) = glass_pixel((p.x - outer.min.x) / s, (p.y - outer.min.y) / s);
         (x.clamp(0.0, 479.99), y.clamp(0.0, 319.99))
     };
-    input.touch = touch.is_pointer_button_down_on().then(|| touch.interact_pointer_pos()).flatten().filter(|p| glass.contains(*p)).map(to_px);
+    input.touch = touch
+        .is_pointer_button_down_on()
+        .then(|| touch.interact_pointer_pos())
+        .flatten()
+        .filter(|p| glass.contains(*p))
+        .map(to_px);
     if let Some((x, y)) = input.touch.or_else(|| touch.hover_pos().map(to_px)) {
         touch.on_hover_text_at_pointer(format!("x = {:.0}, y = {:.0}", x.floor(), y.floor()));
     }

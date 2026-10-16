@@ -109,11 +109,7 @@ impl PortState {
             PinMode::Output => {
                 let open_drain = self.otyper & bit != 0;
                 let driven_high = self.odr & bit != 0;
-                if open_drain && driven_high {
-                    ext.unwrap_or_else(pulled)
-                } else {
-                    driven_high
-                }
+                if open_drain && driven_high { ext.unwrap_or_else(pulled) } else { driven_high }
             }
             PinMode::Input => ext.unwrap_or_else(pulled),
             PinMode::Analog => false,

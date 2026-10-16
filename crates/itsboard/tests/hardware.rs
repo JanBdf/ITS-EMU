@@ -113,14 +113,20 @@ fn input_levels_match_the_board() {
     // input pins: external pull-ups/drivers and floating levels of the board.
     let Some(out) = run("pins", 500) else { return };
     let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-pins.txt")).unwrap();
-    let lines = |text: &str| -> Vec<String> { text.lines().filter(|l| l.starts_with("P ")).map(str::to_owned).collect() };
+    let lines =
+        |text: &str| -> Vec<String> { text.lines().filter(|l| l.starts_with("P ")).map(str::to_owned).collect() };
     let (emu, board) = (lines(&out), lines(&board));
     assert_eq!(emu.len(), board.len());
     for (e, b) in emu.iter().zip(&board) {
         if b.starts_with("P D") {
             // PD8 (USART3 TX, busy printing) and PD15 (backlight PWM) toggle.
             let mask = |l: &str| -> Vec<u32> {
-                l.split_whitespace().skip(2).collect::<Vec<_>>().chunks(2).map(|kv| u32::from_str_radix(kv[1], 16).unwrap()).collect()
+                l.split_whitespace()
+                    .skip(2)
+                    .collect::<Vec<_>>()
+                    .chunks(2)
+                    .map(|kv| u32::from_str_radix(kv[1], 16).unwrap())
+                    .collect()
             };
             let (me, mb) = (mask(e), mask(b));
             for (i, (x, y)) in me.iter().zip(&mb).enumerate() {

@@ -40,6 +40,39 @@ fn test_new_font_prompt_and_start() {
     assert_golden("testnewfont_after_start", &sim.screen());
 }
 
+/// Idle-loop fast-forwarding must not change what a program does. (Uses a
+/// published program, so that CI covers it without the lab solutions.)
+#[test]
+fn idle_skipping_does_not_change_test_new_font() {
+    let (Some(mut fast), Some(mut slow)) = (Sim::boot("TestNewFont.axf"), Sim::boot("TestNewFont.axf")) else {
+        return;
+    };
+    slow.machine.system_mut().idle_skipping = false;
+    let compare = |fast: &Sim, slow: &Sim, ms: u64| {
+        assert_eq!(fast.board.display_generation(), slow.board.display_generation(), "at {ms} ms");
+        assert!(fast.screen() == slow.screen(), "display differs at {ms} ms");
+        assert_eq!(fast.board.backlight(), slow.board.backlight(), "at {ms} ms");
+    };
+    for ms in [500, 1500, 3000] {
+        fast.run_until_ms(ms);
+        slow.run_until_ms(ms);
+        compare(&fast, &slow, ms);
+    }
+    for sim in [&fast, &slow] {
+        sim.board.set_user_button(true);
+    }
+    fast.run_until_ms(3200);
+    slow.run_until_ms(3200);
+    for sim in [&fast, &slow] {
+        sim.board.set_user_button(false);
+    }
+    fast.run_until_ms(6000);
+    slow.run_until_ms(6000);
+    compare(&fast, &slow, 6000);
+    assert!(fast.machine.system().idle_skipped_cycles() > 0);
+    assert_eq!(slow.machine.system().idle_skipped_cycles(), 0);
+}
+
 #[test]
 fn stopwatch_measures_button_interval() {
     let Some(mut sim) = Sim::boot("StoppuhrASM.axf") else { return };

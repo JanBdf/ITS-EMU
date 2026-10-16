@@ -55,11 +55,7 @@ impl SysTick {
             return self.frozen;
         }
         let t = self.ticks(now);
-        if t == 0 || self.load == 0 {
-            0
-        } else {
-            self.load - ((t - 1) % self.period()) as u32
-        }
+        if t == 0 || self.load == 0 { 0 } else { self.load - ((t - 1) % self.period()) as u32 }
     }
 
     /// Brings the model up to `now`. Returns true if the SysTick exception
@@ -102,11 +98,7 @@ impl SysTick {
 
     fn restart_from(&mut self, now: u64, value: u32) {
         // Choose `base` so that the counter reads `value` at `now`.
-        let ticks_back = if value == 0 || self.load == 0 {
-            0
-        } else {
-            u64::from(self.load.saturating_sub(value)) + 1
-        };
+        let ticks_back = if value == 0 || self.load == 0 { 0 } else { u64::from(self.load.saturating_sub(value)) + 1 };
         self.base = now.saturating_sub(ticks_back * self.div());
         self.wraps_seen = self.wraps(self.ticks(now));
     }
