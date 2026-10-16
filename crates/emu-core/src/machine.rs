@@ -13,6 +13,7 @@ use crate::elf::ElfImage;
 use crate::exception::{self, AccessError, CoreAccess, CoreReg, ExceptionError};
 use crate::nvic::{self, Nvic};
 use crate::scs::{self, PPB_BASE, PPB_SIZE, Scs, ScsAction};
+use crate::timing::{self, BlockTiming, DivSite};
 
 /// Address space layout of the emulated MCU.
 #[derive(Debug, Clone)]
@@ -119,6 +120,14 @@ pub struct System {
     stepping: bool,
     /// A watchpoint (start address, kind) was hit during the current run.
     watch_hit: Option<(u32, WatchKind)>,
+    /// How the previous block ended: `Some((fallthrough, conditional))` for
+    /// a branch. A conditional branch was taken (pipeline refill) when the
+    /// next block does not start at the fall-through address.
+    branch_from: Option<(u64, bool)>,
+    /// Division instructions found in new blocks, waiting for their timing hook.
+    new_divs: Vec<DivSite>,
+    /// Division instructions that have a timing hook.
+    hooked_divs: std::collections::HashSet<u32>,
 }
 
 impl System {
@@ -200,6 +209,8 @@ pub struct Machine {
     /// Code hook on every instruction while watchpoints exist: stops right
     /// after the instruction that hit one.
     watch_stopper: Option<UcHookId>,
+    /// Timing hooks of division instructions (operand-dependent duration).
+    div_hooks: Vec<(u32, UcHookId)>,
     /// Last resume request of the GDB client, taken by the server.
     #[cfg(feature = "gdb")]
     pub(crate) gdb_resume: Option<crate::gdb::Resume>,
@@ -251,102 +262,34 @@ impl CoreAccess for UcCore<'_, '_> {
     }
 }
 
-/// Per-block facts derived from the code bytes.
-#[derive(Debug, Clone, Copy)]
-struct BlockInfo {
-    insns: u32,
-    /// The block contains stores (STR, PUSH, STM, VSTR, ...).
-    stores: bool,
-    /// The block may change state that idle detection does not compare
-    /// (MSR, CPS, SVC, floating-point registers). Never part of an idle loop.
-    side_effects: bool,
-}
-
-/// Direct-mapped cache: block (address, size) -> [`BlockInfo`].
+/// Direct-mapped cache: block (address, size) -> [`BlockTiming`].
 struct BlockCache {
-    entries: Vec<(u32, u16, u16)>,
+    entries: Vec<(u32, u16, BlockTiming)>,
 }
 
 impl BlockCache {
     const BITS: u32 = 16;
-    const STORES: u16 = 0x4000;
-    const SIDE_EFFECTS: u16 = 0x8000;
 
     fn new() -> Self {
-        Self { entries: vec![(u32::MAX, 0, 0); 1 << Self::BITS] }
+        Self { entries: vec![(u32::MAX, 0, BlockTiming::default()); 1 << Self::BITS] }
     }
 
     fn slot(addr: u64) -> usize {
         ((addr as u32 >> 1) & ((1 << Self::BITS) - 1)) as usize
     }
 
-    fn get(&self, addr: u64, size: u32) -> Option<BlockInfo> {
-        let (a, s, n) = self.entries[Self::slot(addr)];
-        (a == addr as u32 && u32::from(s) == size).then_some(BlockInfo {
-            insns: u32::from(n & 0x3FFF),
-            stores: n & Self::STORES != 0,
-            side_effects: n & Self::SIDE_EFFECTS != 0,
-        })
+    fn get(&self, addr: u64, size: u32) -> Option<BlockTiming> {
+        let (a, s, info) = self.entries[Self::slot(addr)];
+        (a == addr as u32 && u32::from(s) == size).then_some(info)
     }
 
-    fn insert(&mut self, addr: u64, size: u32, info: BlockInfo) {
-        let mut n = info.insns.min(0x3FFF) as u16;
-        if info.stores {
-            n |= Self::STORES;
-        }
-        if info.side_effects {
-            n |= Self::SIDE_EFFECTS;
-        }
-        self.entries[Self::slot(addr)] = (addr as u32, size as u16, n);
+    fn insert(&mut self, addr: u64, size: u32, info: BlockTiming) {
+        self.entries[Self::slot(addr)] = (addr as u32, size as u16, info);
     }
 
     fn clear(&mut self) {
-        self.entries.fill((u32::MAX, 0, 0));
+        self.entries.fill((u32::MAX, 0, BlockTiming::default()));
     }
-}
-
-/// Decodes a block: counts its Thumb instructions and conservatively
-/// classifies instructions with effects beyond the general-purpose registers.
-fn analyze_block(code: &[u8]) -> BlockInfo {
-    let mut i = 0;
-    let mut info = BlockInfo { insns: 0, stores: false, side_effects: false };
-    while i + 1 < code.len() {
-        let hw = u16::from_le_bytes([code[i], code[i + 1]]);
-        let wide = hw >> 11 >= 0b11101;
-        if wide {
-            info.stores |= thumb32_store(hw);
-            info.side_effects |= thumb32_side_effects(hw);
-        } else {
-            info.stores |= thumb16_store(hw);
-            info.side_effects |= thumb16_side_effects(hw);
-        }
-        i += if wide { 4 } else { 2 };
-        info.insns += 1;
-    }
-    info
-}
-
-fn thumb16_store(hw: u16) -> bool {
-    matches!(hw & 0xFE00, 0x5000 | 0x5200 | 0x5400) // STR/STRH/STRB (register)
-        || matches!(hw & 0xF800, 0x6000 | 0x7000 | 0x8000 | 0x9000 | 0xC000) // STR/STRB/STRH imm, STR SP, STM
-        || hw & 0xFE00 == 0xB400 // PUSH
-}
-
-fn thumb16_side_effects(hw: u16) -> bool {
-    hw & 0xFFE0 == 0xB660 // CPSIE/CPSID
-        || hw & 0xFF00 == 0xDF00 // SVC
-}
-
-fn thumb32_store(hw1: u16) -> bool {
-    (hw1 & 0xFE00 == 0xE800 && hw1 & 0x0010 == 0) // STM/STMDB/PUSH.W, STRD/STREX
-        || hw1 & 0xFF10 == 0xF800 // STR/STRB/STRH (wide)
-        || hw1 & 0xEE10 == 0xEC00 // VSTR/VSTM/VPUSH, STC, MCRR
-}
-
-fn thumb32_side_effects(hw1: u16) -> bool {
-    hw1 & 0xEE00 == 0xEC00 // coprocessor / VFP loads and stores (FP registers)
-        || hw1 & 0xEF00 == 0xEE00 // coprocessor/VFP data ops incl. VMSR
-        || hw1 & 0xFFE0 == 0xF380 // MSR
 }
 
 /// Detects loops that cannot make progress until a timed event happens.
@@ -490,7 +433,7 @@ impl IdleDetector {
     /// Called at the start of every block. Returns `Some(t)` if the core
     /// repeats the same loop iteration until cycle `t` (`u64::MAX`: until the
     /// next event).
-    fn on_block(uc: &mut Unicorn<System>, addr: u64, info: BlockInfo) -> Option<u64> {
+    fn on_block(uc: &mut Unicorn<System>, addr: u64, info: BlockTiming) -> Option<u64> {
         enum Action {
             Nothing,
             Snapshot { with_ram: bool },
@@ -593,6 +536,17 @@ impl IdleDetector {
 
 const EXC_RETURN_MAGIC: u32 = 0xFFFF_FF00;
 
+/// Unicorn register for core register number `n` (0..15).
+fn core_reg(n: u8) -> RegisterARM {
+    use RegisterARM::*;
+    [R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, SP, LR, PC][usize::from(n & 15)]
+}
+
+// Cortex-M4 exception latencies (zero wait state memory).
+const EXCEPTION_ENTRY_CYCLES: u64 = 12;
+const EXCEPTION_RETURN_CYCLES: u64 = 10;
+const TAIL_CHAIN_CYCLES: u64 = 6;
+
 // QEMU exception numbers reported through the interrupt hook.
 const EXCP_UDEF: u32 = 1;
 const EXCP_SWI: u32 = 2;
@@ -614,6 +568,9 @@ impl Machine {
             config: config.clone(),
             slice_end: 0,
             slice_limit: 0,
+            branch_from: None,
+            new_divs: Vec::new(),
+            hooked_divs: std::collections::HashSet::new(),
             block_insns: BlockCache::new(),
             last_invalid: None,
             stop: None,
@@ -652,6 +609,8 @@ impl Machine {
             Some(move |uc: &mut Unicorn<System>, off: u64, size: usize| {
                 let sys = uc.get_data_mut();
                 let addr = sys.config.memory.periph_base + off as u32;
+                let ws = sys.bus.wait_states(addr, false, sys.clock.cycles());
+                sys.clock.advance(ws);
                 let (mut ctx, bus) = sys.ctx();
                 let value = bus.read(&mut ctx, addr, size as u32);
                 let now = sys.clock.cycles();
@@ -664,6 +623,8 @@ impl Machine {
                 let sys = uc.get_data_mut();
                 sys.idle.dirty();
                 let addr = sys.config.memory.periph_base + off as u32;
+                let ws = sys.bus.wait_states(addr, true, sys.clock.cycles());
+                sys.clock.advance(ws);
                 let (mut ctx, bus) = sys.ctx();
                 bus.write(&mut ctx, addr, size as u32, value as u32);
                 // A device may have raised an interrupt: let the run loop look at it.
@@ -732,6 +693,16 @@ impl Machine {
                 // hook also fires for the next block before the step ends.)
                 return;
             }
+            // Taken branch at the end of the previous block: pipeline refill
+            // (for unconditional branches included in the block's cycles).
+            let entered_by_branch = match uc.get_data_mut().branch_from.take() {
+                Some((_, false)) => true,
+                Some((fallthrough, true)) if fallthrough != addr => {
+                    uc.get_data_mut().clock.advance(1);
+                    true
+                }
+                _ => false,
+            };
             if uc.get_data().clock.cycles() >= uc.get_data().slice_end && !uc.get_data_mut().continue_after_events() {
                 let _ = uc.emu_stop();
                 return;
@@ -740,12 +711,23 @@ impl Machine {
                 Some(info) => info,
                 None => {
                     let mut code = vec![0u8; size as usize];
+                    let mut divs = Vec::new();
                     let info = if uc.mem_read(addr, &mut code).is_ok() {
-                        analyze_block(&code)
+                        timing::analyze_block(&code, addr as u32, &mut divs)
                     } else {
-                        BlockInfo { insns: 1, stores: true, side_effects: true }
+                        BlockTiming { insns: 1, cycles: 1, stores: true, side_effects: true, ..BlockTiming::default() }
                     };
-                    uc.get_data_mut().block_insns.insert(addr, size, info);
+                    let sys = uc.get_data_mut();
+                    sys.block_insns.insert(addr, size, info);
+                    divs.retain(|d| !sys.hooked_divs.contains(&d.addr));
+                    if !divs.is_empty() {
+                        // Their timing hooks are installed between runs; the
+                        // block is translated again with them.
+                        sys.new_divs.extend(divs);
+                        sys.request_stop();
+                        let _ = uc.emu_stop();
+                        return;
+                    }
                     info
                 }
             };
@@ -770,7 +752,16 @@ impl Machine {
                     sys.clock.advance(until - now);
                 }
             }
-            uc.get_data_mut().clock.advance(u64::from(info.insns));
+            let sys = uc.get_data_mut();
+            let refill = if entered_by_branch { info.entry_penalty } else { 0 };
+            sys.clock.advance(u64::from(info.cycles + refill));
+            sys.branch_from = if info.ends_with_branch {
+                Some((addr + u64::from(size), true))
+            } else if info.ends_with_jump {
+                Some((addr + u64::from(size), false))
+            } else {
+                None
+            };
         })?;
 
         uc.add_intr_hook(Self::on_cpu_exception)?;
@@ -795,6 +786,7 @@ impl Machine {
             breakpoints: BTreeSet::new(),
             watchpoints: Vec::new(),
             watch_stopper: None,
+            div_hooks: Vec::new(),
             #[cfg(feature = "gdb")]
             gdb_resume: None,
         })
@@ -847,10 +839,43 @@ impl Machine {
         };
         if ok {
             // Drop stale translations of modified code.
-            let _ = self.uc.ctl_remove_cache(u64::from(addr), u64::from(addr) + data.len() as u64);
+            let end = u64::from(addr) + data.len() as u64;
+            let _ = self.uc.ctl_remove_cache(u64::from(addr), end);
             self.uc.get_data_mut().block_insns.clear();
+            let (stale, keep) = std::mem::take(&mut self.div_hooks)
+                .into_iter()
+                .partition(|&(a, _)| u64::from(a) + 4 > u64::from(addr) && u64::from(a) < end);
+            self.div_hooks = keep;
+            for (a, id) in stale {
+                let _ = self.uc.remove_hook(id);
+                self.uc.get_data_mut().hooked_divs.remove(&a);
+            }
         }
         ok
+    }
+
+    /// Installs timing hooks for division instructions found since the last
+    /// run: their duration depends on the operands.
+    fn install_div_hooks(&mut self) {
+        let divs = std::mem::take(&mut self.uc.get_data_mut().new_divs);
+        for d in divs {
+            if !self.uc.get_data_mut().hooked_divs.insert(d.addr) {
+                continue;
+            }
+            let a = u64::from(d.addr);
+            let hook = self.uc.add_code_hook(a, a, move |uc, _, _| {
+                let n = uc.reg_read(core_reg(d.rn)).unwrap_or(0) as u32;
+                let m = uc.reg_read(core_reg(d.rm)).unwrap_or(0) as u32;
+                let cycles = timing::div_cycles(d.signed, n, m);
+                // The block already accounted one cycle for the instruction.
+                uc.get_data_mut().clock.advance(u64::from(cycles.saturating_sub(1)));
+            });
+            match hook {
+                Ok(id) => self.div_hooks.push((d.addr, id)),
+                Err(e) => log::warn!("timing hook for division at {:#010x}: {e:?}", d.addr),
+            }
+            let _ = self.uc.ctl_remove_cache(a, a + 4);
+        }
     }
 
     /// Loads all segments of an ELF image into memory (like flashing it).
@@ -1032,6 +1057,7 @@ impl Machine {
         let mut first = true;
         loop {
             self.sync_devices();
+            self.install_div_hooks();
             if self.uc.get_data().reset_requested {
                 self.reset();
             }
@@ -1122,7 +1148,15 @@ impl Machine {
     }
 
     fn enter_exception(uc: &mut Unicorn<System>, exc: u32, return_addr: u32) {
-        uc.get_data_mut().idle.dirty();
+        Self::enter_exception_after(uc, exc, return_addr, EXCEPTION_ENTRY_CYCLES);
+    }
+
+    /// Exception entry that takes `latency` cycles (stacking, vector fetch).
+    fn enter_exception_after(uc: &mut Unicorn<System>, exc: u32, return_addr: u32, latency: u64) {
+        let sys = uc.get_data_mut();
+        sys.idle.dirty();
+        sys.clock.advance(latency);
+        sys.branch_from = None;
         let (vtor, stkalign) = {
             let s = &uc.get_data().scs;
             (s.vtor, s.stkalign())
@@ -1170,7 +1204,18 @@ impl Machine {
                 let res = exception::exit(&mut UcCore(uc), &mut nvic, pc | EXC_RETURN_MAGIC);
                 uc.get_data_mut().nvic = nvic;
                 match res {
-                    Ok(()) => Self::take_pending(uc), // tail-chaining
+                    Ok(()) => {
+                        uc.get_data_mut().branch_from = None;
+                        let masks = UcCore(uc).masks();
+                        match uc.get_data().nvic.pending_to_take(masks) {
+                            Some(exc) => {
+                                // Tail-chaining: no unstacking and stacking.
+                                let return_addr = uc.reg_read(RegisterARM::PC).unwrap_or(0) as u32;
+                                Self::enter_exception_after(uc, exc, return_addr, TAIL_CHAIN_CYCLES);
+                            }
+                            None => uc.get_data_mut().clock.advance(EXCEPTION_RETURN_CYCLES),
+                        }
+                    }
                     Err(ExceptionError::InvalidExcReturn(_)) => {
                         uc.get_data_mut().scs.cfsr |= scs::CFSR_INVSTATE;
                         Self::raise_fault(uc, nvic::USAGE_FAULT, pc);

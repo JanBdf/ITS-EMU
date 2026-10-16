@@ -12,6 +12,7 @@ pub mod machine;
 pub mod nvic;
 pub mod scs;
 pub mod systick;
+pub mod timing;
 
 pub use bus::{Bus, DeviceCtx, Peripheral};
 pub use clock::Clock;

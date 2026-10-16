@@ -61,6 +61,10 @@ struct Mapping {
     dev: Box<dyn Peripheral>,
 }
 
+/// Extra cycles (bus wait states) of an access to `addr` (`true`: write)
+/// that starts at the given cycle.
+pub type WaitStates = Box<dyn Fn(u32, bool, u64) -> u64>;
+
 #[derive(Default)]
 pub struct Bus {
     maps: Vec<Mapping>,
@@ -68,6 +72,7 @@ pub struct Bus {
     /// Earliest [`Peripheral::next_event`] of the peripherals accessed since
     /// the last [`Bus::take_access_event`].
     access_event: Option<u64>,
+    wait_states: Option<WaitStates>,
 }
 
 impl Bus {
@@ -163,6 +168,26 @@ impl Bus {
     pub fn update(&mut self, ctx: &mut DeviceCtx) {
         for m in &mut self.maps {
             m.dev.update(ctx);
+        }
+    }
+
+    /// Sets the function that gives the wait states of peripheral accesses
+    /// (e.g. clock domain crossing to a slower APB bus).
+    pub fn set_wait_states(&mut self, f: WaitStates) {
+        self.wait_states = Some(f);
+    }
+
+    /// Wait states of an access to `addr`; bit-band aliases count as an
+    /// access to their target word (writes as read plus write).
+    pub fn wait_states(&self, addr: u32, write: bool, now: u64) -> u64 {
+        let Some(f) = &self.wait_states else { return 0 };
+        match bitband_target(addr) {
+            Some((word, _)) if write => {
+                let rd = f(word, false, now);
+                rd + f(word, true, now + rd)
+            }
+            Some((word, _)) => f(word, false, now),
+            None => f(addr, write, now),
         }
     }
 
