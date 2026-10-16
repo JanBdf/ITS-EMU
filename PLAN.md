@@ -178,8 +178,26 @@ Progress beyond the spike (Phase 2/3):
   iteration (StoppuhrASM running, TestNewFont) are real work and run at
   ~250 MIPS (≈1.4× real time); TIM2 without prescaler changes every 2 cycles,
   so polling it cannot be skipped.
+- Validation against the real board (2026-10-16, `HwCheck`, `tools/hw`, phone
+  camera + ST-LINK): display content, orientation, fonts, geometry and LED
+  mapping were already right. Fixed: SPI transfers took no time (GUI_clear
+  46 ms instead of 437 ms), one cycle per instruction (loops 30–50 % too
+  fast), floating/externally pulled input levels, panel tone response.
+  Remaining timing deviations: neighbour effects of peripheral accesses
+  (±1 cycle), conditional branches to the next instruction; point-by-point
+  drawing −6.5 %. Not checked yet: touch, buttons pressed by hand, display
+  off state, Ethernet, exception timing with FPU context.
 
 Findings:
+- Timed peripherals (SPI frames every 256 cycles) need events inside a Unicorn
+  run: accesses clip the slice to the accessed peripheral's next event, due
+  events are processed in the block hook (ending the run costs syscalls), a
+  fired event invalidates the idle detector's observations. Reading the PC in
+  an MMIO callback gives the start of the block, not the instruction.
+- Cycle model (`emu_core::timing`): static block costs at translation time,
+  dynamic parts in hooks (taken conditional branch = next block is not the
+  fall-through; operand-dependent UDIV/SDIV via code hooks on the division
+  sites, installed between runs; bus wait states in the MMIO hooks).
 - Breakpoints use Unicorn *exits* (`ctl_exits_enable`/`ctl_set_exits`): checked
   per instruction at translation time, so they cost nothing at run time. A run
   that starts at an exit stops immediately, so resuming steps over it first.
