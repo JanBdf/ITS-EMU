@@ -14,6 +14,7 @@ const LED_OFF: Color32 = Color32::from_rgb(0x55, 0x5B, 0x66);
 const LED_RED: Color32 = Color32::from_rgb(0xFF, 0x3B, 0x30);
 const LED_GREEN: Color32 = Color32::from_rgb(0x34, 0xD3, 0x59);
 const LED_BLUE: Color32 = Color32::from_rgb(0x3B, 0x82, 0xF6);
+const LED_YELLOW: Color32 = Color32::from_rgb(0xFF, 0xD6, 0x0A);
 const MAX_CONSOLE: usize = 200_000;
 
 pub struct App {
@@ -120,7 +121,7 @@ impl App {
 
 /// Draws a round LED with a label below it.
 fn led(ui: &mut egui::Ui, on: bool, color: Color32, label: &str) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(34.0, 30.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(32.0, 30.0), Sense::hover());
     let center = Pos2::new(rect.center().x, rect.top() + 9.0);
     let painter = ui.painter();
     if on {
@@ -139,8 +140,8 @@ fn led(ui: &mut egui::Ui, on: bool, color: Color32, label: &str) {
 
 /// A tactile push button; returns (held down, right-clicked).
 fn push_button(ui: &mut egui::Ui, label: &str, color: Color32, latched: bool) -> (bool, bool) {
-    let (outer, response) = ui.allocate_exact_size(Vec2::new(34.0, 48.0), Sense::click_and_drag());
-    let rect = Rect::from_min_size(outer.min, Vec2::new(34.0, 34.0));
+    let (outer, response) = ui.allocate_exact_size(Vec2::new(32.0, 46.0), Sense::click_and_drag());
+    let rect = Rect::from_min_size(outer.min, Vec2::new(32.0, 32.0));
     let down = response.is_pointer_button_down_on() || latched;
     let painter = ui.painter();
     painter.rect_filled(rect.shrink(2.0), 4.0, Color32::from_rgb(0x2B, 0x2F, 0x36));
@@ -160,47 +161,49 @@ fn push_button(ui: &mut egui::Ui, label: &str, color: Color32, latched: bool) ->
 }
 
 const BOARD_MARGIN: f32 = 16.0;
-const IO_WIDTH: f32 = 8.0 * 42.0;
 const NUCLEO_WIDTH: f32 = 130.0;
 const GAP: f32 = 20.0;
 const LCD_BEZEL: f32 = 16.0;
 
 impl App {
-    /// "Out" LEDs and "In" buttons as on the left half of the PCB.
+    /// The row along the bottom edge of the PCB: OUT15..OUT8 (yellow),
+    /// OUT7..OUT0 (blue), then IN7..IN0 (red) with the buttons S7..S0 below.
     fn io_section(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, leds: u16, inputs: u8, typing: bool) {
-        ui.vertical(|ui| {
-            ui.set_width(IO_WIDTH);
-            ui.label(RichText::new("Out").color(SILK).size(16.0));
-            for row in [8u32, 0] {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("Out").color(SILK).size(16.0));
                 ui.horizontal(|ui| {
-                    for i in (row..row + 8).rev() {
-                        led(ui, leds & (1 << i) != 0, LED_RED, &format!("OUT{i}"));
+                    for i in (0..16u32).rev() {
+                        let color = if i >= 8 { LED_YELLOW } else { LED_BLUE };
+                        led(ui, leds & (1 << i) != 0, color, &format!("OUT{i}"));
                     }
                 });
-            }
-            ui.add_space(14.0);
-            ui.label(RichText::new("In").color(SILK).size(16.0));
-            ui.horizontal(|ui| {
-                for i in (0..8u32).rev() {
-                    led(ui, inputs & (1 << i) != 0, LED_GREEN, &format!("IN{i}"));
-                }
             });
-            ui.horizontal(|ui| {
-                for i in (0..8usize).rev() {
-                    let (mut down, toggled) = push_button(ui, &format!("S{i}"), Color32::from_rgb(0xE5, 0x48, 0x5A), self.latched[i]);
-                    if toggled {
-                        self.latched[i] = !self.latched[i];
+            ui.add_space(GAP);
+            ui.vertical(|ui| {
+                ui.label(RichText::new("In").color(SILK).size(16.0));
+                ui.horizontal(|ui| {
+                    for i in (0..8u32).rev() {
+                        led(ui, inputs & (1 << i) != 0, LED_RED, &format!("IN{i}"));
                     }
-                    let key = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7][i];
-                    down |= !typing && ctx.input(|inp| inp.key_down(key));
-                    if down != self.sent_buttons[i] {
-                        self.sent_buttons[i] = down;
-                        self.emu.send(Command::Button(i as u32, down));
+                });
+                ui.horizontal(|ui| {
+                    for i in (0..8usize).rev() {
+                        let (mut down, toggled) = push_button(ui, &format!("S{i}"), Color32::from_rgb(0xE5, 0x48, 0x5A), self.latched[i]);
+                        if toggled {
+                            self.latched[i] = !self.latched[i];
+                        }
+                        let key = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7][i];
+                        down |= !typing && ctx.input(|inp| inp.key_down(key));
+                        if down != self.sent_buttons[i] {
+                            self.sent_buttons[i] = down;
+                            self.emu.send(Command::Button(i as u32, down));
+                        }
                     }
-                }
+                });
+                ui.label(RichText::new("keys 0–7 = S0–S7 · right click latches a button").color(SILK.gamma_multiply(0.6)).size(10.0));
             });
-            ui.add_space(4.0);
-            ui.label(RichText::new("keys 0–7 = S0–S7 · right click latches a button").color(SILK.gamma_multiply(0.6)).size(10.0));
         });
     }
 
@@ -380,30 +383,19 @@ impl eframe::App for App {
         let typing = ctx.memory(|m| m.focused().is_some());
         egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_gray(30)).inner_margin(8.0)).show(ui, |ui| {
             egui::ScrollArea::both().show(ui, |ui| {
-                // Side by side if the display fits at a reasonable size, else stacked.
+                // As on the real board: display (with the Nucleo next to it)
+                // above, the row of LEDs and buttons along the bottom edge.
                 let avail = ui.available_width() - 2.0 * BOARD_MARGIN;
-                let side_scale = (avail - IO_WIDTH - NUCLEO_WIDTH - 2.0 * GAP - LCD_BEZEL) / SCREEN_WIDTH as f32;
-                let stacked = side_scale < 0.9;
-                let fit = if stacked { (avail - LCD_BEZEL) / SCREEN_WIDTH as f32 } else { side_scale };
+                let fit = (avail - NUCLEO_WIDTH - GAP - LCD_BEZEL) / SCREEN_WIDTH as f32;
                 let scale = self.scale.min(fit).max(0.5);
                 egui::Frame::new().fill(BOARD_BLUE).corner_radius(10.0).inner_margin(BOARD_MARGIN).show(ui, |ui| {
-                    if stacked {
-                        ui.horizontal_top(|ui| {
-                            self.io_section(ui, &ctx, leds, inputs, typing);
-                            ui.add_space(GAP);
-                            self.nucleo_section(ui, nucleo);
-                        });
-                        ui.add_space(GAP);
+                    ui.horizontal_top(|ui| {
                         self.display_section(ui, scale);
-                    } else {
-                        ui.horizontal_top(|ui| {
-                            self.io_section(ui, &ctx, leds, inputs, typing);
-                            ui.add_space(GAP);
-                            self.display_section(ui, scale);
-                            ui.add_space(GAP);
-                            self.nucleo_section(ui, nucleo);
-                        });
-                    }
+                        ui.add_space(GAP);
+                        self.nucleo_section(ui, nucleo);
+                    });
+                    ui.add_space(GAP);
+                    self.io_section(ui, &ctx, leds, inputs, typing);
                 });
             });
         });
