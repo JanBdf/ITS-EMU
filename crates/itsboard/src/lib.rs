@@ -4,7 +4,7 @@
 //! | Function            | Pins                                   |
 //! |---------------------|----------------------------------------|
 //! | LEDs OUT0–7 / 8–15  | PD0–7 / PE0–7                          |
-//! | Buttons S0–S7       | PF0–7 (pressed = low, pull-up in MCU)  |
+//! | Buttons S0–S7       | PF0–7 (pressed = low, external pull-up) |
 //! | INT0–5 / AUX0–5     | PG0–5                                  |
 //! | Nucleo LD1/LD2/LD3  | PB0 / PB7 / PB14                       |
 //! | Nucleo user button  | PC13 (pressed = high)                  |
@@ -37,7 +37,40 @@ const LCD_RST: (char, u32) = ('F', 12);
 const LCD_BL: (char, u32) = ('D', 15);
 const TP_CS: (char, u32) = ('F', 14);
 const TP_IRQ: (char, u32) = ('E', 13);
-const TP_BUSY: (char, u32) = ('B', 10);
+/// Input pins that external circuitry drives, measured on the real board
+/// (HwCheck `pins`: high with the MCU pull-down, resp. low with the pull-up).
+/// The buttons (PF0–7) and the touch IRQ (PE13) are modelled separately.
+const EXTERNAL_LEVELS: &[(char, u32, bool)] = &[
+    ('A', 1, false), // RMII_REF_CLK from the Ethernet PHY
+    ('A', 2, true),  // RMII_MDIO pull-up
+    ('A', 9, false), // USB_VBUS sense (USB OTG not connected)
+    ('B', 8, true),  // I2C1_SCL pull-up on the carrier board
+    ('B', 9, true),  // I2C1_SDA pull-up on the carrier board
+    ('B', 14, false), // LD3 (red LED to GND) loads the pin
+    ('C', 4, false), // RMII_RXD0
+    ('C', 5, false), // RMII_RXD1
+    ('E', 11, true),
+    ('G', 6, false),
+    ('G', 7, true),
+    ('G', 9, true),
+];
+
+/// Levels that floating inputs (no pull, not driven) read on the real board,
+/// per port A..K (HwCheck `pins`, no-pull IDR of the undriven inputs; for
+/// alternate function pins the idle level of the signal). Such
+/// levels are not guaranteed by the hardware (e.g. PG12 and PG15 change from
+/// time to time), but reading a whole port then gives typical values such as
+/// GPIOF->IDR = 0xFCFF with all buttons released.
+const FLOATING_LEVELS: [u16; 11] = [
+    0x05C0, // A: PA6 (SPI1_MISO), PA7 (SPI1_MOSI), PA8, PA10
+    0x3C48, // B: PB3 (SWO), PB6, PB10 (touch BUSY, high-Z while not selected), PB11..13
+    0x97C2, // C
+    0xBF00, // D: PD8/PD9 (USART3 idle), PD10..13, PD15 (backlight PWM, mostly high)
+    0x5500, // E: PE8, PE10, PE12, PE14
+    0x8C00, // F: PF10, PF11, PF15
+    0xB500, // G: PG8, PG10, PG12, PG13, PG15
+    0, 0, 0, 0,
+];
 const USER_BUTTON: (char, u32) = ('C', 13);
 
 /// Routes SPI1 frames to the chip whose chip select is low.
@@ -116,8 +149,15 @@ impl ItsBoard {
         let board = Self { mcu: mcu.clone(), lcd, touch };
         {
             let mut g = board.mcu.gpio.borrow_mut();
-            g.drive(port(TP_BUSY.0), TP_BUSY.1, Some(false));
-            g.drive(port(USER_BUTTON.0), USER_BUTTON.1, Some(false)); // external pull-down
+            for &(p, pin, level) in EXTERNAL_LEVELS {
+                g.drive(port(p), pin, Some(level));
+            }
+            for (i, &levels) in FLOATING_LEVELS.iter().enumerate() {
+                g.set_floating_levels(i, levels);
+            }
+        }
+        for n in 0..8 {
+            board.set_button(n, false);
         }
         board.sync_touch_irq();
         board
@@ -130,8 +170,9 @@ impl ItsBoard {
     /// Presses (`true`) or releases button S0–S7.
     pub fn set_button(&self, n: u32, pressed: bool) {
         assert!(n < 8, "the ITS-Board has buttons S0..S7");
-        // Pressed buttons pull the pin to GND; released pins float to the MCU pull-up.
-        self.mcu.gpio.borrow_mut().drive(port('F'), n, pressed.then_some(false));
+        // Pressed buttons pull the pin to GND; released ones are pulled up on
+        // the carrier board (high even with the MCU's pull-down enabled).
+        self.mcu.gpio.borrow_mut().drive(port('F'), n, Some(!pressed));
     }
 
     /// Drives one of the INT0–5 inputs (PG0–5); `None` leaves it open.
@@ -141,7 +182,8 @@ impl ItsBoard {
     }
 
     pub fn set_user_button(&self, pressed: bool) {
-        self.mcu.gpio.borrow_mut().drive(port(USER_BUTTON.0), USER_BUTTON.1, Some(pressed));
+        // Released: only a weak pull-down on the Nucleo (the MCU's pull-up wins).
+        self.mcu.gpio.borrow_mut().drive(port(USER_BUTTON.0), USER_BUTTON.1, pressed.then_some(true));
     }
 
     /// OUT15..OUT0 as a bit mask (bit n = OUTn lit).

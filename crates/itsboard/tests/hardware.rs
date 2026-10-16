@@ -108,6 +108,32 @@ fn instruction_timing_matches_the_board() {
 }
 
 #[test]
+fn input_levels_match_the_board() {
+    // IDR of all ports without pull, with pull-down and with pull-up on the
+    // input pins: external pull-ups/drivers and floating levels of the board.
+    let Some(out) = run("pins", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-pins.txt")).unwrap();
+    let lines = |text: &str| -> Vec<String> { text.lines().filter(|l| l.starts_with("P ")).map(str::to_owned).collect() };
+    let (emu, board) = (lines(&out), lines(&board));
+    assert_eq!(emu.len(), board.len());
+    for (e, b) in emu.iter().zip(&board) {
+        if b.starts_with("P D") {
+            // PD8 (USART3 TX, busy printing) and PD15 (backlight PWM) toggle.
+            let mask = |l: &str| -> Vec<u32> {
+                l.split_whitespace().skip(2).collect::<Vec<_>>().chunks(2).map(|kv| u32::from_str_radix(kv[1], 16).unwrap()).collect()
+            };
+            let (me, mb) = (mask(e), mask(b));
+            for (i, (x, y)) in me.iter().zip(&mb).enumerate() {
+                let ignore = if i >= 4 { 0x8100 } else { 0 };
+                assert_eq!(x & !ignore, y & !ignore, "{e}\n{b}");
+            }
+        } else {
+            assert_eq!(e, b);
+        }
+    }
+}
+
+#[test]
 fn division_timing_matches_the_board() {
     let Some(out) = run("div", 500) else { return };
     let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-div.txt")).unwrap();
