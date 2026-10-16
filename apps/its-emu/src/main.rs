@@ -44,6 +44,11 @@ struct Args {
     #[arg(long)]
     screenshot: Option<PathBuf>,
 
+    /// Screenshot with the look of the real panel (measured tone response and
+    /// black level) instead of the frame buffer's ideal colours
+    #[arg(long)]
+    as_seen: bool,
+
     /// Scripted inputs, comma separated `<seconds>:<input>=<value>`:
     /// `S0`..`S7` and `USER` take 1 (pressed) / 0 (released),
     /// `TOUCH` takes `x;y` or `0`, `SERIAL` takes text for the virtual COM
@@ -223,7 +228,7 @@ fn main() -> Result<()> {
     report_progress(&machine, &image, start, &what);
     report_board(&board);
     if let Some(path) = &args.screenshot {
-        save_screenshot(&board, path)?;
+        save_screenshot(&board, path, args.as_seen)?;
         println!("  display saved to {}", path.display());
     }
     Ok(())
@@ -245,10 +250,14 @@ fn report_board(board: &itsboard::ItsBoard) {
     );
 }
 
-fn save_screenshot(board: &itsboard::ItsBoard, path: &std::path::Path) -> Result<()> {
+fn save_screenshot(board: &itsboard::ItsBoard, path: &std::path::Path, as_seen: bool) -> Result<()> {
     use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH};
     let mut rgba = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
-    board.render_display(&mut rgba);
+    if as_seen {
+        board.render_display_as_seen(&mut rgba);
+    } else {
+        board.render_display(&mut rgba);
+    }
     let file = std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32);
     enc.set_color(png::ColorType::Rgba);

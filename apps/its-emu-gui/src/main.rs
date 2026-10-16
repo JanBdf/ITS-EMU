@@ -21,6 +21,11 @@ struct Args {
     /// Do not start the GDB server
     #[arg(long)]
     no_gdb: bool,
+
+    /// Show the display with the frame buffer's ideal colours instead of the
+    /// look of the real panel (darker mid tones, grey black)
+    #[arg(long)]
+    ideal_colors: bool,
 }
 
 fn main() -> eframe::Result {
@@ -33,5 +38,5 @@ fn main() -> eframe::Result {
             .with_drag_and_drop(true),
         ..Default::default()
     };
-    eframe::run_native("ITS-Board Emulator", options, Box::new(|cc| Ok(Box::new(app::App::new(cc, args.firmware, (!args.no_gdb).then_some(args.gdb))))))
+    eframe::run_native("ITS-Board Emulator", options, Box::new(|cc| Ok(Box::new(app::App::new(cc, args.firmware, (!args.no_gdb).then_some(args.gdb), args.ideal_colors)))))
 }

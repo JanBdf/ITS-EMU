@@ -32,6 +32,9 @@ pub enum Command {
     /// Level of INT0–5 / AUX0–5 (PG0–5): `None` = open.
     Int(u32, Option<bool>),
     Serial(Vec<u8>),
+    /// Show the frame buffer's ideal colours instead of the measured look of
+    /// the real panel (tone response, grey black level).
+    IdealColors(bool),
     Quit,
 }
 
@@ -150,6 +153,7 @@ struct Worker {
     rate_sample: (Instant, u64),
     measured_speed: f64,
     published_generation: u64,
+    ideal_colors: bool,
     /// External inputs, re-applied when new firmware is loaded.
     buttons: [bool; 8],
     ints: [Option<bool>; 6],
@@ -194,6 +198,7 @@ impl Worker {
             rate_sample: (now, 0),
             measured_speed: 0.0,
             published_generation: u64::MAX,
+            ideal_colors: false,
             buttons: [false; 8],
             ints: [None; 6],
             gdb,
@@ -273,6 +278,10 @@ impl Worker {
                 self.with_board(|b| b.set_int(n, level));
             }
             Command::Serial(data) => self.with_board(|b| b.mcu().usart3.borrow_mut().send(&data)),
+            Command::IdealColors(on) => {
+                self.ideal_colors = on;
+                self.published_generation = u64::MAX;
+            }
             Command::Quit => {}
         }
         self.publish(true);
@@ -396,7 +405,11 @@ impl Worker {
             let b = &sim.board;
             let generation = b.display_generation() ^ (b.backlight().to_bits() as u64);
             if generation != self.published_generation {
-                b.render_display(&mut snap.display);
+                if self.ideal_colors {
+                    b.render_display(&mut snap.display);
+                } else {
+                    b.render_display_as_seen(&mut snap.display);
+                }
                 snap.display_generation = snap.display_generation.wrapping_add(1);
                 self.published_generation = generation;
             }

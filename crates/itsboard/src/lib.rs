@@ -272,6 +272,59 @@ impl ItsBoard {
             }
         }
     }
+
+    /// Like [`Self::render_display`], but with the tone response and black
+    /// level measured on the real panel: what the display looks like on the
+    /// board rather than the ideal colours of the frame buffer.
+    pub fn render_display_as_seen(&self, rgba: &mut [u8]) {
+        assert_eq!(rgba.len(), SCREEN_WIDTH * SCREEN_HEIGHT * 4);
+        let lcd = self.lcd.borrow();
+        // The backlight's luminance is linear in the PWM duty cycle (measured).
+        let bl = self.backlight();
+        let lut: Vec<u8> = (0..=255u8).map(|v| panel_channel(v, bl)).collect();
+        let dark = lcd.is_dark();
+        for vy in 0..SCREEN_HEIGHT {
+            for vx in 0..SCREEN_WIDTH {
+                let i = 4 * (vy * SCREEN_WIDTH + vx);
+                if dark {
+                    rgba[i..i + 4].copy_from_slice(&[0, 0, 0, 0xFF]);
+                    continue;
+                }
+                let (px, py) = screen_to_panel(vx, vy);
+                let c = lcd.panel_pixel(px, py);
+                rgba[i] = lut[(c >> 16) as u8 as usize];
+                rgba[i + 1] = lut[(c >> 8) as u8 as usize];
+                rgba[i + 2] = lut[c as u8 as usize];
+                rgba[i + 3] = 0xFF;
+            }
+        }
+    }
+}
+
+/// Luminance of the real panel for the 32 levels of a 5-bit channel,
+/// relative to the full level (above black). Measured on the ITS-Board from
+/// raw photos of grey ramps, flat-field corrected (HwCheck `bars`): the
+/// lowest levels are black, mid levels darker than an sRGB monitor shows them.
+const PANEL_LUMINANCE: [f32; 32] = [
+    0.000, 0.000, 0.001, 0.001, 0.001, 0.001, 0.002, 0.005, 0.010, 0.019, 0.032, 0.042, 0.066, 0.081, 0.101, 0.130,
+    0.146, 0.183, 0.228, 0.278, 0.327, 0.387, 0.443, 0.506, 0.573, 0.654, 0.710, 0.776, 0.835, 0.891, 0.943, 1.000,
+];
+
+/// Light that the panel lets through for black (backlight leakage), relative
+/// to white: a dark grey, as on the real display. Measured 2.5 % from the
+/// camera's oblique view including ambient light; less when looking straight
+/// at the TN panel.
+const PANEL_BLACK: f32 = 0.01;
+
+/// sRGB-encoded 0..255 value of a channel level `v` (0..255 as returned by
+/// `panel_pixel`) on the real panel, for `backlight` (relative luminance).
+fn panel_channel(v: u8, backlight: f32) -> u8 {
+    let x = f32::from(v) / 255.0 * 31.0;
+    let i = (x.floor() as usize).min(30);
+    let l = PANEL_LUMINANCE[i] + (PANEL_LUMINANCE[i + 1] - PANEL_LUMINANCE[i]) * (x - i as f32);
+    let lin = (PANEL_BLACK + (1.0 - PANEL_BLACK) * l) * backlight;
+    let srgb = if lin <= 0.003_130_8 { 12.92 * lin } else { 1.055 * lin.powf(1.0 / 2.4) - 0.055 };
+    (srgb.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// The panel (native portrait, 320 × 480) is mounted rotated on the board.
