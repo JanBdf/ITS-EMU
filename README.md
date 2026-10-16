@@ -12,10 +12,10 @@ Status: work in progress — see [PLAN.md](PLAN.md).
 | | |
 |---|---|
 | CPU | Cortex-M4F (Thumb-2, FPU) via [Unicorn](https://www.unicorn-engine.org/); NVIC, SysTick, exceptions, faults in Rust |
-| Clock | RCC clock tree, virtual time in CPU cycles (16 MHz HSI → 180 MHz PLL) |
+| Clock | RCC clock tree, virtual time in CPU cycles (16 MHz HSI → 180 MHz PLL); cycle model of the Cortex-M4 (loads, branches, divisions, exceptions, APB wait states) measured on the board |
 | Peripherals | GPIO A–K, TIM2–5, SPI1, USART3, PWR, flash interface, bit-banding |
 | Board | LEDs OUT0–15, buttons S0–S7, INT0–5, Nucleo LEDs and USER button |
-| Display | ILI9486 480×320 TFT, XPT2046 touch, backlight PWM |
+| Display | ILI9486 480×320 TFT with SPI timing, XPT2046 touch, backlight PWM, tone response of the real panel (GUI; `--ideal-colors` to switch off) |
 | Serial | Virtual COM port (USART3, `printf` / `stdin_getchar`) |
 
 | Debugging | GDB remote server: breakpoints, single step, watchpoints, registers incl. FPU, memory, `monitor reset halt` |
@@ -78,6 +78,35 @@ others (such as the CDT adapter's auxiliary GDB for live watch) read and write
 memory and registers while it runs. Breakpoints do not modify memory, so they
 also work in flash. Watchpoints slow emulation down while they are set.
 
+## Comparison with the real board
+
+`tests/fixtures/ac6-src/HwCheck` is a test program that takes commands over
+the virtual COM port (colour bars, fonts, geometry, LED patterns, backlight,
+timing of library calls and instruction kernels with DWT->CYCCNT, pin
+levels). The same commands run on the real board and in the emulator;
+`crates/itsboard/tests/hardware.rs` compares the emulator with board results
+stored in `tests/hardware`.
+
+| | board | emulator |
+|---|---|---|
+| `GUI_clear` (SPI bound) | 39 325 428 TIM2 ticks | 39 325 157 |
+| `GUI_disStr`, Font24, 20 characters | 2 456 720 | 2 445 960 (−0.4 %) |
+| C delay loop / assembler loop, 100 000 iterations | 800 346 / 150 198 | 800 336 / 150 181 |
+| filled circle, radius 100 (point by point) | 133.3 M | 124.7 M (−6.5 %) |
+| input levels of ports A–I (no pull / pull-down / pull-up) | | identical |
+
+`tools/hw` drives the board (Nucleo ST-LINK: `flash.sh`, `cmd.py`) and a
+phone camera over adb (`camera-pro.sh`, `snap.sh`, Samsung camera in Pro
+mode with fixed exposure); `boardphoto.py` extracts the display (perspective
+corrected) and the LED states from a photo, `compare.sh` puts photo and
+emulator screenshot side by side.
+
+```sh
+tools/hw/flash.sh tests/fixtures/ac6/HwCheck.axf
+python3 tools/hw/cmd.py --wait-ready time cyc   # on the board
+tools/hw/compare.sh /tmp/cmp bars bars          # photo vs. emulator
+```
+
 ## Building
 
 Rust (stable) and a C toolchain with CMake (for Unicorn). On Linux the usual
@@ -90,7 +119,8 @@ cargo test --release
 
 Test fixtures in `tests/fixtures/ac6` are rebuilt from a checkout of
 ITS-BRD-VSC with `tools/build-fixtures.sh` (needs the CMSIS-Toolbox and Arm
-Compiler 6 as installed by the course's VS Code setup).
+Compiler 6 as installed by the course's VS Code setup); only the own test
+programs with `tools/build-own.sh [Name]`.
 
 ## License
 
