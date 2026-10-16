@@ -37,12 +37,14 @@ pub trait Peripheral {
     /// Brings time-dependent state up to `ctx.now()`.
     fn update(&mut self, _ctx: &mut DeviceCtx) {}
 
-    /// Whether reading the register at `offset` can return a different value
-    /// later without any write or external input in between (counters,
-    /// time-driven status flags). Such reads prevent idle-loop fast-forwarding.
-    /// Conservative default: `true`.
-    fn read_depends_on_time(&self, _offset: u32) -> bool {
-        true
+    /// Until which cycle a read of the register at `offset` keeps returning
+    /// the same value, as long as nothing writes to the peripheral and no
+    /// external input or scheduled event (see [`Self::next_event`]) happens:
+    /// `u64::MAX` for registers that only change on writes/events, the cycle
+    /// of the next counter tick for counters, `clock.cycles()` if unknown.
+    /// Used to fast-forward idle polling loops. Conservative default: now.
+    fn read_stable_until(&self, _offset: u32, clock: &Clock) -> u64 {
+        clock.cycles()
     }
 
     /// Cycle of the next internal event (timer overflow, ...), if any.
@@ -138,15 +140,15 @@ impl Bus {
         }
     }
 
-    /// See [`Peripheral::read_depends_on_time`]; unmapped addresses read as constant 0.
-    pub fn read_depends_on_time(&mut self, addr: u32) -> bool {
+    /// See [`Peripheral::read_stable_until`]; unmapped addresses read as constant 0.
+    pub fn read_stable_until(&mut self, addr: u32, clock: &Clock) -> u64 {
         let addr = bitband_target(addr).map_or(addr, |(word, _)| word);
         match self.find(addr) {
             Some(m) => {
                 let off = addr - m.base;
-                m.dev.read_depends_on_time(off)
+                m.dev.read_stable_until(off, clock)
             }
-            None => false,
+            None => u64::MAX,
         }
     }
 

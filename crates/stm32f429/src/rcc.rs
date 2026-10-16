@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use emu_core::bus::{extract_read, merge_write};
-use emu_core::{DeviceCtx, Peripheral};
+use emu_core::{Clock, DeviceCtx, Peripheral};
 
 pub const HSI_HZ: u32 = 16_000_000;
 /// The NUCLEO-F429ZI feeds the 8 MHz MCO of the ST-LINK into OSC_IN (HSE bypass).
@@ -208,8 +208,8 @@ impl Peripheral for Rcc {
         "RCC"
     }
 
-    fn read_depends_on_time(&self, _offset: u32) -> bool {
-        false
+    fn read_stable_until(&self, _offset: u32, _clock: &Clock) -> u64 {
+        u64::MAX
     }
 
     fn read(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
@@ -292,8 +292,8 @@ impl Peripheral for Pwr {
         "PWR"
     }
 
-    fn read_depends_on_time(&self, _offset: u32) -> bool {
-        false
+    fn read_stable_until(&self, _offset: u32, _clock: &Clock) -> u64 {
+        u64::MAX
     }
 
     fn read(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
@@ -348,8 +348,8 @@ impl Peripheral for FlashInterface {
         "FLASH"
     }
 
-    fn read_depends_on_time(&self, _offset: u32) -> bool {
-        false
+    fn read_stable_until(&self, _offset: u32, _clock: &Clock) -> u64 {
+        u64::MAX
     }
 
     fn read(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {

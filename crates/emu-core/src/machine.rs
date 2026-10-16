@@ -277,6 +277,9 @@ struct IdleDetector {
     clean: bool,
     /// RAM may have been written since the snapshot.
     stored: bool,
+    /// Earliest cycle at which a peripheral read since the snapshot may
+    /// return a different value (see `Peripheral::read_stable_until`).
+    stable_until: u64,
     /// Visits of `head` to skip before comparing again (back-off).
     skip: u32,
     backoff: u32,
@@ -285,6 +288,8 @@ struct IdleDetector {
 }
 
 struct Snapshot {
+    /// Cycle count when the snapshot was taken.
+    at: u64,
     regs: [u32; IDLE_REGS.len()],
     /// RAM contents, if stores happened in the previous period.
     ram: Option<Vec<u8>>,
@@ -320,6 +325,24 @@ impl IdleDetector {
         self.clean = false;
     }
 
+    /// A peripheral read at `now` returned a value that stays the same for
+    /// reads before cycle `until`.
+    fn note_read(&mut self, until: u64, now: u64) {
+        if until <= now {
+            self.dirty();
+        } else {
+            self.stable_until = self.stable_until.min(until);
+        }
+    }
+
+    /// Starts a new observation period.
+    fn restart(&mut self) {
+        self.snapshot = None;
+        self.clean = true;
+        self.stored = false;
+        self.stable_until = u64::MAX;
+    }
+
     fn read_regs(uc: &Unicorn<System>) -> [u32; IDLE_REGS.len()] {
         let mut r = [0u32; IDLE_REGS.len()];
         for (v, reg) in r.iter_mut().zip(IDLE_REGS) {
@@ -342,14 +365,18 @@ impl IdleDetector {
     fn take_snapshot(uc: &mut Unicorn<System>, with_ram: bool) {
         let regs = Self::read_regs(uc);
         let ram = with_ram.then(|| Self::read_ram(uc));
+        let at = uc.get_data().clock.cycles();
         let d = &mut uc.get_data_mut().idle;
-        d.snapshot = Some(Snapshot { regs, ram });
+        d.snapshot = Some(Snapshot { at, regs, ram });
         d.clean = true;
         d.stored = false;
+        d.stable_until = u64::MAX;
     }
 
-    /// Called at the start of every block. Returns true if the core is idle.
-    fn on_block(uc: &mut Unicorn<System>, addr: u64, info: BlockInfo) -> bool {
+    /// Called at the start of every block. Returns `Some(t)` if the core
+    /// repeats the same loop iteration until cycle `t` (`u64::MAX`: until the
+    /// next event).
+    fn on_block(uc: &mut Unicorn<System>, addr: u64, info: BlockInfo) -> Option<u64> {
         enum Action {
             Nothing,
             Snapshot { with_ram: bool },
@@ -362,12 +389,10 @@ impl IdleDetector {
                 d.blocks_since_head += 1;
                 // A backward branch starts a new candidate unless we are still
                 // inside the body of the current one.
-                if addr < prev && d.blocks_since_head > 64 {
+                if addr <= prev && d.blocks_since_head > 64 {
                     d.head = addr;
                     d.blocks_since_head = 0;
-                    d.snapshot = None;
-                    d.clean = true;
-                    d.stored = false;
+                    d.restart();
                     d.skip = 0;
                     d.backoff = 0;
                 }
@@ -377,9 +402,7 @@ impl IdleDetector {
                 if !d.clean {
                     // Outside influence: start over, but only snapshot after a
                     // clean period so that busy loops pay nothing.
-                    d.snapshot = None;
-                    d.clean = true;
-                    d.stored = false;
+                    d.restart();
                     Action::Nothing
                 } else if d.snapshot.is_none() {
                     Action::Snapshot { with_ram: d.stored }
@@ -392,10 +415,10 @@ impl IdleDetector {
             }
         };
         let idle = match action {
-            Action::Nothing => false,
+            Action::Nothing => None,
             Action::Snapshot { with_ram } => {
                 Self::take_snapshot(uc, with_ram);
-                false
+                None
             }
             Action::Compare => {
                 let regs = Self::read_regs(uc);
@@ -415,8 +438,26 @@ impl IdleDetector {
                     let d = &mut uc.get_data_mut().idle;
                     d.backoff = (d.backoff * 2).clamp(1, 4096);
                     d.skip = d.backoff;
+                    None
+                } else if d.stable_until == u64::MAX {
+                    Some(u64::MAX)
+                } else {
+                    // Reads return the same values only before `stable_until`:
+                    // repeat whole iterations (same timing as without
+                    // skipping) as long as all of their reads happen before it
+                    // and before the slice ends.
+                    let (at, with_ram) = (snap.at, d.stored);
+                    let until = d.stable_until.min(uc.get_data().slice_end);
+                    let now = uc.get_data().clock.cycles();
+                    let period = now - at;
+                    if period == 0 || until <= now {
+                        None
+                    } else {
+                        // The next period starts here; its reads are noted afresh.
+                        Self::take_snapshot(uc, with_ram);
+                        Some(now + (until - now) / period * period)
+                    }
                 }
-                same
             }
         };
         // The current block belongs to the next period.
@@ -486,11 +527,12 @@ impl Machine {
             Some(move |uc: &mut Unicorn<System>, off: u64, size: usize| {
                 let sys = uc.get_data_mut();
                 let addr = sys.config.memory.periph_base + off as u32;
-                if sys.bus.read_depends_on_time(addr) {
-                    sys.idle.dirty();
-                }
                 let (mut ctx, bus) = sys.ctx();
-                u64::from(bus.read(&mut ctx, addr, size as u32))
+                let value = bus.read(&mut ctx, addr, size as u32);
+                let now = sys.clock.cycles();
+                let until = sys.bus.read_stable_until(addr, &sys.clock);
+                sys.idle.note_read(until, now);
+                u64::from(value)
             }),
             Some(move |uc: &mut Unicorn<System>, off: u64, size: usize, value: u64| {
                 let sys = uc.get_data_mut();
@@ -511,10 +553,9 @@ impl Machine {
             Some(|uc: &mut Unicorn<System>, off: u64, size: usize| {
                 let ipsr = uc.reg_read(RegisterARM::IPSR).unwrap_or(0) as u32;
                 let sys = uc.get_data_mut();
-                if Scs::read_depends_on_time(off as u32) {
-                    sys.idle.dirty();
-                }
                 let now = sys.clock.cycles();
+                let until = sys.scs.read_stable_until(off as u32, now);
+                sys.idle.note_read(until, now);
                 u64::from(sys.scs.read(&sys.nvic, now, ipsr, off as u32, size as u32))
             }),
             Some(|uc: &mut Unicorn<System>, off: u64, size: usize, value: u64| {
@@ -576,16 +617,23 @@ impl Machine {
                     info
                 }
             };
-            if uc.get_data().idle_skipping && IdleDetector::on_block(uc, addr, info) {
-                // Nothing can change before the next event: jump to the end of the slice.
+            let idle_until = if uc.get_data().idle_skipping { IdleDetector::on_block(uc, addr, info) } else { None };
+            if let Some(until) = idle_until {
                 let sys = uc.get_data_mut();
                 let now = sys.clock.cycles();
-                if sys.slice_end > now {
-                    sys.idle.skipped_cycles += sys.slice_end - now;
-                    sys.clock.advance(sys.slice_end - now);
+                if until >= sys.slice_end {
+                    // Nothing can change before the next event: jump to the end of the slice.
+                    if sys.slice_end > now {
+                        sys.idle.skipped_cycles += sys.slice_end - now;
+                        sys.clock.advance(sys.slice_end - now);
+                    }
+                    let _ = uc.emu_stop();
+                    return;
                 }
-                let _ = uc.emu_stop();
-                return;
+                // A polled register changes before the slice ends: skip the
+                // iterations up to that point and continue with this block.
+                sys.idle.skipped_cycles += until - now;
+                sys.clock.advance(until - now);
             }
             uc.get_data_mut().clock.advance(u64::from(info.insns));
         })?;

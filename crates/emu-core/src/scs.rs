@@ -192,9 +192,16 @@ impl Scs {
         }
     }
 
-    /// Registers whose value changes with time (see `Peripheral::read_depends_on_time`).
-    pub fn read_depends_on_time(off: u32) -> bool {
-        matches!(off & !3, 0x1004 | 0xE010 | 0xE018 | 0xED04)
+    /// See `Peripheral::read_stable_until`.
+    pub fn read_stable_until(&self, off: u32, now: u64) -> u64 {
+        match off & !3 {
+            0x1004 => now,                                              // DWT_CYCCNT
+            0xE010 if self.systick.countflag() => now,                   // cleared by the read
+            0xE010 => self.systick.next_event().unwrap_or(u64::MAX),    // COUNTFLAG
+            0xE018 => self.systick.next_tick(now).unwrap_or(u64::MAX),  // VAL
+            0xED04 => now,                                              // ICSR (pending state)
+            _ => u64::MAX,
+        }
     }
 
     /// Reads from PPB offset `off` (relative to 0xE000_0000).

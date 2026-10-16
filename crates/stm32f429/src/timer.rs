@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use emu_core::bus::{extract_read, merge_write};
-use emu_core::{DeviceCtx, Peripheral};
+use emu_core::{Clock, DeviceCtx, Peripheral};
 
 use crate::rcc::SharedClocks;
 
@@ -277,6 +277,26 @@ impl GpTimer {
         self.next_event = Some(ctx.now() + dt_cycles.max(1));
     }
 
+    /// First cycle at which `ticks` ticks after `base_ps` have elapsed.
+    fn cycle_of_tick(&self, ticks: u128, clock: &Clock) -> u64 {
+        let hz = u128::from(self.kernel_hz().max(1));
+        let ps = u128::from(self.base_ps) + (ticks * self.tick_ps_num()).div_ceil(hz);
+        clock.cycle_at_ps(u64::try_from(ps).unwrap_or(u64::MAX))
+    }
+
+    fn next_tick_cycle(&self, clock: &Clock) -> u64 {
+        let (ticks, _) = self.elapsed_ticks(clock.time_ps());
+        self.cycle_of_tick(ticks + 1, clock)
+    }
+
+    fn next_overflow_cycle(&self, clock: &Clock) -> u64 {
+        if self.arr_active == 0 {
+            return u64::MAX;
+        }
+        let to_overflow = u128::from(self.arr_active - self.cnt_base.min(self.arr_active)) + 1;
+        self.cycle_of_tick(to_overflow, clock)
+    }
+
     fn sync_irq(&self, ctx: &mut DeviceCtx) {
         ctx.set_irq(self.irq, self.sr & self.dier & 0x5F != 0);
     }
@@ -316,9 +336,16 @@ impl Peripheral for GpTimer {
         self.name
     }
 
-    fn read_depends_on_time(&self, off: u32) -> bool {
-        // CNT and SR (update flag) advance on their own while the timer runs.
-        self.running() && matches!(off & !3, 0x10 | 0x24)
+    fn read_stable_until(&self, off: u32, clock: &Clock) -> u64 {
+        // CNT changes with every tick, SR (UIF) at the next overflow.
+        if !self.running() {
+            return u64::MAX;
+        }
+        match off & !3 {
+            0x24 => self.next_tick_cycle(clock),
+            0x10 => self.next_overflow_cycle(clock),
+            _ => u64::MAX,
+        }
     }
 
     fn read(&mut self, ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
@@ -422,7 +449,6 @@ impl Peripheral for GpTimer {
 mod tests {
     use super::*;
     use crate::rcc::Clocks;
-    use emu_core::Clock;
     use emu_core::nvic::Nvic;
 
     fn tim2() -> GpTimer {
@@ -446,6 +472,30 @@ mod tests {
         clock.advance(180_000_000 / 1000); // 1 ms
         let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
         assert_eq!(t.read(&mut ctx, 0x24, 4), 90_000);
+    }
+
+    #[test]
+    fn cnt_is_stable_until_the_next_prescaled_tick() {
+        let mut t = tim2();
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        {
+            let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+            t.write(&mut ctx, 0x00, 4, 1);
+            t.write(&mut ctx, 0x28, 2, 90 * 10 - 1); // 10 us = 1800 cycles per tick
+            t.write(&mut ctx, 0x14, 2, 1); // UG
+        }
+        for (now, cnt, until) in [(1000, 0, 1800), (1799, 0, 1800), (1800, 1, 3600), (5000, 2, 5400)] {
+            clock.advance(now - clock.cycles());
+            let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+            assert_eq!(t.read(&mut ctx, 0x24, 4), cnt, "CNT at {now}");
+            assert_eq!(t.read_stable_until(0x24, &clock), until, "CNT stable until, at {now}");
+            assert_eq!(t.read_stable_until(0x00, &clock), u64::MAX);
+        }
+        // Stopped timer: constant.
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        t.write(&mut ctx, 0x00, 4, 0);
+        assert_eq!(t.read_stable_until(0x24, &clock), u64::MAX);
     }
 
     #[test]

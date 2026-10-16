@@ -68,8 +68,8 @@ impl emu_core::Peripheral for EthStub {
         "ETH"
     }
 
-    fn read_depends_on_time(&self, _offset: u32) -> bool {
-        false
+    fn read_stable_until(&self, _offset: u32, _clock: &emu_core::Clock) -> u64 {
+        u64::MAX
     }
     fn read(&mut self, _: &mut emu_core::DeviceCtx, _: u32, _: u32) -> u32 {
         0
