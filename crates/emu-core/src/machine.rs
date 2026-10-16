@@ -101,8 +101,11 @@ pub struct System {
     pub scs: Scs,
     pub bus: Bus,
     config: MachineConfig,
-    /// Unicorn is stopped once the cycle counter reaches this value.
+    /// The block hook looks at devices once the cycle counter reaches this
+    /// value: the next timed event or `slice_limit`, whichever is earlier.
     slice_end: u64,
+    /// Unicorn is stopped once the cycle counter reaches this value.
+    slice_limit: u64,
     /// Instruction count per translated block (direct-mapped cache).
     block_insns: BlockCache,
     /// Last invalid memory access reported by Unicorn (address, is_write, is_fetch).
@@ -124,6 +127,55 @@ impl System {
     /// current instruction).
     pub fn request_stop(&mut self) {
         self.slice_end = 0;
+        self.slice_limit = 0;
+    }
+
+    /// Brings SysTick and the peripherals up to the current cycle.
+    fn sync_devices(&mut self) {
+        let now = self.clock.cycles();
+        if self.scs.systick.update(now) {
+            self.nvic.set_pending(nvic::SYSTICK);
+        }
+        // A peripheral event changes state that polling loops may read: the
+        // idle detector must not rely on observations made before it.
+        if self.bus.next_event().is_some_and(|t| t <= now) {
+            self.idle.dirty();
+        }
+        let (mut ctx, bus) = self.ctx();
+        bus.update(&mut ctx);
+    }
+
+    /// Next cycle at which the block hook has to look at devices.
+    fn next_slice_end(&self) -> u64 {
+        let now = self.clock.cycles();
+        let next_event = [self.scs.systick.next_event(), self.bus.next_event()].into_iter().flatten().min();
+        next_event.map_or(self.slice_limit, |ev| self.slice_limit.min(ev.max(now + 1)))
+    }
+
+    /// Called from the block hook when `slice_end` is reached: processes due
+    /// events in place, which is much cheaper than ending the Unicorn run.
+    /// Returns false if the run has to end (slice limit, interrupt pending).
+    fn continue_after_events(&mut self) -> bool {
+        if self.clock.cycles() >= self.slice_limit {
+            return false;
+        }
+        self.sync_devices();
+        if self.nvic.any_pending() {
+            return false;
+        }
+        self.slice_end = self.next_slice_end();
+        true
+    }
+
+    /// Ends the slice at a peripheral event that an access has just scheduled
+    /// (e.g. the end of an SPI frame started by a DR write), so that time is
+    /// not fast-forwarded past it.
+    fn clip_slice_to_events(&mut self) {
+        if let Some(ev) = self.bus.take_access_event()
+            && ev < self.slice_end
+        {
+            self.slice_end = ev;
+        }
     }
 
     /// Cycles skipped by idle-loop fast-forwarding since reset.
@@ -312,6 +364,10 @@ struct IdleDetector {
     prev_block: u64,
     /// Snapshot taken at a visit of `head`.
     snapshot: Option<Snapshot>,
+    /// Reused buffers for RAM snapshots and comparisons (allocating a fresh
+    /// 256 KiB buffer each time costs a page fault per 4 KiB).
+    ram_spare: Vec<u8>,
+    ram_scratch: Vec<u8>,
     /// Nothing outside registers/RAM happened since the snapshot.
     clean: bool,
     /// RAM may have been written since the snapshot.
@@ -376,7 +432,9 @@ impl IdleDetector {
 
     /// Starts a new observation period.
     fn restart(&mut self) {
-        self.snapshot = None;
+        if let Some(ram) = self.snapshot.take().and_then(|s| s.ram) {
+            self.ram_spare = ram;
+        }
         self.clean = true;
         self.stored = false;
         self.stable_until = u64::MAX;
@@ -390,20 +448,37 @@ impl IdleDetector {
         r
     }
 
-    fn read_ram(uc: &Unicorn<System>) -> Vec<u8> {
+    fn read_ram(uc: &Unicorn<System>, buf: &mut Vec<u8>) {
         let ram = &uc.get_data().config.memory.ram;
-        let mut buf = vec![0u8; ram.iter().map(|&(_, size)| size as usize).sum()];
+        buf.resize(ram.iter().map(|&(_, size)| size as usize).sum(), 0);
         let mut off = 0;
         for &(base, size) in ram {
             let _ = uc.mem_read(u64::from(base), &mut buf[off..off + size as usize]);
             off += size as usize;
         }
-        buf
+    }
+
+    /// Compares RAM with the snapshot's copy.
+    fn ram_unchanged(uc: &mut Unicorn<System>) -> bool {
+        let mut scratch = std::mem::take(&mut uc.get_data_mut().idle.ram_scratch);
+        Self::read_ram(uc, &mut scratch);
+        let d = &mut uc.get_data_mut().idle;
+        let same = d.snapshot.as_ref().and_then(|s| s.ram.as_ref()).is_some_and(|ram| *ram == scratch);
+        d.ram_scratch = scratch;
+        same
     }
 
     fn take_snapshot(uc: &mut Unicorn<System>, with_ram: bool) {
         let regs = Self::read_regs(uc);
-        let ram = with_ram.then(|| Self::read_ram(uc));
+        let ram = with_ram.then(|| {
+            let d = &mut uc.get_data_mut().idle;
+            let mut buf = match d.snapshot.take().and_then(|s| s.ram) {
+                Some(old) => old,
+                None => std::mem::take(&mut d.ram_spare),
+            };
+            Self::read_ram(uc, &mut buf);
+            buf
+        });
         let at = uc.get_data().clock.cycles();
         let d = &mut uc.get_data_mut().idle;
         d.snapshot = Some(Snapshot { at, regs, ram });
@@ -461,14 +536,19 @@ impl IdleDetector {
             }
             Action::Compare => {
                 let regs = Self::read_regs(uc);
+                let (regs_same, ram_check) = {
+                    let d = &uc.get_data().idle;
+                    let snap = d.snapshot.as_ref().expect("snapshot present");
+                    (regs == snap.regs, d.stored.then_some(snap.ram.is_some()))
+                };
+                let same = regs_same
+                    && match ram_check {
+                        None => true,
+                        Some(true) => Self::ram_unchanged(uc),
+                        Some(false) => false,
+                    };
                 let d = &uc.get_data().idle;
                 let snap = d.snapshot.as_ref().expect("snapshot present");
-                let same = regs == snap.regs
-                    && match (&snap.ram, d.stored) {
-                        (_, false) => true,
-                        (Some(ram), true) => *ram == Self::read_ram(uc),
-                        (None, true) => false,
-                    };
                 if !same {
                     let with_ram = d.stored;
                     Self::take_snapshot(uc, with_ram);
@@ -533,6 +613,7 @@ impl Machine {
             bus,
             config: config.clone(),
             slice_end: 0,
+            slice_limit: 0,
             block_insns: BlockCache::new(),
             last_invalid: None,
             stop: None,
@@ -576,6 +657,7 @@ impl Machine {
                 let now = sys.clock.cycles();
                 let until = sys.bus.read_stable_until(addr, &sys.clock);
                 sys.idle.note_read(until, now);
+                sys.clip_slice_to_events();
                 u64::from(value)
             }),
             Some(move |uc: &mut Unicorn<System>, off: u64, size: usize, value: u64| {
@@ -588,6 +670,7 @@ impl Machine {
                 if sys.nvic.any_pending() {
                     sys.request_stop();
                 }
+                sys.clip_slice_to_events();
             }),
         )?;
 
@@ -649,7 +732,7 @@ impl Machine {
                 // hook also fires for the next block before the step ends.)
                 return;
             }
-            if uc.get_data().clock.cycles() >= uc.get_data().slice_end {
+            if uc.get_data().clock.cycles() >= uc.get_data().slice_end && !uc.get_data_mut().continue_after_events() {
                 let _ = uc.emu_stop();
                 return;
             }
@@ -671,18 +754,21 @@ impl Machine {
                 let sys = uc.get_data_mut();
                 let now = sys.clock.cycles();
                 if until >= sys.slice_end {
-                    // Nothing can change before the next event: jump to the end of the slice.
+                    // Nothing can change before the next event: jump to it.
                     if sys.slice_end > now {
                         sys.idle.skipped_cycles += sys.slice_end - now;
                         sys.clock.advance(sys.slice_end - now);
                     }
-                    let _ = uc.emu_stop();
-                    return;
+                    if !sys.continue_after_events() {
+                        let _ = uc.emu_stop();
+                        return;
+                    }
+                } else {
+                    // A polled register changes before the slice ends: skip the
+                    // iterations up to that point and continue with this block.
+                    sys.idle.skipped_cycles += until - now;
+                    sys.clock.advance(until - now);
                 }
-                // A polled register changes before the slice ends: skip the
-                // iterations up to that point and continue with this block.
-                sys.idle.skipped_cycles += until - now;
-                sys.clock.advance(until - now);
             }
             uc.get_data_mut().clock.advance(u64::from(info.insns));
         })?;
@@ -923,6 +1009,7 @@ impl Machine {
         let sys = self.uc.get_data_mut();
         sys.stepping = true;
         sys.slice_end = u64::MAX;
+        sys.slice_limit = u64::MAX;
         let result = self.uc.emu_start(u64::from(pc | 1), u64::MAX, 0, 1);
         let sys = self.uc.get_data_mut();
         sys.stepping = false;
@@ -964,15 +1051,13 @@ impl Machine {
             if now >= end {
                 return StopReason::Budget;
             }
-            let mut slice_end = end.min(now + sys.config.quantum);
+            let mut slice_limit = end.min(now + sys.config.quantum);
             if sys.nvic.any_pending() {
-                slice_end = slice_end.min(now + sys.config.masked_quantum);
+                slice_limit = slice_limit.min(now + sys.config.masked_quantum);
             }
-            let next_event = [sys.scs.systick.next_event(), sys.bus.next_event()].into_iter().flatten().min();
-            if let Some(ev) = next_event {
-                slice_end = slice_end.min(ev.max(now + 1));
-            }
-            self.uc.get_data_mut().slice_end = slice_end;
+            let sys = self.uc.get_data_mut();
+            sys.slice_limit = slice_limit;
+            sys.slice_end = sys.next_slice_end();
 
             let pc = self.pc();
             if std::mem::take(&mut first) && resume_pc == Some(pc) {
@@ -987,7 +1072,7 @@ impl Machine {
                 self.on_emu_error(err);
             } else if self.breakpoints.contains(&self.pc()) && self.uc.get_data().stop.is_none() {
                 return StopReason::DebugBreakpoint { pc: self.pc() };
-            } else if self.clock().cycles() < slice_end && !self.stopped_on_purpose() {
+            } else if self.clock().cycles() < slice_limit && !self.stopped_on_purpose() {
                 self.on_idle_return();
             }
         }
@@ -1022,13 +1107,7 @@ impl Machine {
     }
 
     fn sync_devices(&mut self) {
-        let sys = self.uc.get_data_mut();
-        let now = sys.clock.cycles();
-        if sys.scs.systick.update(now) {
-            sys.nvic.set_pending(nvic::SYSTICK);
-        }
-        let (mut ctx, bus) = sys.ctx();
-        bus.update(&mut ctx);
+        self.uc.get_data_mut().sync_devices();
     }
 
     fn take_pending_exception(&mut self) {

@@ -65,6 +65,9 @@ struct Mapping {
 pub struct Bus {
     maps: Vec<Mapping>,
     warned: HashSet<u32>,
+    /// Earliest [`Peripheral::next_event`] of the peripherals accessed since
+    /// the last [`Bus::take_access_event`].
+    access_event: Option<u64>,
 }
 
 impl Bus {
@@ -121,7 +124,10 @@ impl Bus {
     fn read_aligned(&mut self, ctx: &mut DeviceCtx, addr: u32, size: u32) -> u32 {
         if let Some(m) = self.find(addr) {
             let off = addr - m.base;
-            return m.dev.read(ctx, off, size);
+            let v = m.dev.read(ctx, off, size);
+            let ev = m.dev.next_event();
+            self.note_access_event(ev);
+            return v;
         }
         if self.warned.insert(addr) {
             log::warn!("read from unmodelled peripheral address {addr:#010x} (reads as 0)");
@@ -133,6 +139,8 @@ impl Bus {
         if let Some(m) = self.find(addr) {
             let off = addr - m.base;
             m.dev.write(ctx, off, size, value);
+            let ev = m.dev.next_event();
+            self.note_access_event(ev);
             return;
         }
         if self.warned.insert(addr) {
@@ -156,6 +164,18 @@ impl Bus {
         for m in &mut self.maps {
             m.dev.update(ctx);
         }
+    }
+
+    fn note_access_event(&mut self, ev: Option<u64>) {
+        if let Some(t) = ev {
+            self.access_event = Some(self.access_event.map_or(t, |a| a.min(t)));
+        }
+    }
+
+    /// Earliest next event of the peripherals accessed since the last call.
+    /// An access may schedule an event (e.g. the end of a transfer).
+    pub fn take_access_event(&mut self) -> Option<u64> {
+        self.access_event.take()
     }
 
     pub fn next_event(&self) -> Option<u64> {
