@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/emu-core", "apps/its-emu", "crates/stm32f429"]
+members = ["crates/emu-core", "apps/its-emu", "crates/stm32f429", "apps/its-emu-gui"]
 
 [workspace.package]
 version = "0.1.0"

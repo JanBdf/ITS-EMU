@@ -12,7 +12,10 @@
 //! | Touch (XPT2046)     | SPI1, CS PF14, PENIRQ PE13, BUSY PB10  |
 
 pub mod ili9486;
+pub mod sim;
 pub mod xpt2046;
+
+pub use sim::Simulator;
 
 use std::cell::RefCell;
 use std::rc::Rc;

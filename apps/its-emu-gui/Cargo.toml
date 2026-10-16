@@ -1,0 +1,17 @@
+[package]
+name = "its-emu-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+itsboard.workspace = true
+emu-core.workspace = true
+stm32f429.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+clap.workspace = true
+eframe = "0.37"
+rfd = "0.17"
+png.workspace = true
