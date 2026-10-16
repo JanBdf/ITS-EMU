@@ -42,6 +42,9 @@ pub struct PortState {
     /// Pins driven from outside (buttons, devices) and their levels.
     pub ext_mask: u16,
     pub ext_level: u16,
+    /// Number of rising edges per pin caused by output writes. Lets devices
+    /// detect pulses (e.g. chip-select frames) between two of their accesses.
+    pub rises: [u32; 16],
 }
 
 impl PortState {
@@ -95,6 +98,18 @@ impl PortState {
         }
     }
 
+    /// Changes ODR and counts rising edges of the resulting pin levels.
+    fn set_odr(&mut self, odr: u32) {
+        let before = self.idr();
+        self.odr = odr & 0xFFFF;
+        let rising = self.idr() & !before;
+        for pin in 0..16 {
+            if rising & (1 << pin) != 0 {
+                self.rises[pin] = self.rises[pin].wrapping_add(1);
+            }
+        }
+    }
+
     pub fn idr(&self) -> u32 {
         (0..16).filter(|&p| self.level(p)).fold(0, |acc, p| acc | (1 << p))
     }
@@ -131,6 +146,11 @@ impl GpioBank {
 
     pub fn level(&self, port: usize, pin: u32) -> bool {
         self.ports[port].level(pin)
+    }
+
+    /// Rising edges of a pin caused by output writes since reset (wrapping).
+    pub fn rises(&self, port: usize, pin: u32) -> u32 {
+        self.ports[port].rises[pin as usize]
     }
 }
 
@@ -173,6 +193,10 @@ impl Peripheral for GpioPort {
         "GPIO"
     }
 
+    fn read_depends_on_time(&self, _offset: u32) -> bool {
+        false
+    }
+
     fn read(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
         if !self.clock_enabled() {
             return 0;
@@ -205,13 +229,16 @@ impl Peripheral for GpioPort {
             0x04 => p.otyper = merge_write(p.otyper, off, size, value) & 0xFFFF,
             0x08 => p.ospeedr = merge_write(p.ospeedr, off, size, value),
             0x0C => p.pupdr = merge_write(p.pupdr, off, size, value),
-            0x14 => p.odr = merge_write(p.odr, off, size, value) & 0xFFFF,
+            0x14 => {
+                let odr = merge_write(p.odr, off, size, value);
+                p.set_odr(odr);
+            }
             0x18 => {
                 // Narrow writes only touch their own bits; the rest is zero.
                 let v = merge_write(0, off, size, value);
                 let set = v & 0xFFFF;
                 let reset = v >> 16;
-                p.odr = ((p.odr & !reset) | set) & 0xFFFF; // set wins over reset
+                p.set_odr((p.odr & !reset) | set); // set wins over reset
             }
             0x1C => p.lckr = merge_write(p.lckr, off, size, value) & 0x1_FFFF,
             0x20 => p.afr[0] = merge_write(p.afr[0], off, size, value),

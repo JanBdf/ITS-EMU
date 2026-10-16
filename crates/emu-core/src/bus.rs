@@ -37,6 +37,14 @@ pub trait Peripheral {
     /// Brings time-dependent state up to `ctx.now()`.
     fn update(&mut self, _ctx: &mut DeviceCtx) {}
 
+    /// Whether reading the register at `offset` can return a different value
+    /// later without any write or external input in between (counters,
+    /// time-driven status flags). Such reads prevent idle-loop fast-forwarding.
+    /// Conservative default: `true`.
+    fn read_depends_on_time(&self, _offset: u32) -> bool {
+        true
+    }
+
     /// Cycle of the next internal event (timer overflow, ...), if any.
     fn next_event(&self) -> Option<u64> {
         None
@@ -127,6 +135,18 @@ impl Bus {
         }
         if self.warned.insert(addr) {
             log::warn!("write {value:#x} to unmodelled peripheral address {addr:#010x} (ignored)");
+        }
+    }
+
+    /// See [`Peripheral::read_depends_on_time`]; unmapped addresses read as constant 0.
+    pub fn read_depends_on_time(&mut self, addr: u32) -> bool {
+        let addr = bitband_target(addr).map_or(addr, |(word, _)| word);
+        match self.find(addr) {
+            Some(m) => {
+                let off = addr - m.base;
+                m.dev.read_depends_on_time(off)
+            }
+            None => false,
         }
     }
 

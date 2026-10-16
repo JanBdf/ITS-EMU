@@ -33,9 +33,74 @@ struct Args {
     /// Do not fast-forward idle loops (for comparison/debugging)
     #[arg(long)]
     no_idle_skip: bool,
+
+    /// Write the display content to this PNG file when the run ends
+    #[arg(long)]
+    screenshot: Option<PathBuf>,
+
+    /// Scripted inputs, comma separated `<seconds>:<input>=<value>`:
+    /// `S0`..`S7` and `USER` take 1 (pressed) / 0 (released),
+    /// `TOUCH` takes `x;y` or `0`. Example: `1.0:S7=1,1.2:S7=0`
+    #[arg(long, value_parser = parse_inputs)]
+    input: Option<InputScript>,
 }
 
 const FONTS_ADDR: u32 = 0x0810_0000;
+
+#[derive(Debug, Clone)]
+enum Input {
+    Button(u32, bool),
+    User(bool),
+    Touch(Option<(f32, f32)>),
+}
+
+#[derive(Debug, Clone)]
+struct InputEvent {
+    at_ns: u64,
+    input: Input,
+}
+
+#[derive(Debug, Clone)]
+struct InputScript(Vec<InputEvent>);
+
+fn parse_inputs(s: &str) -> Result<InputScript, String> {
+    let mut events = Vec::new();
+    for item in s.split(',').map(str::trim).filter(|i| !i.is_empty()) {
+        let (time, rest) = item.split_once(':').ok_or_else(|| format!("missing ':' in {item:?}"))?;
+        let (name, value) = rest.split_once('=').ok_or_else(|| format!("missing '=' in {item:?}"))?;
+        let seconds: f64 = time.parse().map_err(|_| format!("bad time in {item:?}"))?;
+        let flag = || match value {
+            "1" => Ok(true),
+            "0" => Ok(false),
+            _ => Err(format!("expected 0 or 1 in {item:?}")),
+        };
+        let input = match name.to_ascii_uppercase().as_str() {
+            "USER" => Input::User(flag()?),
+            "TOUCH" if value == "0" => Input::Touch(None),
+            "TOUCH" => {
+                let (x, y) = value.split_once(';').ok_or_else(|| format!("expected x;y in {item:?}"))?;
+                let parse = |v: &str| v.parse::<f32>().map_err(|_| format!("bad coordinate in {item:?}"));
+                Input::Touch(Some((parse(x)?, parse(y)?)))
+            }
+            b if b.len() == 2 && b.starts_with('S') => {
+                let n = b[1..].parse::<u32>().ok().filter(|&n| n < 8).ok_or_else(|| format!("unknown button {name}"))?;
+                Input::Button(n, flag()?)
+            }
+            _ => return Err(format!("unknown input {name:?}")),
+        };
+        events.push(InputEvent { at_ns: (seconds * 1e9) as u64, input });
+    }
+    events.sort_by_key(|e| e.at_ns);
+    Ok(InputScript(events))
+}
+
+fn apply_input(board: &itsboard::ItsBoard, input: &Input) {
+    match *input {
+        Input::Button(n, pressed) => board.set_button(n, pressed),
+        Input::User(pressed) => board.set_user_button(pressed),
+        Input::Touch(pos) => board.set_touch(pos),
+    }
+}
 /// Virtual time slice between throttling decisions in real-time mode.
 const REALTIME_SLICE_NS: u64 = 2_000_000;
 
@@ -46,6 +111,7 @@ fn main() -> Result<()> {
     let data = std::fs::read(&args.firmware).with_context(|| format!("reading {}", args.firmware.display()))?;
     let image = ElfImage::parse(&data)?;
     let (bus, mcu) = stm32f429::build();
+    let board = itsboard::ItsBoard::attach(&mcu);
     let mut machine = Machine::new(stm32f429::machine_config(), bus)?;
     machine.load_elf(&image)?;
     if let Some(fonts) = &args.fonts {
@@ -56,6 +122,7 @@ fn main() -> Result<()> {
     machine.reset();
 
     let limit_ns = (args.seconds * 1e9) as u64;
+    let mut inputs = args.input.clone().map(|s| s.0).unwrap_or_default().into_iter().peekable();
     let start = Instant::now();
     let mut bkpts = 0u32;
     let stop = loop {
@@ -64,7 +131,14 @@ fn main() -> Result<()> {
         if now_ns >= limit_ns {
             break None;
         }
-        let slice_ns = if args.realtime { REALTIME_SLICE_NS } else { limit_ns - now_ns }.min(limit_ns - now_ns);
+        while let Some(ev) = inputs.next_if(|e| e.at_ns <= now_ns) {
+            log::info!("input at {:.3} s: {:?}", now_ns as f64 / 1e9, ev.input);
+            apply_input(&board, &ev.input);
+        }
+        let mut slice_ns = if args.realtime { REALTIME_SLICE_NS } else { limit_ns - now_ns }.min(limit_ns - now_ns);
+        if let Some(ev) = inputs.peek() {
+            slice_ns = slice_ns.min(ev.at_ns - now_ns);
+        }
         let budget = clock.ns_to_cycles(slice_ns).max(1);
         match machine.run(budget) {
             StopReason::Budget => {}
@@ -90,24 +164,40 @@ fn main() -> Result<()> {
         Some(StopReason::Budget) => unreachable!(),
     };
     report_progress(&machine, &image, start, &what);
-    report_board(&mcu);
+    report_board(&board);
+    if let Some(path) = &args.screenshot {
+        save_screenshot(&board, path)?;
+        println!("  display saved to {}", path.display());
+    }
     Ok(())
 }
 
-/// Prints the state of the ITS-Board LEDs (OUT0–15 = PD0–7, PE0–7) and Nucleo LEDs.
-fn report_board(mcu: &stm32f429::Stm32f429) {
-    use stm32f429::gpio::port;
-    let gpio = mcu.gpio.borrow();
-    let led = |p: char, pin: u32| if gpio.level(port(p), pin) { '●' } else { '○' };
-    let out: String = (0..16).rev().map(|i| if i < 8 { led('D', i) } else { led('E', i - 8) }).collect();
+/// Prints the state of the ITS-Board LEDs and the Nucleo LEDs.
+fn report_board(board: &itsboard::ItsBoard) {
+    let dot = |on: bool| if on { '●' } else { '○' };
+    let leds = board.leds();
+    let out: String = (0..16).rev().map(|i| dot(leds & (1 << i) != 0)).collect();
+    let [ld1, ld2, ld3] = board.nucleo_leds();
     println!(
-        "  OUT15..0 {}  LD1 {} LD2 {} LD3 {}  core clock {} MHz",
-        out,
-        led('B', 0),
-        led('B', 7),
-        led('B', 14),
-        mcu.clocks.get().hclk / 1_000_000
+        "  OUT15..0 {out}  LD1 {} LD2 {} LD3 {}  backlight {:.0} %  core clock {} MHz",
+        dot(ld1),
+        dot(ld2),
+        dot(ld3),
+        board.backlight() * 100.0,
+        board.mcu().clocks.get().hclk / 1_000_000
     );
+}
+
+fn save_screenshot(board: &itsboard::ItsBoard, path: &std::path::Path) -> Result<()> {
+    use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH};
+    let mut rgba = vec![0u8; SCREEN_WIDTH * SCREEN_HEIGHT * 4];
+    board.render_display(&mut rgba);
+    let file = std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header()?.write_image_data(&rgba)?;
+    Ok(())
 }
 
 /// Immediate of the 16-bit `BKPT #imm` instruction at `pc`.

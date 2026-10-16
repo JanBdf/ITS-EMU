@@ -164,8 +164,10 @@ impl CoreAccess for UcCore<'_, '_> {
 #[derive(Debug, Clone, Copy)]
 struct BlockInfo {
     insns: u32,
-    /// The block may change memory or core state other than general registers
-    /// (stores, PUSH, MSR, CPS, ...). Such blocks are never part of an idle loop.
+    /// The block contains stores (STR, PUSH, STM, VSTR, ...).
+    stores: bool,
+    /// The block may change state that idle detection does not compare
+    /// (MSR, CPS, SVC, floating-point registers). Never part of an idle loop.
     side_effects: bool,
 }
 
@@ -176,6 +178,8 @@ struct BlockCache {
 
 impl BlockCache {
     const BITS: u32 = 16;
+    const STORES: u16 = 0x4000;
+    const SIDE_EFFECTS: u16 = 0x8000;
 
     fn new() -> Self {
         Self { entries: vec![(u32::MAX, 0, 0); 1 << Self::BITS] }
@@ -185,16 +189,20 @@ impl BlockCache {
         ((addr as u32 >> 1) & ((1 << Self::BITS) - 1)) as usize
     }
 
-    const SIDE_EFFECTS: u16 = 0x8000;
-
     fn get(&self, addr: u64, size: u32) -> Option<BlockInfo> {
         let (a, s, n) = self.entries[Self::slot(addr)];
-        (a == addr as u32 && u32::from(s) == size)
-            .then_some(BlockInfo { insns: u32::from(n & !Self::SIDE_EFFECTS), side_effects: n & Self::SIDE_EFFECTS != 0 })
+        (a == addr as u32 && u32::from(s) == size).then_some(BlockInfo {
+            insns: u32::from(n & 0x3FFF),
+            stores: n & Self::STORES != 0,
+            side_effects: n & Self::SIDE_EFFECTS != 0,
+        })
     }
 
     fn insert(&mut self, addr: u64, size: u32, info: BlockInfo) {
-        let mut n = info.insns.min(0x7FFF) as u16;
+        let mut n = info.insns.min(0x3FFF) as u16;
+        if info.stores {
+            n |= Self::STORES;
+        }
         if info.side_effects {
             n |= Self::SIDE_EFFECTS;
         }
@@ -206,59 +214,83 @@ impl BlockCache {
     }
 }
 
-/// Decodes a block: counts its Thumb instructions and conservatively detects
-/// instructions with side effects beyond general-purpose registers.
+/// Decodes a block: counts its Thumb instructions and conservatively
+/// classifies instructions with effects beyond the general-purpose registers.
 fn analyze_block(code: &[u8]) -> BlockInfo {
     let mut i = 0;
-    let mut info = BlockInfo { insns: 0, side_effects: false };
+    let mut info = BlockInfo { insns: 0, stores: false, side_effects: false };
     while i + 1 < code.len() {
         let hw = u16::from_le_bytes([code[i], code[i + 1]]);
         let wide = hw >> 11 >= 0b11101;
-        info.side_effects |= if wide { thumb32_side_effects(hw) } else { thumb16_side_effects(hw) };
+        if wide {
+            info.stores |= thumb32_store(hw);
+            info.side_effects |= thumb32_side_effects(hw);
+        } else {
+            info.stores |= thumb16_store(hw);
+            info.side_effects |= thumb16_side_effects(hw);
+        }
         i += if wide { 4 } else { 2 };
         info.insns += 1;
     }
     info
 }
 
-fn thumb16_side_effects(hw: u16) -> bool {
+fn thumb16_store(hw: u16) -> bool {
     matches!(hw & 0xFE00, 0x5000 | 0x5200 | 0x5400) // STR/STRH/STRB (register)
         || matches!(hw & 0xF800, 0x6000 | 0x7000 | 0x8000 | 0x9000 | 0xC000) // STR/STRB/STRH imm, STR SP, STM
         || hw & 0xFE00 == 0xB400 // PUSH
-        || hw & 0xFFE0 == 0xB660 // CPSIE/CPSID
+}
+
+fn thumb16_side_effects(hw: u16) -> bool {
+    hw & 0xFFE0 == 0xB660 // CPSIE/CPSID
         || hw & 0xFF00 == 0xDF00 // SVC
 }
 
-fn thumb32_side_effects(hw1: u16) -> bool {
+fn thumb32_store(hw1: u16) -> bool {
     (hw1 & 0xFE00 == 0xE800 && hw1 & 0x0010 == 0) // STM/STMDB/PUSH.W, STRD/STREX
         || hw1 & 0xFF10 == 0xF800 // STR/STRB/STRH (wide)
         || hw1 & 0xEE10 == 0xEC00 // VSTR/VSTM/VPUSH, STC, MCRR
-        || hw1 & 0xEF00 == 0xEE00 // coprocessor/VFP data ops incl. VMSR (conservative)
+}
+
+fn thumb32_side_effects(hw1: u16) -> bool {
+    hw1 & 0xEE00 == 0xEC00 // coprocessor / VFP loads and stores (FP registers)
+        || hw1 & 0xEF00 == 0xEE00 // coprocessor/VFP data ops incl. VMSR
         || hw1 & 0xFFE0 == 0xF380 // MSR
 }
 
 /// Detects loops that cannot make progress until a timed event happens.
 ///
-/// A loop iteration that executed no block with side effects, caused no MMIO
-/// access or exception, and starts with exactly the same register values as
-/// the previous one will repeat identically forever. Virtual time can then be
-/// fast-forwarded to the next event (typical: `while (HAL_GetTick() - t < d);`).
+/// The machine is deterministic. If, at the head of a loop, registers and RAM
+/// are identical to an earlier visit, and nothing in between could have been
+/// influenced from outside (no peripheral write, no time-dependent peripheral
+/// read, no exception, no state outside registers/RAM changed), the loop
+/// repeats this cycle forever. Virtual time can then jump to the next event.
+/// Typical: `while (HAL_GetTick() - t < d);` or polling unchanged inputs.
 #[derive(Default)]
 struct IdleDetector {
     head: u64,
     blocks_since_head: u32,
-    /// No side effects since the last visit of `head`.
+    prev_block: u64,
+    /// Snapshot taken at a visit of `head`.
+    snapshot: Option<Snapshot>,
+    /// Nothing outside registers/RAM happened since the snapshot.
     clean: bool,
-    regs: [u32; 17],
-    /// Visits of `head` to skip before comparing registers again (back-off).
+    /// RAM may have been written since the snapshot.
+    stored: bool,
+    /// Visits of `head` to skip before comparing again (back-off).
     skip: u32,
     backoff: u32,
-    prev_block: u64,
     /// Total cycles skipped (statistics).
-    pub skipped_cycles: u64,
+    skipped_cycles: u64,
 }
 
-const IDLE_REGS: [RegisterARM; 17] = [
+struct Snapshot {
+    regs: [u32; IDLE_REGS.len()],
+    /// RAM contents, if stores happened in the previous period.
+    ram: Option<Vec<u8>>,
+}
+
+const IDLE_REGS: [RegisterARM; 21] = [
     RegisterARM::R0,
     RegisterARM::R1,
     RegisterARM::R2,
@@ -276,35 +308,56 @@ const IDLE_REGS: [RegisterARM; 17] = [
     RegisterARM::LR,
     RegisterARM::XPSR,
     RegisterARM::FPSCR,
+    RegisterARM::PRIMASK,
+    RegisterARM::BASEPRI,
+    RegisterARM::FAULTMASK,
+    RegisterARM::CONTROL,
 ];
 
 impl IdleDetector {
-    /// Marks the current iteration as making progress (MMIO, exception, ...).
+    /// Something outside registers/RAM happened (MMIO, exception, ...).
     fn dirty(&mut self) {
         self.clean = false;
     }
 
-    fn snapshot(uc: &Unicorn<System>) -> [u32; 17] {
-        let mut r = [0u32; 17];
+    fn read_regs(uc: &Unicorn<System>) -> [u32; IDLE_REGS.len()] {
+        let mut r = [0u32; IDLE_REGS.len()];
         for (v, reg) in r.iter_mut().zip(IDLE_REGS) {
             *v = uc.reg_read(reg).unwrap_or(0) as u32;
         }
         r
     }
 
+    fn read_ram(uc: &Unicorn<System>) -> Vec<u8> {
+        let ram = &uc.get_data().config.memory.ram;
+        let mut buf = vec![0u8; ram.iter().map(|&(_, size)| size as usize).sum()];
+        let mut off = 0;
+        for &(base, size) in ram {
+            let _ = uc.mem_read(u64::from(base), &mut buf[off..off + size as usize]);
+            off += size as usize;
+        }
+        buf
+    }
+
+    fn take_snapshot(uc: &mut Unicorn<System>, with_ram: bool) {
+        let regs = Self::read_regs(uc);
+        let ram = with_ram.then(|| Self::read_ram(uc));
+        let d = &mut uc.get_data_mut().idle;
+        d.snapshot = Some(Snapshot { regs, ram });
+        d.clean = true;
+        d.stored = false;
+    }
+
     /// Called at the start of every block. Returns true if the core is idle.
     fn on_block(uc: &mut Unicorn<System>, addr: u64, info: BlockInfo) -> bool {
         enum Action {
             Nothing,
-            Snapshot,
+            Snapshot { with_ram: bool },
             Compare,
         }
         let action = {
             let d = &mut uc.get_data_mut().idle;
             let prev = std::mem::replace(&mut d.prev_block, addr);
-            if info.side_effects {
-                d.clean = false;
-            }
             if addr != d.head {
                 d.blocks_since_head += 1;
                 // A backward branch starts a new candidate unless we are still
@@ -312,20 +365,24 @@ impl IdleDetector {
                 if addr < prev && d.blocks_since_head > 64 {
                     d.head = addr;
                     d.blocks_since_head = 0;
-                    d.clean = !info.side_effects;
+                    d.snapshot = None;
+                    d.clean = true;
+                    d.stored = false;
                     d.skip = 0;
                     d.backoff = 0;
-                    Action::Snapshot
-                } else {
-                    Action::Nothing
                 }
+                Action::Nothing
             } else {
                 d.blocks_since_head = 0;
-                let was_clean = std::mem::replace(&mut d.clean, !info.side_effects);
-                if !was_clean {
-                    d.skip = 0;
-                    d.backoff = 0;
-                    Action::Snapshot
+                if !d.clean {
+                    // Outside influence: start over, but only snapshot after a
+                    // clean period so that busy loops pay nothing.
+                    d.snapshot = None;
+                    d.clean = true;
+                    d.stored = false;
+                    Action::Nothing
+                } else if d.snapshot.is_none() {
+                    Action::Snapshot { with_ram: d.stored }
                 } else if d.skip > 0 {
                     d.skip -= 1;
                     Action::Nothing
@@ -334,27 +391,43 @@ impl IdleDetector {
                 }
             }
         };
-        match action {
+        let idle = match action {
             Action::Nothing => false,
-            Action::Snapshot => {
-                let regs = Self::snapshot(uc);
-                uc.get_data_mut().idle.regs = regs;
+            Action::Snapshot { with_ram } => {
+                Self::take_snapshot(uc, with_ram);
                 false
             }
             Action::Compare => {
-                let regs = Self::snapshot(uc);
-                let d = &mut uc.get_data_mut().idle;
-                if regs == d.regs {
-                    return true;
+                let regs = Self::read_regs(uc);
+                let d = &uc.get_data().idle;
+                let snap = d.snapshot.as_ref().expect("snapshot present");
+                let same = regs == snap.regs
+                    && match (&snap.ram, d.stored) {
+                        (_, false) => true,
+                        (Some(ram), true) => *ram == Self::read_ram(uc),
+                        (None, true) => false,
+                    };
+                if !same {
+                    let with_ram = d.stored;
+                    Self::take_snapshot(uc, with_ram);
+                    // The loop makes progress (e.g. a counting delay loop):
+                    // compare less and less often.
+                    let d = &mut uc.get_data_mut().idle;
+                    d.backoff = (d.backoff * 2).clamp(1, 4096);
+                    d.skip = d.backoff;
                 }
-                // The loop makes progress in registers (e.g. a counting delay
-                // loop): check less and less often.
-                d.regs = regs;
-                d.backoff = (d.backoff * 2).clamp(1, 4096);
-                d.skip = d.backoff;
-                false
+                same
             }
+        };
+        // The current block belongs to the next period.
+        let d = &mut uc.get_data_mut().idle;
+        if info.side_effects {
+            d.clean = false;
         }
+        if info.stores {
+            d.stored = true;
+        }
+        idle
     }
 }
 
@@ -412,8 +485,10 @@ impl Machine {
             u64::from(mem.periph_size),
             Some(move |uc: &mut Unicorn<System>, off: u64, size: usize| {
                 let sys = uc.get_data_mut();
-                sys.idle.dirty();
                 let addr = sys.config.memory.periph_base + off as u32;
+                if sys.bus.read_depends_on_time(addr) {
+                    sys.idle.dirty();
+                }
                 let (mut ctx, bus) = sys.ctx();
                 u64::from(bus.read(&mut ctx, addr, size as u32))
             }),
@@ -436,7 +511,9 @@ impl Machine {
             Some(|uc: &mut Unicorn<System>, off: u64, size: usize| {
                 let ipsr = uc.reg_read(RegisterARM::IPSR).unwrap_or(0) as u32;
                 let sys = uc.get_data_mut();
-                sys.idle.dirty();
+                if Scs::read_depends_on_time(off as u32) {
+                    sys.idle.dirty();
+                }
                 let now = sys.clock.cycles();
                 u64::from(sys.scs.read(&sys.nvic, now, ipsr, off as u32, size as u32))
             }),
@@ -493,7 +570,7 @@ impl Machine {
                     let info = if uc.mem_read(addr, &mut code).is_ok() {
                         analyze_block(&code)
                     } else {
-                        BlockInfo { insns: 1, side_effects: true }
+                        BlockInfo { insns: 1, stores: true, side_effects: true }
                     };
                     uc.get_data_mut().block_insns.insert(addr, size, info);
                     info

@@ -192,6 +192,11 @@ impl Scs {
         }
     }
 
+    /// Registers whose value changes with time (see `Peripheral::read_depends_on_time`).
+    pub fn read_depends_on_time(off: u32) -> bool {
+        matches!(off & !3, 0x1004 | 0xE010 | 0xE018 | 0xED04)
+    }
+
     /// Reads from PPB offset `off` (relative to 0xE000_0000).
     pub fn read(&mut self, nvic: &Nvic, now: u64, ipsr: u32, off: u32, size: u32) -> u32 {
         // Byte-addressable priority registers.

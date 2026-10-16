@@ -10,6 +10,7 @@ license = "MIT"
 [workspace.dependencies]
 emu-core = { path = "crates/emu-core" }
 stm32f429 = { path = "crates/stm32f429" }
+itsboard = { path = "crates/itsboard" }
 unicorn-engine = "2.1.5"
 object = { version = "0.40", default-features = false, features = ["read_core", "elf", "std"] }
 anyhow = "1"
@@ -17,6 +18,7 @@ thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 clap = { version = "4", features = ["derive"] }
+png = "0.18"
 
 [profile.release]
 debug = 1
