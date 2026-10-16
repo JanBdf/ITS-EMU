@@ -151,7 +151,13 @@ Progress beyond the spike (Phase 2/3):
   library's default calibration), TIM4 PWM backlight, ETH register stub.
   TestNewFont and StoppuhrASM run correctly (golden-image and timing tests in
   `crates/itsboard/tests/display.rs`). CLI: `--screenshot`, `--input`.
-- Next: USART3 (printf/scanf), then the GUI.
+- USART3 with real frame timing (baud from BRR/PCLK1), TXE/TC/RXNE/IDLE/ORE
+  and their clear sequences, interrupt; host side via `SerialPort`
+  (`--stdin`, `--input t:SERIAL=...`). printf incl. `%f` works through the
+  Keil driver; own test program `tests/fixtures/ac6-src/SerialEcho` checks the
+  receive path. Note: the library has no `fgetc` retarget, so programs read
+  input with `stdin_getchar()`, not `scanf`.
+- Next: the GUI.
 - Performance gap: loops that poll time-dependent registers (TIM2 CNT) while
   doing SPI output run at ~85 MIPS (about half real time). Idea: let timers
   report when a read value changes next, so polling loops can be skipped to

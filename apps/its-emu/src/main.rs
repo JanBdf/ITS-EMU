@@ -17,7 +17,7 @@ struct Args {
     #[arg(long)]
     fonts: Option<PathBuf>,
 
-    /// Stop after this many seconds of virtual time
+    /// Stop after this many seconds of virtual time (0 = no limit)
     #[arg(long, default_value_t = 10.0)]
     seconds: f64,
 
@@ -40,9 +40,14 @@ struct Args {
 
     /// Scripted inputs, comma separated `<seconds>:<input>=<value>`:
     /// `S0`..`S7` and `USER` take 1 (pressed) / 0 (released),
-    /// `TOUCH` takes `x;y` or `0`. Example: `1.0:S7=1,1.2:S7=0`
+    /// `TOUCH` takes `x;y` or `0`, `SERIAL` takes text for the virtual COM
+    /// port (`\n` = newline, no commas). Example: `2.5:S7=1,2.6:S7=0,3:SERIAL=hi\n`
     #[arg(long, value_parser = parse_inputs)]
     input: Option<InputScript>,
+
+    /// Forward the terminal's standard input to the virtual COM port
+    #[arg(long)]
+    stdin: bool,
 }
 
 const FONTS_ADDR: u32 = 0x0810_0000;
@@ -52,6 +57,7 @@ enum Input {
     Button(u32, bool),
     User(bool),
     Touch(Option<(f32, f32)>),
+    Serial(Vec<u8>),
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +82,7 @@ fn parse_inputs(s: &str) -> Result<InputScript, String> {
         };
         let input = match name.to_ascii_uppercase().as_str() {
             "USER" => Input::User(flag()?),
+            "SERIAL" => Input::Serial(value.replace("\\n", "\n").replace("\\r", "\r").into_bytes()),
             "TOUCH" if value == "0" => Input::Touch(None),
             "TOUCH" => {
                 let (x, y) = value.split_once(';').ok_or_else(|| format!("expected x;y in {item:?}"))?;
@@ -95,10 +102,11 @@ fn parse_inputs(s: &str) -> Result<InputScript, String> {
 }
 
 fn apply_input(board: &itsboard::ItsBoard, input: &Input) {
-    match *input {
-        Input::Button(n, pressed) => board.set_button(n, pressed),
-        Input::User(pressed) => board.set_user_button(pressed),
-        Input::Touch(pos) => board.set_touch(pos),
+    match input {
+        Input::Button(n, pressed) => board.set_button(*n, *pressed),
+        Input::User(pressed) => board.set_user_button(*pressed),
+        Input::Touch(pos) => board.set_touch(*pos),
+        Input::Serial(data) => board.mcu().usart3.borrow_mut().send(data),
     }
 }
 /// Virtual time slice between throttling decisions in real-time mode.
@@ -121,7 +129,8 @@ fn main() -> Result<()> {
     machine.system_mut().idle_skipping = !args.no_idle_skip;
     machine.reset();
 
-    let limit_ns = (args.seconds * 1e9) as u64;
+    let limit_ns = if args.seconds > 0.0 { (args.seconds * 1e9) as u64 } else { u64::MAX };
+    let stdin_rx = args.stdin.then(spawn_stdin_reader);
     let mut inputs = args.input.clone().map(|s| s.0).unwrap_or_default().into_iter().peekable();
     let start = Instant::now();
     let mut bkpts = 0u32;
@@ -140,7 +149,9 @@ fn main() -> Result<()> {
             slice_ns = slice_ns.min(ev.at_ns - now_ns);
         }
         let budget = clock.ns_to_cycles(slice_ns).max(1);
-        match machine.run(budget) {
+        let result = machine.run(budget);
+        forward_serial(&mcu, stdin_rx.as_ref());
+        match result {
             StopReason::Budget => {}
             StopReason::Breakpoint { pc } if args.continue_on_bkpt && bkpt_imm(&machine, pc) != 0 => {
                 bkpts += 1;
@@ -198,6 +209,39 @@ fn save_screenshot(board: &itsboard::ItsBoard, path: &std::path::Path) -> Result
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header()?.write_image_data(&rgba)?;
     Ok(())
+}
+
+/// Reads standard input on a separate thread.
+fn spawn_stdin_reader() -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 256];
+        let mut stdin = std::io::stdin();
+        while let Ok(n) = stdin.read(&mut buf) {
+            if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// Copies UART output to stdout and pending stdin data to the UART.
+fn forward_serial(mcu: &stm32f429::Stm32f429, stdin_rx: Option<&std::sync::mpsc::Receiver<Vec<u8>>>) {
+    use std::io::Write;
+    let mut port = mcu.usart3.borrow_mut();
+    let out = port.take_output();
+    if !out.is_empty() {
+        let mut stdout = std::io::stdout().lock();
+        let _ = stdout.write_all(&out);
+        let _ = stdout.flush();
+    }
+    if let Some(rx) = stdin_rx {
+        while let Ok(data) = rx.try_recv() {
+            port.send(&data);
+        }
+    }
 }
 
 /// Immediate of the 16-bit `BKPT #imm` instruction at `pc`.
