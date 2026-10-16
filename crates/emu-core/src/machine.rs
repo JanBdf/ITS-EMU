@@ -434,8 +434,8 @@ impl IdleDetector {
     }
 
     /// Called at the start of every block. Returns `Some(t)` if the core
-    /// repeats the same loop iteration until cycle `t` (`u64::MAX`: until the
-    /// next event).
+    /// repeats the same loop iteration until cycle `t` (at most the end of the
+    /// slice; whole iterations, so `t` is the start of one).
     fn on_block(uc: &mut Unicorn<System>, addr: u64, info: BlockTiming) -> Option<u64> {
         enum Action {
             Nothing,
@@ -504,13 +504,13 @@ impl IdleDetector {
                     d.backoff = (d.backoff * 2).clamp(1, 4096);
                     d.skip = d.backoff;
                     None
-                } else if d.stable_until == u64::MAX {
-                    Some(u64::MAX)
                 } else {
-                    // Reads return the same values only before `stable_until`:
-                    // repeat whole iterations (same timing as without
-                    // skipping) as long as all of their reads happen before it
-                    // and before the slice ends.
+                    // Reads return the same values only before `stable_until`
+                    // (`u64::MAX`: no time-dependent reads): repeat whole
+                    // iterations as long as all of their reads happen before
+                    // it and before the slice ends.  Skipping whole iterations
+                    // only keeps the timing identical to running them: the
+                    // slice then ends at the same block, not mid-iteration.
                     let (at, with_ram) = (snap.at, d.stored);
                     let until = d.stable_until.min(uc.get_data().slice_end);
                     let now = uc.get_data().clock.cycles();
