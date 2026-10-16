@@ -13,9 +13,13 @@ struct Args {
     /// Firmware image (.axf / .elf)
     firmware: PathBuf,
 
-    /// Raw binary to load at 0x0810_0000 (fonts.bin of ITS_BRD_LIB)
+    /// Font table to flash at 0x0810_0000 instead of the built-in fonts.bin of ITS_BRD_LIB
     #[arg(long)]
     fonts: Option<PathBuf>,
+
+    /// Do not flash any font table
+    #[arg(long, conflicts_with = "fonts")]
+    no_fonts: bool,
 
     /// Stop after this many seconds of virtual time (0 = no limit)
     #[arg(long, default_value_t = 10.0)]
@@ -50,7 +54,6 @@ struct Args {
     stdin: bool,
 }
 
-const FONTS_ADDR: u32 = 0x0810_0000;
 
 #[derive(Debug, Clone)]
 enum Input {
@@ -117,17 +120,14 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let data = std::fs::read(&args.firmware).with_context(|| format!("reading {}", args.firmware.display()))?;
-    let image = ElfImage::parse(&data)?;
-    let (bus, mcu) = stm32f429::build();
-    let board = itsboard::ItsBoard::attach(&mcu);
-    let mut machine = Machine::new(stm32f429::machine_config(), bus)?;
-    machine.load_elf(&image)?;
-    if let Some(fonts) = &args.fonts {
-        let bin = std::fs::read(fonts).with_context(|| format!("reading {}", fonts.display()))?;
-        machine.load_bin(FONTS_ADDR, &bin)?;
-    }
+    let fonts = match &args.fonts {
+        Some(path) => Some(std::fs::read(path).with_context(|| format!("reading {}", path.display()))?),
+        None if args.no_fonts => None,
+        None => Some(itsboard::sim::DEFAULT_FONTS.to_vec()),
+    };
+    let itsboard::Simulator { mut machine, board, image } = itsboard::Simulator::new(&data, fonts.as_deref())?;
+    let mcu = board.mcu().clone();
     machine.system_mut().idle_skipping = !args.no_idle_skip;
-    machine.reset();
 
     let limit_ns = if args.seconds > 0.0 { (args.seconds * 1e9) as u64 } else { u64::MAX };
     let stdin_rx = args.stdin.then(spawn_stdin_reader);

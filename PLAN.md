@@ -157,7 +157,12 @@ Progress beyond the spike (Phase 2/3):
   Keil driver; own test program `tests/fixtures/ac6-src/SerialEcho` checks the
   receive path. Note: the library has no `fgetc` retarget, so programs read
   input with `stdin_getchar()`, not `scanf`.
-- Next: the GUI.
+- GUI (`apps/its-emu-gui`, egui): emulator on its own thread, board layout
+  with LEDs/buttons/display/touch, Nucleo LEDs/USER/RESET, serial console,
+  pause/reset/speed, drag & drop; adaptive layout. `ITS_EMU_GUI_SCREENSHOT`
+  saves a picture of the window for docs/CI.
+- Next candidates: GDB stub (Phase 7), speed of timer-polling loops, CI on
+  Linux/Windows/macOS, LICENSE file before publishing.
 - Performance gap: loops that poll time-dependent registers (TIM2 CNT) while
   doing SPI output run at ~85 MIPS (about half real time). Idea: let timers
   report when a read value changes next, so polling loops can be skipped to

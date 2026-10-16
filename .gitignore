@@ -14,3 +14,4 @@
 !/tests/fixtures/ac6/TestStdinoutUSART.axf
 # own test programs (sources in tests/fixtures/ac6-src)
 !/tests/fixtures/ac6/SerialEcho.axf
+

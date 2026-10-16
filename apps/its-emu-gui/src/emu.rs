@@ -1,0 +1,313 @@
+//! The emulator runs on its own thread: `Simulator` is not `Send` (Unicorn,
+//! shared peripheral state), so it is created and used only there. The UI
+//! sends [`Command`]s and reads the latest [`Snapshot`].
+
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use emu_core::StopReason;
+use itsboard::sim::DEFAULT_FONTS;
+use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH, Simulator};
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Speed {
+    /// Virtual time runs at wall-clock speed times this factor.
+    Factor(f64),
+    /// As fast as possible.
+    Max,
+}
+
+#[derive(Debug)]
+pub enum Command {
+    Load(PathBuf),
+    Reset,
+    SetPaused(bool),
+    SetSpeed(Speed),
+    Button(u32, bool),
+    UserButton(bool),
+    Touch(Option<(f32, f32)>),
+    Serial(Vec<u8>),
+    Quit,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunState {
+    NoFirmware,
+    Running,
+    Paused,
+    /// The core stopped (breakpoint, lockup); reset to continue.
+    Stopped(String),
+    Error(String),
+}
+
+/// What the UI shows. Updated by the emulator thread.
+pub struct Snapshot {
+    pub firmware: Option<String>,
+    pub state: RunState,
+    pub display: Vec<u8>,
+    pub display_generation: u64,
+    pub leds: u16,
+    pub inputs: u8,
+    pub nucleo_leds: [bool; 3],
+    pub backlight: f32,
+    pub virtual_ns: u64,
+    pub core_mhz: u32,
+    /// Virtual seconds per wall-clock second over the last measurement.
+    pub speed: f64,
+    /// Serial output not yet taken by the UI.
+    pub serial: Vec<u8>,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            firmware: None,
+            state: RunState::NoFirmware,
+            display: vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * 4],
+            display_generation: 0,
+            leds: 0,
+            inputs: 0xFF,
+            nucleo_leds: [false; 3],
+            backlight: 0.0,
+            virtual_ns: 0,
+            core_mhz: 0,
+            speed: 0.0,
+            serial: Vec::new(),
+        }
+    }
+}
+
+pub type SharedSnapshot = Arc<Mutex<Snapshot>>;
+
+pub struct EmuHandle {
+    pub commands: Sender<Command>,
+    pub snapshot: SharedSnapshot,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl EmuHandle {
+    pub fn send(&self, cmd: Command) {
+        let _ = self.commands.send(cmd);
+    }
+}
+
+impl Drop for EmuHandle {
+    fn drop(&mut self) {
+        let _ = self.commands.send(Command::Quit);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// Starts the emulator thread. `repaint` is called whenever the snapshot changed.
+pub fn spawn(repaint: impl Fn() + Send + 'static) -> EmuHandle {
+    let (tx, rx) = channel();
+    let snapshot = SharedSnapshot::default();
+    let shared = snapshot.clone();
+    let thread = std::thread::Builder::new()
+        .name("emulator".into())
+        .spawn(move || Worker::new(rx, shared, Box::new(repaint)).run())
+        .expect("spawn emulator thread");
+    EmuHandle { commands: tx, snapshot, thread: Some(thread) }
+}
+
+/// Virtual time executed between two looks at the command queue / clock.
+const SLICE: Duration = Duration::from_millis(4);
+/// Minimum interval between snapshot updates (UI refresh).
+const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
+
+struct Worker {
+    commands: Receiver<Command>,
+    snapshot: SharedSnapshot,
+    repaint: Box<dyn Fn() + Send>,
+    sim: Option<Simulator>,
+    firmware: Option<PathBuf>,
+    state: RunState,
+    speed: Speed,
+    /// Pacing reference: (wall instant, virtual ns) at the last speed change/resume.
+    anchor: (Instant, u64),
+    last_publish: Instant,
+    rate_sample: (Instant, u64),
+    measured_speed: f64,
+    published_generation: u64,
+}
+
+impl Worker {
+    fn new(commands: Receiver<Command>, snapshot: SharedSnapshot, repaint: Box<dyn Fn() + Send>) -> Self {
+        let now = Instant::now();
+        Self {
+            commands,
+            snapshot,
+            repaint,
+            sim: None,
+            firmware: None,
+            state: RunState::NoFirmware,
+            speed: Speed::Factor(1.0),
+            anchor: (now, 0),
+            last_publish: now,
+            rate_sample: (now, 0),
+            measured_speed: 0.0,
+            published_generation: u64::MAX,
+        }
+    }
+
+    fn virtual_ns(&self) -> u64 {
+        self.sim.as_ref().map_or(0, Simulator::time_ns)
+    }
+
+    fn reanchor(&mut self) {
+        self.anchor = (Instant::now(), self.virtual_ns());
+        self.rate_sample = self.anchor;
+    }
+
+    fn run(mut self) {
+        loop {
+            // While not running, block on the command queue.
+            let wait = if self.state == RunState::Running { Duration::ZERO } else { Duration::from_millis(50) };
+            match self.commands.recv_timeout(wait) {
+                Ok(Command::Quit) | Err(RecvTimeoutError::Disconnected) => return,
+                Ok(cmd) => {
+                    self.handle(cmd);
+                    while let Ok(cmd) = self.commands.try_recv() {
+                        if matches!(cmd, Command::Quit) {
+                            return;
+                        }
+                        self.handle(cmd);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+            if self.state == RunState::Running {
+                self.step();
+            }
+            self.publish(false);
+        }
+    }
+
+    fn handle(&mut self, cmd: Command) {
+        match cmd {
+            Command::Load(path) => self.load(path),
+            Command::Reset => {
+                if let Some(sim) = &mut self.sim {
+                    sim.reset();
+                    self.state = RunState::Running;
+                    self.reanchor();
+                } else if let Some(path) = self.firmware.clone() {
+                    self.load(path);
+                }
+            }
+            Command::SetPaused(paused) => {
+                if paused && self.state == RunState::Running {
+                    self.state = RunState::Paused;
+                } else if !paused && self.state == RunState::Paused {
+                    self.state = RunState::Running;
+                    self.reanchor();
+                }
+            }
+            Command::SetSpeed(speed) => {
+                self.speed = speed;
+                self.reanchor();
+            }
+            Command::Button(n, pressed) => self.with_board(|b| b.set_button(n, pressed)),
+            Command::UserButton(pressed) => self.with_board(|b| b.set_user_button(pressed)),
+            Command::Touch(pos) => self.with_board(|b| b.set_touch(pos)),
+            Command::Serial(data) => self.with_board(|b| b.mcu().usart3.borrow_mut().send(&data)),
+            Command::Quit => {}
+        }
+        self.publish(true);
+    }
+
+    fn with_board(&mut self, f: impl FnOnce(&itsboard::ItsBoard)) {
+        if let Some(sim) = &self.sim {
+            f(&sim.board);
+        }
+    }
+
+    fn load(&mut self, path: PathBuf) {
+        let result = std::fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|data| Simulator::new(&data, Some(DEFAULT_FONTS)).map_err(|e| e.to_string()));
+        match result {
+            Ok(sim) => {
+                self.sim = Some(sim);
+                self.state = RunState::Running;
+                log::info!("loaded {}", path.display());
+            }
+            Err(e) => {
+                self.sim = None;
+                self.state = RunState::Error(format!("cannot load {}: {e}", path.display()));
+            }
+        }
+        self.firmware = Some(path);
+        self.published_generation = u64::MAX;
+        self.reanchor();
+    }
+
+    /// Runs one slice and keeps virtual time in step with the wall clock.
+    fn step(&mut self) {
+        let Some(sim) = &mut self.sim else { return };
+        let stop = sim.run_for_ns(SLICE.as_nanos() as u64);
+        match stop {
+            StopReason::Budget => {}
+            StopReason::Breakpoint { pc } => {
+                self.state = RunState::Stopped(format!("BKPT at {}", sim.describe_pc(pc)));
+            }
+            StopReason::Lockup { pc, reason } => {
+                self.state = RunState::Stopped(format!("core locked up at {}: {reason}", sim.describe_pc(pc)));
+            }
+        }
+        if let Speed::Factor(f) = self.speed {
+            let (wall0, virt0) = self.anchor;
+            let virtual_elapsed = Duration::from_nanos(self.virtual_ns() - virt0).as_secs_f64();
+            let target = wall0 + Duration::from_secs_f64(virtual_elapsed / f);
+            let now = Instant::now();
+            if target > now {
+                std::thread::sleep(target - now);
+            } else if now - target > Duration::from_millis(250) {
+                // Too slow to keep up: do not try to catch up later.
+                self.reanchor();
+            }
+        }
+    }
+
+    fn publish(&mut self, force: bool) {
+        let now = Instant::now();
+        if !force && now - self.last_publish < PUBLISH_INTERVAL {
+            return;
+        }
+        self.last_publish = now;
+        let virt = self.virtual_ns();
+        let dt = (now - self.rate_sample.0).as_secs_f64();
+        if dt >= 0.5 {
+            self.measured_speed = (virt.saturating_sub(self.rate_sample.1)) as f64 / 1e9 / dt;
+            self.rate_sample = (now, virt);
+        }
+
+        let mut snap = self.snapshot.lock().unwrap();
+        snap.firmware = self.firmware.as_ref().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned());
+        snap.state = self.state.clone();
+        snap.virtual_ns = virt;
+        snap.speed = if self.state == RunState::Running { self.measured_speed } else { 0.0 };
+        if let Some(sim) = &self.sim {
+            let b = &sim.board;
+            let generation = b.display_generation() ^ (b.backlight().to_bits() as u64);
+            if generation != self.published_generation {
+                b.render_display(&mut snap.display);
+                snap.display_generation = snap.display_generation.wrapping_add(1);
+                self.published_generation = generation;
+            }
+            snap.leds = b.leds();
+            snap.inputs = b.inputs();
+            snap.nucleo_leds = b.nucleo_leds();
+            snap.backlight = b.backlight();
+            snap.core_mhz = b.mcu().clocks.get().hclk / 1_000_000;
+            let out = b.mcu().usart3.borrow_mut().take_output();
+            snap.serial.extend(out);
+        }
+        drop(snap);
+        (self.repaint)();
+    }
+}
