@@ -3,7 +3,9 @@
 //! Unicorn executes instructions. Everything around it — memory map, private
 //! peripheral bus, NVIC, exception entry/return, time keeping — lives here.
 
-use unicorn_engine::{Arch, ArmCpuModel, HookType, MemType, Mode, Prot, RegisterARM, Unicorn, uc_error};
+use std::collections::BTreeSet;
+
+use unicorn_engine::{Arch, ArmCpuModel, HookType, MemType, Mode, Prot, RegisterARM, UcHookId, Unicorn, uc_error};
 
 use crate::bus::{Bus, DeviceCtx};
 use crate::clock::Clock;
@@ -51,6 +53,29 @@ pub enum StopReason {
     Breakpoint { pc: u32 },
     /// The core locked up (fault while handling a fault, ...).
     Lockup { pc: u32, reason: String },
+    /// A debugger breakpoint ([`Machine::add_breakpoint`]) was reached. The
+    /// instruction at `pc` has not been executed yet.
+    DebugBreakpoint { pc: u32 },
+    /// [`Machine::step`] executed one instruction.
+    Step,
+    /// A watched address ([`Machine::add_watchpoint`]) was accessed; `pc` is
+    /// the instruction after the access.
+    Watchpoint { pc: u32, addr: u32, kind: WatchKind },
+}
+
+/// Accesses a watchpoint reacts to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchKind {
+    Write,
+    Read,
+    Access,
+}
+
+struct Watchpoint {
+    addr: u32,
+    len: u32,
+    kind: WatchKind,
+    hook: UcHookId,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -87,6 +112,10 @@ pub struct System {
     idle: IdleDetector,
     /// Fast-forward idle loops to the next event (disable for debugging).
     pub idle_skipping: bool,
+    /// [`Machine::step`] is executing a single instruction.
+    stepping: bool,
+    /// A watchpoint (start address, kind) was hit during the current run.
+    watch_hit: Option<(u32, WatchKind)>,
 }
 
 impl System {
@@ -112,6 +141,16 @@ pub struct Machine {
     /// Backing store for flash; mapped into Unicorn with `mem_map_ptr`.
     /// Declared after `uc` so it is dropped after the emulator.
     flash: Box<[u8]>,
+    /// Debugger breakpoints, implemented as Unicorn exits: execution stops
+    /// before an instruction at one of these addresses.
+    breakpoints: BTreeSet<u32>,
+    watchpoints: Vec<Watchpoint>,
+    /// Code hook on every instruction while watchpoints exist: stops right
+    /// after the instruction that hit one.
+    watch_stopper: Option<UcHookId>,
+    /// Last resume request of the GDB client, taken by the server.
+    #[cfg(feature = "gdb")]
+    pub(crate) gdb_resume: Option<crate::gdb::Resume>,
 }
 
 /// Wrapper implementing [`CoreAccess`] for Unicorn.
@@ -500,9 +539,14 @@ impl Machine {
             reset_requested: false,
             idle: IdleDetector::default(),
             idle_skipping: true,
+            stepping: false,
+            watch_hit: None,
         };
         let mut uc = Unicorn::new_with_data(Arch::ARM, Mode::THUMB | Mode::MCLASS, system)?;
         uc.ctl_set_cpu_model(ArmCpuModel::CORTEX_M4 as i32)?;
+        // Breakpoints are exits; `emu_start`'s `until` is not used.
+        uc.ctl_exits_enable()?;
+        uc.ctl_set_exits(&[])?;
 
         let mem = &config.memory;
         let mut flash = vec![0xFFu8; mem.flash_size as usize].into_boxed_slice();
@@ -600,6 +644,11 @@ impl Machine {
         // This is the only place that calls `emu_stop`: at a block boundary no
         // instruction is half-done, so execution can resume at the current PC.
         uc.add_block_hook(1, 0, |uc, addr, size| {
+            if uc.get_data().stepping {
+                // `step` accounts for its single instruction. (With a branch the
+                // hook also fires for the next block before the step ends.)
+                return;
+            }
             if uc.get_data().clock.cycles() >= uc.get_data().slice_end {
                 let _ = uc.emu_stop();
                 return;
@@ -654,7 +703,15 @@ impl Machine {
             false
         })?;
 
-        Ok(Self { uc, flash })
+        Ok(Self {
+            uc,
+            flash,
+            breakpoints: BTreeSet::new(),
+            watchpoints: Vec::new(),
+            watch_stopper: None,
+            #[cfg(feature = "gdb")]
+            gdb_resume: None,
+        })
     }
 
     pub fn system(&self) -> &System {
@@ -737,6 +794,7 @@ impl Machine {
         sys.bus.reset();
         sys.clock.set_cpu_hz(sys.config.reset_cpu_hz);
         sys.stop = None;
+        sys.watch_hit = None;
         sys.reset_requested = false;
         sys.last_invalid = None;
         sys.idle = IdleDetector::default();
@@ -755,15 +813,145 @@ impl Machine {
         core.set_reg(CoreReg::Pc, reset_vector | 1);
     }
 
+    /// Stops execution before the instruction at `addr` (debugger breakpoint).
+    pub fn add_breakpoint(&mut self, addr: u32) {
+        if self.breakpoints.insert(addr & !1) {
+            self.update_exits(addr & !1);
+        }
+    }
+
+    pub fn remove_breakpoint(&mut self, addr: u32) {
+        if self.breakpoints.remove(&(addr & !1)) {
+            self.update_exits(addr & !1);
+        }
+    }
+
+    pub fn breakpoints(&self) -> impl Iterator<Item = u32> + '_ {
+        self.breakpoints.iter().copied()
+    }
+
+    /// Stops execution after an access of `kind` to `addr..addr + len`.
+    pub fn add_watchpoint(&mut self, addr: u32, len: u32, kind: WatchKind) -> bool {
+        let hook_type = match kind {
+            WatchKind::Write => HookType::MEM_WRITE,
+            WatchKind::Read => HookType::MEM_READ,
+            WatchKind::Access => HookType(HookType::MEM_READ.0 | HookType::MEM_WRITE.0),
+        };
+        let end = u64::from(addr) + u64::from(len.max(1)) - 1;
+        let hook = self.uc.add_mem_hook(hook_type, u64::from(addr), end, move |uc, _ty, _addr, _size, _value| {
+            let sys = uc.get_data_mut();
+            sys.watch_hit.get_or_insert((addr, kind));
+            // Not `emu_stop`: the access must complete.
+            sys.request_stop();
+            true
+        });
+        let Ok(hook) = hook else { return false };
+        self.watchpoints.push(Watchpoint { addr, len, kind, hook });
+        if self.watch_stopper.is_none() {
+            // Unicorn checks for a stop request after each code hook, i.e.
+            // before the next instruction (a block would otherwise run to its end).
+            self.watch_stopper = self
+                .uc
+                .add_code_hook(1, 0, |uc, _addr, _size| {
+                    if uc.get_data().watch_hit.is_some() {
+                        let _ = uc.emu_stop();
+                    }
+                })
+                .ok();
+        }
+        // Retranslate so that existing code calls the new hooks.
+        let _ = self.uc.ctl_flush_tb();
+        true
+    }
+
+    fn remove_watch_stopper_if_unused(&mut self) {
+        if self.watchpoints.is_empty()
+            && let Some(h) = self.watch_stopper.take()
+        {
+            let _ = self.uc.remove_hook(h);
+        }
+    }
+
+    pub fn remove_watchpoint(&mut self, addr: u32, len: u32, kind: WatchKind) -> bool {
+        let Some(i) = self.watchpoints.iter().position(|w| w.addr == addr && w.len == len && w.kind == kind) else {
+            return false;
+        };
+        let w = self.watchpoints.remove(i);
+        let _ = self.uc.remove_hook(w.hook);
+        self.remove_watch_stopper_if_unused();
+        let _ = self.uc.ctl_flush_tb();
+        true
+    }
+
+    /// Removes all breakpoints and watchpoints.
+    pub fn clear_debug_points(&mut self) {
+        for addr in self.breakpoints().collect::<Vec<_>>() {
+            self.remove_breakpoint(addr);
+        }
+        for w in std::mem::take(&mut self.watchpoints) {
+            let _ = self.uc.remove_hook(w.hook);
+        }
+        self.remove_watch_stopper_if_unused();
+        let _ = self.uc.ctl_flush_tb();
+    }
+
+    fn take_watch_hit(&mut self) -> Option<StopReason> {
+        let (addr, kind) = self.uc.get_data_mut().watch_hit.take()?;
+        Some(StopReason::Watchpoint { pc: self.pc(), addr, kind })
+    }
+
+    fn update_exits(&mut self, changed: u32) {
+        let exits: Vec<u64> = self.breakpoints.iter().map(|&a| u64::from(a)).collect();
+        let _ = self.uc.ctl_set_exits(&exits);
+        // Exits are checked when code is translated: retranslate around `changed`.
+        let _ = self.uc.ctl_remove_cache(u64::from(changed), u64::from(changed) + 4);
+    }
+
+    /// Executes exactly one instruction (also one at a breakpoint). Pending
+    /// interrupts are not taken, like a debugger stepping with interrupts
+    /// masked; exceptions caused by the instruction itself (SVC, faults) are.
+    pub fn step(&mut self) -> StopReason {
+        self.sync_devices();
+        if self.uc.get_data().reset_requested {
+            self.reset();
+        }
+        let pc = self.pc();
+        let at_breakpoint = self.breakpoints.remove(&pc);
+        if at_breakpoint {
+            self.update_exits(pc);
+        }
+        let sys = self.uc.get_data_mut();
+        sys.stepping = true;
+        sys.slice_end = u64::MAX;
+        let result = self.uc.emu_start(u64::from(pc | 1), u64::MAX, 0, 1);
+        let sys = self.uc.get_data_mut();
+        sys.stepping = false;
+        sys.clock.advance(1);
+        if at_breakpoint {
+            self.add_breakpoint(pc);
+        }
+        if let Err(err) = result {
+            self.on_emu_error(err);
+        }
+        let stop = self.uc.get_data_mut().stop.take();
+        stop.or_else(|| self.take_watch_hit()).unwrap_or(StopReason::Step)
+    }
+
     /// Runs until `budget` more cycles have been executed or the core stops.
+    /// A breakpoint at the current PC is stepped over (resuming from it).
     pub fn run(&mut self, budget: u64) -> StopReason {
         let end = self.clock().cycles().saturating_add(budget);
+        let resume_pc = self.breakpoints.contains(&self.pc()).then(|| self.pc());
+        let mut first = true;
         loop {
             self.sync_devices();
             if self.uc.get_data().reset_requested {
                 self.reset();
             }
             if let Some(stop) = self.uc.get_data_mut().stop.take() {
+                return stop;
+            }
+            if let Some(stop) = self.take_watch_hit() {
                 return stop;
             }
             self.take_pending_exception();
@@ -787,9 +975,18 @@ impl Machine {
             self.uc.get_data_mut().slice_end = slice_end;
 
             let pc = self.pc();
+            if std::mem::take(&mut first) && resume_pc == Some(pc) {
+                // Unicorn would stop right away at the exit.
+                match self.step() {
+                    StopReason::Step => continue,
+                    other => return other,
+                }
+            }
             let result = self.uc.emu_start(u64::from(pc | 1), u64::MAX, 0, 0);
             if let Err(err) = result {
                 self.on_emu_error(err);
+            } else if self.breakpoints.contains(&self.pc()) && self.uc.get_data().stop.is_none() {
+                return StopReason::DebugBreakpoint { pc: self.pc() };
             } else if self.clock().cycles() < slice_end && !self.stopped_on_purpose() {
                 self.on_idle_return();
             }
@@ -798,7 +995,7 @@ impl Machine {
 
     fn stopped_on_purpose(&self) -> bool {
         let sys = self.uc.get_data();
-        sys.stop.is_some() || sys.reset_requested || sys.nvic.any_pending()
+        sys.stop.is_some() || sys.watch_hit.is_some() || sys.reset_requested || sys.nvic.any_pending()
     }
 
     /// Unicorn returned early without an error: either we stopped it from a

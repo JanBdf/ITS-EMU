@@ -9,3 +9,10 @@ unicorn-engine.workspace = true
 object.workspace = true
 thiserror.workspace = true
 log.workspace = true
+gdbstub = { workspace = true, optional = true }
+
+[features]
+gdb = ["dep:gdbstub"]
+
+[dev-dependencies]
+env_logger.workspace = true

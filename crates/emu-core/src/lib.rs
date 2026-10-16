@@ -6,6 +6,8 @@ pub mod bus;
 pub mod clock;
 pub mod elf;
 pub mod exception;
+#[cfg(feature = "gdb")]
+pub mod gdb;
 pub mod machine;
 pub mod nvic;
 pub mod scs;
@@ -15,4 +17,4 @@ pub use bus::{Bus, DeviceCtx, Peripheral};
 pub use clock::Clock;
 pub use elf::ElfImage;
 pub use exception::CoreReg;
-pub use machine::{Machine, MachineConfig, MachineError, MemoryMap, StopReason};
+pub use machine::{Machine, MachineConfig, MachineError, MemoryMap, StopReason, WatchKind};

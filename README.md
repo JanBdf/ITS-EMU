@@ -18,7 +18,9 @@ Status: work in progress — see [PLAN.md](PLAN.md).
 | Display | ILI9486 480×320 TFT, XPT2046 touch, backlight PWM |
 | Serial | Virtual COM port (USART3, `printf` / `stdin_getchar`) |
 
-Not yet: Ethernet, DMA, ADC/DAC, I²C, further timers and UARTs, GDB debugging.
+| Debugging | GDB remote server: breakpoints, single step, watchpoints, registers incl. FPU, memory, `monitor reset halt` |
+
+Not yet: Ethernet, DMA, ADC/DAC, I²C, further timers and UARTs.
 
 ## Usage
 
@@ -36,6 +38,45 @@ GUI: keys `0`–`7` press S0–S7, right click latches a button, clicking the
 display is a touch, firmware files can be dropped onto the window.
 
 The font table that ITS_BRD_LIB expects in flash at `0x0810_0000` is built in.
+
+## Debugging with GDB
+
+The GUI starts a GDB server on `127.0.0.1:3333` (`--gdb ADDR` to change,
+`--no-gdb` to switch it off). The command line version waits for a debugger
+with `--gdb [ADDR]`. Connecting halts the core; detaching lets it run on.
+
+```sh
+arm-none-eabi-gdb Program.axf -ex "target remote :3333"
+(gdb) monitor reset halt
+(gdb) tbreak main
+(gdb) continue
+```
+
+In VS Code (course setup, CDT GDB adapter) the existing
+**STLink@pyOCD (attach)** configuration only needs port 3333 and should work
+against the running emulator, as long as the GUI has the same `.axf` loaded
+(not yet tried in VS Code itself). A dedicated configuration that resets and
+stops at `main`:
+
+```json
+{
+    "name": "ITS-Board Emulator",
+    "type": "gdbtarget",
+    "request": "attach",
+    "cwd": "${workspaceFolder}/Programs/StoppuhrASM",
+    "program": "out/StoppuhrASM/ITSboard_Assembly/Debug/StoppuhrASM.axf",
+    "gdb": "arm-none-eabi-gdb",
+    "auxiliaryGdb": true,
+    "initCommands": ["monitor reset halt", "maintenance flush register-cache", "tbreak main"],
+    "customResetCommands": ["monitor reset halt", "maintenance flush register-cache", "tbreak main", "continue"],
+    "target": { "port": "3333" }
+}
+```
+
+Several debuggers may connect at once: the first one controls the core, the
+others (such as the CDT adapter's auxiliary GDB for live watch) read and write
+memory and registers while it runs. Breakpoints do not modify memory, so they
+also work in flash. Watchpoints slow emulation down while they are set.
 
 ## Building
 

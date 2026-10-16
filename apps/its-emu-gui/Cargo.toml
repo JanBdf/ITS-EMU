@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 itsboard.workspace = true
-emu-core.workspace = true
+emu-core = { workspace = true, features = ["gdb"] }
 stm32f429.workspace = true
 anyhow.workspace = true
 log.workspace = true

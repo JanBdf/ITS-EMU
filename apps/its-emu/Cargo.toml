@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-emu-core.workspace = true
+emu-core = { workspace = true, features = ["gdb"] }
 stm32f429.workspace = true
 itsboard.workspace = true
 png.workspace = true
