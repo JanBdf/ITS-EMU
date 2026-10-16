@@ -62,7 +62,14 @@ pub struct Spi {
 }
 
 impl Spi {
-    pub fn new(name: &'static str, irq: u32, bus: ApbBus, enable_bit: u32, clocks: SharedClocks, device: SpiSlot) -> Self {
+    pub fn new(
+        name: &'static str,
+        irq: u32,
+        bus: ApbBus,
+        enable_bit: u32,
+        clocks: SharedClocks,
+        device: SpiSlot,
+    ) -> Self {
         Self {
             name,
             irq,

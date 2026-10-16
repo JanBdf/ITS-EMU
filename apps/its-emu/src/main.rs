@@ -69,7 +69,6 @@ struct Args {
 /// Virtual time slice while a debugger is attached (Ctrl-C latency).
 const GDB_SLICE_NS: u64 = 1_000_000;
 
-
 #[derive(Debug, Clone)]
 enum Input {
     Button(u32, bool),
@@ -108,7 +107,8 @@ fn parse_inputs(s: &str) -> Result<InputScript, String> {
                 Input::Touch(Some((parse(x)?, parse(y)?)))
             }
             b if b.len() == 2 && b.starts_with('S') => {
-                let n = b[1..].parse::<u32>().ok().filter(|&n| n < 8).ok_or_else(|| format!("unknown button {name}"))?;
+                let n =
+                    b[1..].parse::<u32>().ok().filter(|&n| n < 8).ok_or_else(|| format!("unknown button {name}"))?;
                 Input::Button(n, flag()?)
             }
             _ => return Err(format!("unknown input {name:?}")),
@@ -221,7 +221,9 @@ fn main() -> Result<()> {
         None => "time limit reached".to_owned(),
         Some(StopReason::Breakpoint { pc }) => format!("BKPT at {}", describe(&image, pc)),
         Some(StopReason::Lockup { pc, reason }) => format!("LOCKUP at {}: {reason}", describe(&image, pc)),
-        Some(StopReason::Budget | StopReason::DebugBreakpoint { .. } | StopReason::Step | StopReason::Watchpoint { .. }) => {
+        Some(
+            StopReason::Budget | StopReason::DebugBreakpoint { .. } | StopReason::Step | StopReason::Watchpoint { .. },
+        ) => {
             unreachable!()
         }
     };

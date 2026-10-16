@@ -87,14 +87,27 @@ fn printed_values(out: &str) -> Vec<String> {
         .collect()
 }
 
+/// A GDB that can debug Arm targets: `$ITS_EMU_GDB`, `arm-none-eabi-gdb`,
+/// `gdb-multiarch` or a `gdb` built with all targets.
+fn arm_gdb() -> Option<String> {
+    let candidates =
+        std::env::var("ITS_EMU_GDB").into_iter().chain(["arm-none-eabi-gdb", "gdb-multiarch", "gdb"].map(String::from));
+    candidates.into_iter().find(|gdb| {
+        Command::new(gdb)
+            .args(["-nx", "-batch", "-ex", "set architecture armv7e-m"])
+            .output()
+            .is_ok_and(|o| o.status.success() && o.stderr.is_empty())
+    })
+}
+
 #[test]
 fn gdb_session_with_breakpoints_steps_and_reset() {
-    if Command::new("gdb").arg("--version").output().is_err() {
-        eprintln!("gdb not installed; skipping");
+    let Some(gdb) = arm_gdb() else {
+        eprintln!("no GDB with Arm support found (set ITS_EMU_GDB); skipping");
         return;
-    }
+    };
     let emu = Emulator::start();
-    let out = Command::new("gdb")
+    let out = Command::new(gdb)
         .args(["-nx", "-batch", "-q"])
         .args(["-ex", &format!("target remote 127.0.0.1:{}", emu.port)])
         .args(["-ex", "print/x $pc"])
@@ -201,7 +214,10 @@ impl Client {
 /// Little-endian u32 from a hex reply.
 fn le_u32(hex: &str) -> u32 {
     let bytes: Vec<u8> = (0..4)
-        .map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2).unwrap_or("??"), 16).unwrap_or_else(|_| panic!("reply {hex:?}")))
+        .map(|i| {
+            u8::from_str_radix(hex.get(2 * i..2 * i + 2).unwrap_or("??"), 16)
+                .unwrap_or_else(|_| panic!("reply {hex:?}"))
+        })
         .collect();
     u32::from_le_bytes(bytes.try_into().unwrap())
 }

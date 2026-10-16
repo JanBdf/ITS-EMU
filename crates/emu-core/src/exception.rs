@@ -233,7 +233,11 @@ mod tests {
             match r {
                 CoreReg::R(n) => self.r[n as usize],
                 CoreReg::Sp => {
-                    if !handler && self.control & 2 != 0 { self.psp } else { self.msp }
+                    if !handler && self.control & 2 != 0 {
+                        self.psp
+                    } else {
+                        self.msp
+                    }
                 }
                 CoreReg::Lr => self.lr,
                 CoreReg::Pc => self.pc,
@@ -251,7 +255,11 @@ mod tests {
             match r {
                 CoreReg::R(n) => self.r[n as usize] = v,
                 CoreReg::Sp => {
-                    if !handler && self.control & 2 != 0 { self.psp = v } else { self.msp = v }
+                    if !handler && self.control & 2 != 0 {
+                        self.psp = v
+                    } else {
+                        self.msp = v
+                    }
                 }
                 CoreReg::Lr => self.lr = v,
                 CoreReg::Pc => self.pc = v,
@@ -280,7 +288,13 @@ mod tests {
     }
 
     fn core() -> FakeCore {
-        let mut c = FakeCore { msp: 0x2000_1000, pc: 0x0800_0100, xpsr: XPSR_T | 0xF000_0000, lr: 0x0800_0055, ..Default::default() };
+        let mut c = FakeCore {
+            msp: 0x2000_1000,
+            pc: 0x0800_0100,
+            xpsr: XPSR_T | 0xF000_0000,
+            lr: 0x0800_0055,
+            ..Default::default()
+        };
         for i in 0..13 {
             c.r[i] = 0x100 + i as u32;
         }

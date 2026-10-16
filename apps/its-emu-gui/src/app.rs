@@ -90,7 +90,12 @@ fn save_png(path: &std::path::Path, img: &egui::ColorImage) -> anyhow::Result<()
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext, firmware: Option<PathBuf>, gdb_addr: Option<String>, ideal_colors: bool) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext,
+        firmware: Option<PathBuf>,
+        gdb_addr: Option<String>,
+        ideal_colors: bool,
+    ) -> Self {
         let ctx = cc.egui_ctx.clone();
         let emu = emu::spawn(move || ctx.request_repaint(), gdb_addr);
         if ideal_colors {
@@ -118,7 +123,8 @@ impl App {
     }
 
     fn open_dialog(&self) {
-        let file = rfd::FileDialog::new().add_filter("Firmware", &["axf", "elf"]).add_filter("All files", &["*"]).pick_file();
+        let file =
+            rfd::FileDialog::new().add_filter("Firmware", &["axf", "elf"]).add_filter("All files", &["*"]).pick_file();
         if let Some(path) = file {
             self.emu.send(Command::Load(path));
         }
@@ -178,7 +184,12 @@ impl eframe::App for App {
                 }
                 ui.separator();
                 ui.label("Speed:");
-                for (label, s) in [("1×", Speed::Factor(1.0)), ("0.1×", Speed::Factor(0.1)), ("10×", Speed::Factor(10.0)), ("max", Speed::Max)] {
+                for (label, s) in [
+                    ("1×", Speed::Factor(1.0)),
+                    ("0.1×", Speed::Factor(0.1)),
+                    ("10×", Speed::Factor(10.0)),
+                    ("max", Speed::Max),
+                ] {
                     if ui.selectable_label(self.speed == s, label).clicked() {
                         self.speed = s;
                         self.emu.send(Command::SetSpeed(s));
@@ -186,12 +197,19 @@ impl eframe::App for App {
                 }
                 ui.separator();
                 // The Nucleo user LEDs are hidden under the display on the real board.
-                for (i, (name, pin, color)) in [("LD1", "PB0", NUCLEO_GREEN), ("LD2", "PB7", NUCLEO_BLUE), ("LD3", "PB14", NUCLEO_RED)].into_iter().enumerate() {
+                for (i, (name, pin, color)) in
+                    [("LD1", "PB0", NUCLEO_GREEN), ("LD2", "PB7", NUCLEO_BLUE), ("LD3", "PB14", NUCLEO_RED)]
+                        .into_iter()
+                        .enumerate()
+                {
                     let duty = nucleo_duty[i];
                     let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
                     let b = duty.clamp(0.0, 1.0).powf(1.0 / 2.2);
                     ui.painter().circle_filled(rect.center(), 5.5, Color32::from_gray(60).lerp_to_gamma(color, b));
-                    resp.on_hover_text(format!("Nucleo {name} ({pin}): {:.0} % — under the display on the real board", duty * 100.0));
+                    resp.on_hover_text(format!(
+                        "Nucleo {name} ({pin}): {:.0} % — under the display on the real board",
+                        duty * 100.0
+                    ));
                     ui.label(name);
                 }
             });
@@ -201,7 +219,9 @@ impl eframe::App for App {
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (text, color) = match &state {
-                    RunState::NoFirmware => ("no firmware loaded — open an .axf file".to_owned(), ui.visuals().weak_text_color()),
+                    RunState::NoFirmware => {
+                        ("no firmware loaded — open an .axf file".to_owned(), ui.visuals().weak_text_color())
+                    }
                     RunState::Running => ("running".to_owned(), OK_GREEN),
                     RunState::Paused => ("paused".to_owned(), Color32::YELLOW),
                     RunState::Halted => ("halted by debugger".to_owned(), Color32::YELLOW),
@@ -318,7 +338,9 @@ impl eframe::App for App {
         }
 
         // Drag & drop of firmware files
-        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
+        });
         if let Some(path) = dropped.into_iter().next() {
             self.emu.send(Command::Load(path));
         }

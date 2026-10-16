@@ -41,14 +41,14 @@ const TP_IRQ: (char, u32) = ('E', 13);
 /// (HwCheck `pins`: high with the MCU pull-down, resp. low with the pull-up).
 /// The buttons (PF0–7) and the touch IRQ (PE13) are modelled separately.
 const EXTERNAL_LEVELS: &[(char, u32, bool)] = &[
-    ('A', 1, false), // RMII_REF_CLK from the Ethernet PHY
-    ('A', 2, true),  // RMII_MDIO pull-up
-    ('A', 9, false), // USB_VBUS sense (USB OTG not connected)
-    ('B', 8, true),  // I2C1_SCL pull-up on the carrier board
-    ('B', 9, true),  // I2C1_SDA pull-up on the carrier board
+    ('A', 1, false),  // RMII_REF_CLK from the Ethernet PHY
+    ('A', 2, true),   // RMII_MDIO pull-up
+    ('A', 9, false),  // USB_VBUS sense (USB OTG not connected)
+    ('B', 8, true),   // I2C1_SCL pull-up on the carrier board
+    ('B', 9, true),   // I2C1_SDA pull-up on the carrier board
     ('B', 14, false), // LD3 (red LED to GND) loads the pin
-    ('C', 4, false), // RMII_RXD0
-    ('C', 5, false), // RMII_RXD1
+    ('C', 4, false),  // RMII_RXD0
+    ('C', 5, false),  // RMII_RXD1
     ('E', 11, true),
     ('G', 6, false),
     ('G', 7, true),
