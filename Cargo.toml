@@ -30,3 +30,18 @@ debug = 1
 # without it Unicorn is also built as Release (-O3) instead of RelWithDebInfo.
 [profile.release.package."*"]
 debug = false
+
+# Debug builds (`cargo run` without --release): Unicorn unoptimized makes the
+# emulator several times slower than real time.
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
+
+# The emulator's hot paths (hooks, peripherals): basic optimizations keep
+# debug builds usable and still debuggable.
+[profile.dev.package.emu-core]
+opt-level = 1
+[profile.dev.package.stm32f429]
+opt-level = 1
+[profile.dev.package.itsboard]
+opt-level = 1
