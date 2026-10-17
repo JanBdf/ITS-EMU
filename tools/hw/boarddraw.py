@@ -332,7 +332,7 @@ def ftext(x, y, s, fontname, cap, anchor='l', fill=SILK, rot=0, track=0.0, extra
     total = sum(adv) - track
     sx = (width / total) if width else 1.0
     x0 = {'l': 0.0, 'c': -total * sx / 2, 'r': -total * sx}[anchor]
-    pen = SVGPathPen(gs)
+    pen = SVGPathPen(gs, ntos=f)  # full float precision would double the file size
     cx = 0.0
     for n, a in zip(names, adv):
         tp = TransformPen(pen, (k * sx, 0, 0, -k, x0 + cx * sx, cap / 2 if mid else 0))
