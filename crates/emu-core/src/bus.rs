@@ -158,6 +158,8 @@ pub type WaitStates = Box<dyn Fn(u32, bool, u64) -> u64>;
 #[derive(Default)]
 pub struct Bus {
     maps: Vec<Mapping>,
+    /// Index of the mapping found last (polling loops hit the same one).
+    last: usize,
     warned: HashSet<u32>,
     /// Earliest [`Peripheral::next_event`] of the peripherals accessed since
     /// the last [`Bus::take_access_event`].
@@ -182,9 +184,15 @@ impl Bus {
     }
 
     fn find(&mut self, addr: u32) -> Option<&mut Mapping> {
-        let idx = self.maps.partition_point(|m| m.base <= addr).checked_sub(1)?;
-        let m = &mut self.maps[idx];
-        (addr - m.base < m.size).then_some(m)
+        let hit = self.maps.get(self.last).is_some_and(|m| addr.wrapping_sub(m.base) < m.size);
+        if !hit {
+            let idx = self.maps.partition_point(|m| m.base <= addr).checked_sub(1)?;
+            if addr - self.maps[idx].base >= self.maps[idx].size {
+                return None;
+            }
+            self.last = idx;
+        }
+        Some(&mut self.maps[self.last])
     }
 
     pub fn read(&mut self, ctx: &mut DeviceCtx, addr: u32, size: u32) -> u32 {
