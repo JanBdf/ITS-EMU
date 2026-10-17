@@ -708,7 +708,7 @@ def carrier():
     out = [path(board_outline(), MASK), traces(), logo()]
     # copper text "Top" (under the mask, bottom left)
     out.append(rect(48.1, 628.5, 64.0, 638.1, MASK_CU))
-    out.append(stext(56.0, 633.3, 'Top', 6.0, color='#2d5583', sw=1.3))
+    out.append(stext(56.0, 633.3, 'Top', 6.0, color='#3a6491', sw=1.1))
 
     # ---- silkscreen
     for pl in SECTIONS:
