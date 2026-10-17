@@ -185,10 +185,10 @@ impl Pcb<'_> {
             return;
         }
         // the lens takes the colour of the light (additive light alone would only whiten it)
-        self.painter.circle_filled(self.p(x, y), self.len(4.6), color.gamma_multiply(0.7 * b));
-        self.glow(x, y, 22.0, 22.0, color, 0.5 * b);
-        self.glow(x, y, 9.0, 9.0, color, 0.8 * b);
-        self.glow(x, y, 4.5, 4.5, lerp(color, Color32::WHITE, 0.6), b);
+        self.painter.circle_filled(self.p(x, y), self.len(6.0), color.gamma_multiply(0.8 * b));
+        self.glow(x, y, 17.0, 17.0, color, 0.9 * b);
+        self.glow(x, y, 8.0, 8.0, color, b);
+        self.glow(x, y, 4.0, 4.0, lerp(color, Color32::WHITE, 0.7), b);
     }
 
     /// Shading of a pressed tact switch / latch marker.
