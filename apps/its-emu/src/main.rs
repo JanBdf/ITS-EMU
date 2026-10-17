@@ -54,7 +54,8 @@ struct Args {
     /// Scripted inputs, comma separated `<seconds>:<input>=<value>`:
     /// `S0`..`S7` and `USER` take 1 (pressed) / 0 (released),
     /// `TOUCH` takes `x;y` or `0`, `SERIAL` takes text for the virtual COM
-    /// port (`\n` = newline, no commas). Example: `2.5:S7=1,2.6:S7=0,3:SERIAL=hi\n`
+    /// port (`\n` = newline, no commas), a pin such as `PC3` takes a voltage
+    /// or `open` (analog input). Example: `2.5:S7=1,2.6:S7=0,3:SERIAL=hi\n,4:PC3=1.65`
     #[arg(long, value_parser = parse_inputs)]
     input: Option<InputScript>,
 
@@ -77,6 +78,8 @@ enum Input {
     User(bool),
     Touch(Option<(f32, f32)>),
     Serial(Vec<u8>),
+    /// Voltage applied to a pin (port index, pin), `None` = open.
+    Analog(usize, u32, Option<f32>),
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +111,15 @@ fn parse_inputs(s: &str) -> Result<InputScript, String> {
                 let parse = |v: &str| v.parse::<f32>().map_err(|_| format!("bad coordinate in {item:?}"));
                 Input::Touch(Some((parse(x)?, parse(y)?)))
             }
+            p if p.len() >= 3 && p.starts_with('P') && (b'A'..=b'K').contains(&p.as_bytes()[1]) => {
+                let pin =
+                    p[2..].parse::<u32>().ok().filter(|&n| n < 16).ok_or_else(|| format!("unknown pin {name}"))?;
+                let volts = match value {
+                    "open" => None,
+                    v => Some(v.parse::<f32>().map_err(|_| format!("expected volts or open in {item:?}"))?),
+                };
+                Input::Analog((p.as_bytes()[1] - b'A') as usize, pin, volts)
+            }
             b if b.len() == 2 && b.starts_with('S') => {
                 let n =
                     b[1..].parse::<u32>().ok().filter(|&n| n < 8).ok_or_else(|| format!("unknown button {name}"))?;
@@ -127,6 +139,7 @@ fn apply_input(board: &itsboard::ItsBoard, input: &Input) {
         Input::User(pressed) => board.set_user_button(*pressed),
         Input::Touch(pos) => board.set_touch(*pos),
         Input::Serial(data) => board.mcu().usart3.borrow_mut().send(data),
+        Input::Analog(port, pin, volts) => board.mcu().analog.borrow_mut().set_pin(*port, *pin, *volts),
     }
 }
 /// Virtual time slice between throttling decisions in real-time mode.

@@ -598,3 +598,44 @@ impl Peripheral for Dac {
         self.output();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rcc::Clocks;
+    use emu_core::nvic::Nvic;
+
+    fn adc() -> (Adc, SharedAnalog) {
+        let clocks = SharedClocks::default();
+        let hz = 180_000_000;
+        clocks.set(Clocks { hclk: hz, pclk2: hz / 2, apb2enr: 1 << 8, ..Clocks::default() });
+        let analog = SharedAnalog::default();
+        (Adc::new(clocks, SharedGpio::default(), analog.clone()), analog)
+    }
+
+    #[test]
+    fn scan_of_a_pin_and_vrefint() {
+        let (mut adc, analog) = adc();
+        analog.borrow_mut().set_pin(port('C'), 3, Some(VDDA / 2.0));
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        adc.write(&mut ctx, 0x304, 4, CCR_TSVREFE); // PCLK2 / 2 = 45 MHz: 4 cycles per ADC clock
+        adc.write(&mut ctx, 0x04, 4, CR1_SCAN);
+        adc.write(&mut ctx, 0x2C, 4, 1 << 20); // two conversions
+        adc.write(&mut ctx, 0x34, 4, 13 | (17 << 5)); // PC3 (IN13), VREFINT
+        adc.write(&mut ctx, 0x08, 4, CR2_ADON | CR2_EOCS);
+        adc.write(&mut ctx, 0x08, 4, CR2_ADON | CR2_EOCS | CR2_SWSTART);
+        assert_eq!(adc.read(&mut ctx, 0x00, 4), SR_STRT);
+        // start latency 1 ADC clock + 4 APB2 clocks, conversion 3 + 12 ADC clocks
+        let first = 4 + 8 + 15 * 4;
+        assert_eq!(adc.next_event(), Some(first));
+        ctx.clock.advance(first);
+        assert_eq!(adc.read(&mut ctx, 0x00, 4), SR_STRT | SR_EOC);
+        assert_eq!(adc.read(&mut ctx, 0x4C, 4), 2048);
+        assert_eq!(adc.read(&mut ctx, 0x00, 4), SR_STRT, "reading DR clears EOC");
+        ctx.clock.advance(15 * 4);
+        assert_eq!(adc.read(&mut ctx, 0x4C, 4), VREFINT_COUNTS);
+        assert_eq!(adc.next_event(), None);
+    }
+}

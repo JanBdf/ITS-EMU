@@ -37,6 +37,11 @@ const BUTTON_CAP_R: f32 = 7.2;
 /// AUX0..AUX5 pads (INT0..5 = PG0..5).
 const AUX_X: f32 = 945.8;
 const AUX_Y: [f32; 6] = [285.5, 317.0, 348.6, 380.1, 411.7, 448.6];
+/// Pads of the Analog header (DAC1, GNDA, ADC123_13 ... ADC3_6, GNDA), all at
+/// `ANALOG_Y`, and the indices of the signal pads (`itsboard::ANALOG_PADS`).
+const ANALOG_X: [f32; 10] = [440.3, 471.82, 503.34, 534.86, 566.38, 597.9, 629.42, 660.94, 692.46, 723.98];
+const ANALOG_Y: f32 = 448.6;
+const ANALOG_SIGNAL: [usize; 8] = [0, 2, 3, 4, 5, 6, 7, 8];
 /// Nucleo buttons B1 (USER, blue) and B2 (RESET, black).
 const USER: (f32, f32) = (321.2, 92.4);
 const RESET: (f32, f32) = (321.2, 318.3);
@@ -106,6 +111,10 @@ pub struct BoardState<'a> {
     pub display: Option<&'a egui::TextureHandle>,
     pub ints: &'a [Option<bool>; 6],
     pub latched: &'a [bool; 8],
+    /// Voltages applied to the Analog header (`None`: open).
+    pub analog: &'a [Option<f32>; 8],
+    /// DAC1 output while it is enabled.
+    pub dac1: Option<f32>,
 }
 
 /// What the user did on the board in this frame.
@@ -121,6 +130,8 @@ pub struct BoardInput {
     pub touch: Option<(f32, f32)>,
     /// AUX pad clicked (cycle open → GND → 3V3).
     pub int_clicked: Option<usize>,
+    /// New voltage for a pad of the Analog header (`None`: open).
+    pub analog: Option<(usize, Option<f32>)>,
 }
 
 /// Maps design units to screen coordinates.
@@ -330,6 +341,68 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState) -> BoardI
         if hit.clicked() {
             input.int_clicked = Some(n);
         }
+    }
+
+    // ---- Analog header: a wire with a voltage on the pad
+    for (n, &(name, port, pin)) in itsboard::ANALOG_PADS.iter().enumerate() {
+        let (x, y) = (ANALOG_X[ANALOG_SIGNAL[n]], ANALOG_Y);
+        let volts = state.analog[n];
+        let dac = if n == 0 { state.dac1 } else { None };
+        if let Some(v) = volts {
+            let wire = lerp(Color32::from_rgb(0x2A, 0x5C, 0xD8), Color32::from_rgb(0xE8, 0x30, 0x28), v / 3.3);
+            painter.circle_filled(pcb.p(x, y), pcb.len(4.6), wire);
+            painter.circle_stroke(pcb.p(x, y), pcb.len(4.6), Stroke::new(pcb.len(0.8), Color32::from_white_alpha(150)));
+        }
+        if let Some(v) = volts.or(dac) {
+            let text = if volts.is_some() { format!("{v:.2} V") } else { format!("DAC {v:.2} V") };
+            let galley = painter.layout_no_wrap(text, egui::FontId::proportional(pcb.len(7.5)), Color32::WHITE);
+            let at = pcb.p(x, y - 15.0) - galley.size() / 2.0;
+            let bg = Rect::from_min_size(at, galley.size()).expand(pcb.len(1.2));
+            painter.rect_filled(bg, egui::CornerRadius::same(pcb.len(2.0) as u8), Color32::from_black_alpha(170));
+            painter.galley(at, galley, Color32::WHITE);
+        }
+        let mut hover = format!(
+            "{name} = P{port}{pin}: {}",
+            volts.map_or_else(|| "open".to_owned(), |v| format!("{v:.2} V applied"))
+        );
+        if let Some(d) = dac {
+            hover += &format!(", DAC1 output {d:.2} V");
+        }
+        hover += " — scroll: ±0.05 V, right click: set or open";
+        let resp = ui
+            .interact(pcb.r(x - 10.0, y - 10.0, x + 10.0, y + 10.0), ui.scope_id().with(("analog", n)), Sense::click())
+            .on_hover_text(hover);
+        if resp.hovered() {
+            let scroll: f32 = ui.input(|i| {
+                i.raw
+                    .events
+                    .iter()
+                    .map(|e| if let egui::Event::MouseWheel { delta, .. } = e { delta.y } else { 0.0 })
+                    .sum()
+            });
+            if scroll != 0.0 {
+                let v = (volts.unwrap_or(1.65) + 0.05 * scroll.signum()).clamp(0.0, 3.3);
+                input.analog = Some((n, Some((v * 100.0).round() / 100.0)));
+            }
+        }
+        resp.context_menu(|ui| {
+            ui.label(format!("{name} (P{port}{pin})"));
+            let mut v = volts.unwrap_or(1.65);
+            if ui.add(egui::Slider::new(&mut v, 0.0..=3.3).suffix(" V").fixed_decimals(2)).changed() {
+                input.analog = Some((n, Some(v)));
+            }
+            ui.horizontal(|ui| {
+                for preset in [0.0, 1.65, 3.3] {
+                    if ui.button(format!("{preset} V")).clicked() {
+                        input.analog = Some((n, Some(preset)));
+                    }
+                }
+                if ui.button("open").clicked() {
+                    input.analog = Some((n, None));
+                    ui.close();
+                }
+            });
+        });
     }
 
     // ---- Nucleo buttons

@@ -457,7 +457,7 @@ def lit_led(x, y, color='#ffb030'):
 # pads of the rows (measured, Hough circles)
 OUT_PADS = [74.8 + i * 31.65 for i in range(18)]      # GND, OUT15..OUT0, GND
 IN_PADS = [655.2 + i * 31.76 for i in range(10)]      # GND, IN7..IN0, GND
-AN_PADS = [440.3 + i * 31.52 for i in range(10)]
+AN_PADS = rs_const('ANALOG_X')
 AUX_PADS = AUX_Y
 I2C_PADS = [359.4, 390.8, 422.2, 453.7]
 ROW_Y = 575.0
@@ -757,7 +757,7 @@ def carrier():
     for x in IN_PADS:
         out.append(pad(x, ROW_Y))
     for x in AN_PADS:
-        out.append(pad(x, 448.6))
+        out.append(pad(x, rs_const('ANALOG_Y')))
     for y in AUX_PADS:
         out.append(pad(AUX_X, y))
     for y in I2C_PADS:

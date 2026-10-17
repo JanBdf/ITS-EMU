@@ -31,6 +31,8 @@ pub enum Command {
     Touch(Option<(f32, f32)>),
     /// Level of INT0–5 / AUX0–5 (PG0–5): `None` = open.
     Int(u32, Option<bool>),
+    /// Voltage on a pad of the Analog header (`itsboard::ANALOG_PADS`): `None` = open.
+    Analog(usize, Option<f32>),
     Serial(Vec<u8>),
     /// Show the frame buffer's ideal colours instead of the measured look of
     /// the real panel (tone response, grey black level).
@@ -73,6 +75,8 @@ pub struct Snapshot {
     pub gdb: Result<String, String>,
     /// A debugger is connected.
     pub gdb_attached: bool,
+    /// Output voltage of DAC1 while it is enabled.
+    pub dac1: Option<f32>,
 }
 
 impl Default for Snapshot {
@@ -94,6 +98,7 @@ impl Default for Snapshot {
             serial: Vec::new(),
             gdb: Err("off".into()),
             gdb_attached: false,
+            dac1: None,
         }
     }
 }
@@ -159,6 +164,7 @@ struct Worker {
     /// External inputs, re-applied when new firmware is loaded.
     buttons: [bool; 8],
     ints: [Option<bool>; 6],
+    analog: [Option<f32>; 8],
     gdb: Option<GdbServer>,
     gdb_status: Result<String, String>,
     /// How the debugger wants the core to run (`Free` without debugger).
@@ -205,6 +211,7 @@ impl Worker {
             ideal_colors: false,
             buttons: [false; 8],
             ints: [None; 6],
+            analog: [None; 8],
             gdb,
             gdb_status,
             execution: Execution::Free,
@@ -290,6 +297,10 @@ impl Worker {
                 self.ints[n as usize] = level;
                 self.with_board(|b| b.set_int(n, level));
             }
+            Command::Analog(n, volts) => {
+                self.analog[n] = volts;
+                self.with_board(|b| b.set_analog(n, volts));
+            }
             Command::Serial(data) => self.with_board(|b| b.mcu().usart3.borrow_mut().send(&data)),
             Command::IdealColors(on) => {
                 self.ideal_colors = on;
@@ -350,18 +361,26 @@ impl Worker {
         }
     }
 
+    /// Applies the inputs the user has set to a new board.
+    fn restore_inputs(&self) {
+        let Some(sim) = &self.sim else { return };
+        for (n, &pressed) in self.buttons.iter().enumerate() {
+            sim.board.set_button(n as u32, pressed);
+        }
+        for (n, &level) in self.ints.iter().enumerate() {
+            sim.board.set_int(n as u32, level);
+        }
+        for (n, &volts) in self.analog.iter().enumerate() {
+            sim.board.set_analog(n, volts);
+        }
+    }
+
     fn load(&mut self, path: PathBuf) {
         let result = std::fs::read(&path)
             .map_err(|e| e.to_string())
             .and_then(|data| Simulator::new(&data, Some(DEFAULT_FONTS)).map_err(|e| e.to_string()));
         match result {
             Ok(sim) => {
-                for (n, &pressed) in self.buttons.iter().enumerate() {
-                    sim.board.set_button(n as u32, pressed);
-                }
-                for (n, &level) in self.ints.iter().enumerate() {
-                    sim.board.set_int(n as u32, level);
-                }
                 self.sim = Some(sim);
                 self.state = RunState::Running;
                 log::info!("loaded {}", path.display());
@@ -371,6 +390,7 @@ impl Worker {
                 self.state = RunState::Error(format!("cannot load {}: {e}", path.display()));
             }
         }
+        self.restore_inputs();
         self.firmware = Some(path);
         self.uploaded = false;
         self.published_generation = u64::MAX;
@@ -457,6 +477,7 @@ impl Worker {
                 self.published_generation = generation;
             }
             snap.leds = b.leds();
+            snap.dac1 = sim.board.dac1();
             let duty = sim.take_led_duty();
             snap.led_duty = duty.out;
             snap.nucleo_duty = duty.nucleo;
