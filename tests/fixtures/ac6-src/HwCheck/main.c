@@ -27,6 +27,7 @@
  *   adc             ADC/DAC: conversion times, internal channels, Analog pins, DAC1
  *   i2c             I2C1 (PB8/PB9, nothing connected): START, address NACK, STOP
  *   iwdg PR RLR     starts the watchdog, prints the time (us) until it resets
+ *   dma             DMA2: memory-to-memory copy, ADC1 scan into memory
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1164,6 +1165,108 @@ static void cmd_iwdg(const char *arg) {
     }
 }
 
+/* ---- DMA2: memory-to-memory copy, ADC1 scan into memory. */
+static uint32_t dma_src[8] = {0x11111111, 0x22222222, 0x33333333, 0x44444444,
+                              0x55555555, 0x66666666, 0x77777777, 0x88888888};
+static volatile uint32_t dma_dst[8];
+static volatile uint16_t adc_buf[6];
+
+#define D(name, expr) printf("D %s %08lx\n", name, (unsigned long)(expr))
+
+static void cmd_dma(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->AHB1ENR |= RCC_AHB1ENR_DMA2EN;
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
+    __DSB();
+    DMA_Stream_TypeDef *s0 = DMA2_Stream0;
+    D("reset_cr", s0->CR);
+    D("reset_fcr", s0->FCR);
+
+    // memory to memory: 8 words, PAR = source, M0AR = destination
+    s0->CR = 0;
+    DMA2->LIFCR = 0x3D;
+    s0->PAR = (uint32_t)dma_src;
+    s0->M0AR = (uint32_t)dma_dst;
+    s0->NDTR = 8;
+    s0->FCR = DMA_SxFCR_DMDIS; // M2M needs the FIFO
+    s0->CR = DMA_SxCR_DIR_1 | DMA_SxCR_PINC | DMA_SxCR_MINC | DMA_SxCR_PSIZE_1 | DMA_SxCR_MSIZE_1;
+    uint32_t t0 = DWT->CYCCNT;
+    s0->CR |= DMA_SxCR_EN;
+    while (!(DMA2->LISR & DMA_LISR_TCIF0)) {
+    }
+    uint32_t t1 = DWT->CYCCNT;
+    D("m2m_cycles_lt_200", (t1 - t0) < 200);
+    D("m2m_lisr", DMA2->LISR);
+    D("m2m_ndtr", s0->NDTR);
+    D("m2m_cr", s0->CR);
+    D("m2m_dst0", dma_dst[0]);
+    D("m2m_dst7", dma_dst[7]);
+    DMA2->LIFCR = 0x3D;
+
+    // ADC1: scan VREFINT, temperature, VREFINT (480 cycles) with DMA
+    ADC->CCR = ADC_CCR_TSVREFE | (1u << 16);
+    ADC1->CR2 = ADC_CR2_ADON;
+    for (volatile int i = 0; i < 10000; i++) {
+    }
+    ADC1->SMPR1 = 0x07FFFFFF;
+    ADC1->CR1 = ADC_CR1_SCAN;
+    ADC1->SQR1 = 2u << 20;
+    ADC1->SQR3 = 17 | (16u << 5) | (17u << 10);
+    ADC1->SR = 0;
+    s0->CR = 0;
+    s0->PAR = (uint32_t)&ADC1->DR;
+    s0->M0AR = (uint32_t)adc_buf;
+    s0->NDTR = 3;
+    s0->FCR = 0;
+    s0->CR = DMA_SxCR_MINC | DMA_SxCR_PSIZE_0 | DMA_SxCR_MSIZE_0; // channel 0, P2M, 16 bit
+    s0->CR |= DMA_SxCR_EN;
+    ADC1->CR2 = ADC_CR2_ADON | ADC_CR2_DMA;
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    t0 = DWT->CYCCNT;
+    while (!(DMA2->LISR & DMA_LISR_TCIF0) && DWT->CYCCNT - t0 < 1800000) {
+    }
+    D("adc_lisr", DMA2->LISR);
+    D("adc_ndtr", s0->NDTR);
+    D("adc_sr", ADC1->SR);
+    printf("D adc_buf %u %u %u\n", adc_buf[0], adc_buf[1], adc_buf[2]);
+    // a further conversion is not transferred (DDS = 0): no request, OVR
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    for (volatile int i = 0; i < 20000; i++) {
+    }
+    D("adc_after_end_sr", ADC1->SR);
+    D("adc_after_end_ndtr", s0->NDTR);
+    DMA2->LIFCR = 0x3D;
+
+    // continuous + circular: the buffer keeps being refreshed
+    s0->CR = 0;
+    s0->NDTR = 6;
+    s0->CR = DMA_SxCR_MINC | DMA_SxCR_PSIZE_0 | DMA_SxCR_MSIZE_0 | DMA_SxCR_CIRC;
+    s0->CR |= DMA_SxCR_EN;
+    ADC1->CR2 = ADC_CR2_ADON; // DMA requests restart when DMA is set again
+    ADC1->CR2 = ADC_CR2_ADON | ADC_CR2_DMA | ADC_CR2_DDS | ADC_CR2_CONT;
+    ADC1->SR = 0;
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    uint32_t tc = 0;
+    t0 = DWT->CYCCNT;
+    while (DWT->CYCCNT - t0 < 1800000) { // 10 ms
+        if (DMA2->LISR & DMA_LISR_TCIF0) {
+            DMA2->LIFCR = DMA_LIFCR_CTCIF0;
+            tc++;
+        }
+    }
+    ADC1->CR2 = ADC_CR2_ADON;
+    s0->CR = 0;
+    D("circ_tc_10ms", tc);
+    D("circ_sr_ovr", ADC1->SR & ADC_SR_OVR);
+    printf("D circ_buf %u %u %u %u %u %u\n", adc_buf[0], adc_buf[1], adc_buf[2], adc_buf[3], adc_buf[4],
+           adc_buf[5]);
+    ADC1->CR2 = 0;
+    ADC1->CR1 = 0;
+    ADC->CCR = 0;
+    DMA2->LIFCR = 0x3D;
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -1205,6 +1308,8 @@ static void execute(char *line) {
         cmd_i2c();
     } else if (!strcmp(line, "iwdg")) {
         cmd_iwdg(arg);
+    } else if (!strcmp(line, "dma")) {
+        cmd_dma();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {

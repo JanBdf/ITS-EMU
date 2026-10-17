@@ -14,7 +14,7 @@ pub mod scs;
 pub mod systick;
 pub mod timing;
 
-pub use bus::{Bus, DeviceCtx, Peripheral, ResetKind};
+pub use bus::{Bus, BusMaster, DeviceCtx, Peripheral, Ram, ResetKind};
 pub use clock::Clock;
 pub use elf::ElfImage;
 pub use exception::CoreReg;

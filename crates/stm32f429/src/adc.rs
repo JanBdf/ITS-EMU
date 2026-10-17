@@ -14,6 +14,7 @@ use std::rc::Rc;
 use emu_core::bus::{extract_read, merge_write};
 use emu_core::{Clock, DeviceCtx, Peripheral};
 
+use crate::dma::{DmaLine, SharedDma};
 use crate::gpio::{NUM_PORTS, PinMode, SharedGpio, port};
 use crate::rcc::SharedClocks;
 
@@ -93,6 +94,8 @@ const CR1_AWDEN: u32 = 1 << 23;
 const CR1_OVRIE: u32 = 1 << 26;
 const CR2_ADON: u32 = 1 << 0;
 const CR2_CONT: u32 = 1 << 1;
+const CR2_DMA: u32 = 1 << 8;
+const CR2_DDS: u32 = 1 << 9;
 const CR2_EOCS: u32 = 1 << 10;
 const CR2_ALIGN: u32 = 1 << 11;
 const CR2_JSWSTART: u32 = 1 << 22;
@@ -101,6 +104,9 @@ const CCR_VBATE: u32 = 1 << 22;
 const CCR_TSVREFE: u32 = 1 << 23;
 const SMP_CYCLES: [u64; 8] = [3, 15, 28, 56, 84, 112, 144, 480];
 const ADC_IRQ: u32 = 18;
+/// DMA2 streams/channels of ADC1..3.
+const DMA_LINES: [DmaLine; 3] =
+    [DmaLine(&[(1, 0, 0), (1, 4, 0)]), DmaLine(&[(1, 2, 1), (1, 3, 1)]), DmaLine(&[(1, 0, 2), (1, 1, 2)])];
 
 #[derive(Default)]
 struct Unit {
@@ -115,6 +121,8 @@ struct Unit {
     jsqr: u32,
     jdr: [u32; 4],
     dr: u32,
+    /// DMA requests stopped after the last transfer (DDS = 0) until DMA is set again.
+    dma_stopped: bool,
     /// Regular group: position in the sequence and end of the running conversion.
     regular: Option<(usize, u64)>,
     injected: Option<(usize, u64)>,
@@ -190,12 +198,14 @@ pub struct Adc {
     clocks: SharedClocks,
     gpio: SharedGpio,
     analog: SharedAnalog,
+    dma: SharedDma,
     warned: bool,
 }
 
 impl Adc {
-    pub fn new(clocks: SharedClocks, gpio: SharedGpio, analog: SharedAnalog) -> Self {
-        Self { units: [Unit::reset(), Unit::reset(), Unit::reset()], ccr: 0, clocks, gpio, analog, warned: false }
+    pub fn new(clocks: SharedClocks, gpio: SharedGpio, analog: SharedAnalog, dma: SharedDma) -> Self {
+        let units = [Unit::reset(), Unit::reset(), Unit::reset()];
+        Self { units, ccr: 0, clocks, gpio, analog, dma, warned: false }
     }
 
     fn clock_enabled(&self, unit: usize) -> bool {
@@ -250,6 +260,11 @@ impl Adc {
 
     /// Completes the conversions that end by `now`.
     fn advance(&mut self, ctx: &mut DeviceCtx) {
+        for (u, unit) in self.units.iter_mut().enumerate() {
+            if DMA_LINES[u].take_end(&self.dma) && unit.cr2 & CR2_DDS == 0 {
+                unit.dma_stopped = true;
+            }
+        }
         let now = ctx.now();
         let per_clock = self.cycles_per_adc_clock(ctx);
         for u in 0..3 {
@@ -262,7 +277,9 @@ impl Adc {
                 let ch = self.units[u].regular_channel(i);
                 let counts = self.sample(u, ch);
                 let unit = &mut self.units[u];
-                let eocs = unit.cr2 & CR2_EOCS != 0;
+                // with DMA every conversion is a result to collect
+                let dma = unit.cr2 & CR2_DMA != 0 && !unit.dma_stopped;
+                let eocs = unit.cr2 & CR2_EOCS != 0 || dma;
                 let last = i + 1 >= unit.regular_len();
                 if eocs || last {
                     if eocs && unit.sr & SR_EOC != 0 {
@@ -292,6 +309,9 @@ impl Adc {
                 }
                 unit.regular =
                     next.map(|k| (k, start + unit.conversion_adc_clocks(unit.regular_channel(k)) * per_clock));
+                if dma {
+                    break; // the DMA reads DR before the next result
+                }
             }
             while let Some((i, end)) = self.units[u].injected
                 && end <= now
@@ -316,6 +336,7 @@ impl Adc {
     fn sync_irq(&self, ctx: &mut DeviceCtx) {
         for (u, unit) in self.units.iter().enumerate() {
             ctx.set_irq_source(ADC_IRQ, u as u8, unit.irq());
+            DMA_LINES[u].set(&self.dma, unit.cr2 & CR2_DMA != 0 && !unit.dma_stopped && unit.sr & SR_EOC != 0);
         }
     }
 
@@ -422,6 +443,9 @@ impl Peripheral for Adc {
             0x00 => unit.sr &= v | !0x3F,
             0x04 => unit.cr1 = v & 0x07C0_FFFF,
             0x08 => {
+                if v & CR2_DMA == 0 {
+                    unit.dma_stopped = false;
+                }
                 unit.cr2 = v & 0x3F7F_0F03 & !(CR2_SWSTART | CR2_JSWSTART);
                 if unit.cr2 & CR2_ADON == 0 {
                     unit.regular = None;
@@ -610,7 +634,7 @@ mod tests {
         let hz = 180_000_000;
         clocks.set(Clocks { hclk: hz, pclk2: hz / 2, apb2enr: 1 << 8, ..Clocks::default() });
         let analog = SharedAnalog::default();
-        (Adc::new(clocks, SharedGpio::default(), analog.clone()), analog)
+        (Adc::new(clocks, SharedGpio::default(), analog.clone(), SharedDma::default()), analog)
     }
 
     #[test]

@@ -1,0 +1,17 @@
+D reset_cr 00000000
+D reset_fcr 00000021
+D m2m_cycles_lt_200 00000001
+D m2m_lisr 00000030
+D m2m_ndtr 00000000
+D m2m_cr 00005680
+D m2m_dst0 11111111
+D m2m_dst7 88888888
+D adc_lisr 00000030
+D adc_ndtr 00000000
+D adc_sr 00000010
+D adc_buf 1494 956 1493
+D adc_after_end_sr 00000012
+D adc_after_end_ndtr 00000000
+D circ_tc_10ms 0000004c
+D circ_sr_ovr 00000000
+D circ_buf 1494 1494 955 1494 1494 955

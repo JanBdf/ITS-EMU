@@ -194,6 +194,27 @@ fn register_reset_values_match_the_board() {
 }
 
 #[test]
+fn dma_matches_the_board() {
+    // memory-to-memory copy, ADC1 scan into memory (single, after the end
+    // of the transfer, continuous + circular): exact except the samples
+    let Some(out) = run("dma", 2_000) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-dma.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("D ")).collect();
+    let board: Vec<&str> = board.lines().collect();
+    assert_eq!(emu.len(), board.len(), "{out}");
+    for (e, b) in emu.iter().zip(&board) {
+        if b.contains("_buf ") {
+            let values = |l: &str| -> Vec<i64> { l.split_whitespace().skip(2).map(|v| v.parse().unwrap()).collect() };
+            for (x, y) in values(e).iter().zip(values(b)) {
+                assert!((x - y).abs() <= 8, "{e} / board {b}");
+            }
+        } else {
+            assert_eq!(e, b);
+        }
+    }
+}
+
+#[test]
 fn watchdog_resets_like_the_board() {
     // HwCheck `iwdg 2 fff`: refreshed once, then the board resets after
     // 1.92 s (last line "W t 1920000"); the reset flags read IWDG + PIN.
