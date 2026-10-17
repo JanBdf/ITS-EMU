@@ -56,6 +56,10 @@ pub struct PortState {
     pub exti_rise: u16,
     pub exti_fall: u16,
     pub exti_due: u64,
+    /// Pins timer channels capture from, and their edges not yet captured.
+    pub cap_watch: u16,
+    pub cap_rise: u16,
+    pub cap_fall: u16,
     /// Time-averaged levels: cycles each pin was high since `duty_since`,
     /// accounted up to `duty_last` (used for LED brightness).
     high_cycles: [u64; 16],
@@ -170,12 +174,14 @@ impl PortState {
     /// Runs `f` and records the edges it causes on pins EXTI watches; they
     /// reach EXTI at cycle `due`.
     fn tracked<R>(&mut self, due: u64, f: impl FnOnce(&mut Self) -> R) -> R {
-        if self.exti_watch == 0 {
+        if self.exti_watch | self.cap_watch == 0 {
             return f(self);
         }
         let before = self.idr() as u16;
         let r = f(self);
         let after = self.idr() as u16;
+        self.cap_rise |= after & !before & self.cap_watch;
+        self.cap_fall |= before & !after & self.cap_watch;
         let rise = after & !before & self.exti_watch;
         let fall = before & !after & self.exti_watch;
         if rise | fall != 0 {
@@ -352,18 +358,22 @@ impl Peripheral for GpioPort {
 
     fn next_event(&self) -> Option<u64> {
         // ends the slice so that EXTI sees the edge before the next instruction
-        self.bank.borrow().ports[self.index].exti_due()
+        let p = &self.bank.borrow().ports[self.index];
+        // edges for timer inputs are captured at once
+        if p.cap_rise | p.cap_fall != 0 { Some(0) } else { p.exti_due() }
     }
 
     fn reset(&mut self) {
         let mut bank = self.bank.borrow_mut();
         let old = &bank.ports[self.index];
-        let (ext_mask, ext_level, float_level, watch) = (old.ext_mask, old.ext_level, old.float_level, old.exti_watch);
+        let (ext_mask, ext_level, float_level, watch, cap) =
+            (old.ext_mask, old.ext_level, old.float_level, old.exti_watch, old.cap_watch);
         bank.ports[self.index] = PortState::reset_for(self.index);
         // External drivers (buttons held down, ...) survive a reset of the MCU;
         // the EXTI watch mask belongs to EXTI.
         let new = &mut bank.ports[self.index];
-        (new.ext_mask, new.ext_level, new.float_level, new.exti_watch) = (ext_mask, ext_level, float_level, watch);
+        (new.ext_mask, new.ext_level, new.float_level, new.exti_watch, new.cap_watch) =
+            (ext_mask, ext_level, float_level, watch, cap);
         self.warned_clock = false;
     }
 }

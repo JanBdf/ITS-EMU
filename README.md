@@ -13,13 +13,13 @@ Status: work in progress — see [PLAN.md](PLAN.md).
 |---|---|
 | CPU | Cortex-M4F (Thumb-2, FPU) via [Unicorn](https://www.unicorn-engine.org/); NVIC, SysTick, exceptions, faults in Rust |
 | Clock | RCC clock tree, virtual time in CPU cycles (16 MHz HSI → 180 MHz PLL); cycle model of the Cortex-M4 (loads, branches, divisions, exceptions, APB wait states) measured on the board |
-| Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (output compare, PWM duty, TIM1/8 repetition counter), ADC1–3, DAC, I²C1–3 (master; nothing connected answers with NACK), SPI1–6, USART1–6 + UART4/5/7/8 (only USART3 connected), PWR, flash interface, bit-banding |
+| Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (output compare, PWM duty, input capture, TIM1/8 repetition counter), ADC1–3, DAC, I²C1–3 (master; nothing connected answers with NACK), SPI1–6, USART1–6 + UART4/5/7/8 (only USART3 connected), PWR, flash interface, bit-banding |
 | Board | LEDs OUT0–15, buttons S0–S7, INT0–5, Analog header (voltages on the ADC pins, DAC1), Nucleo LEDs and USER button |
 | Display | ILI9486 480×320 TFT with SPI timing, XPT2046 touch, backlight PWM, tone response of the real panel (GUI; `--ideal-colors` to switch off) |
 | Serial | Virtual COM port (USART3, `printf` / `stdin_getchar`) |
 | Debugging | GDB remote server: breakpoints, single step, watchpoints, registers incl. FPU, memory, `monitor reset halt` |
 
-Not yet: Ethernet, DMA, devices on the I²C header, timer input capture, ADC/DAC hardware triggers.
+Not yet: Ethernet, DMA, devices on the I²C header, timer outputs on pins, ADC/DAC hardware triggers.
 
 ## Usage
 

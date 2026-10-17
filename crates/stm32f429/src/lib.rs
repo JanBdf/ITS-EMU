@@ -14,7 +14,7 @@ use emu_core::{Bus, MachineConfig, MemoryMap};
 use gpio::{GPIOA_BASE, GpioPort, NUM_PORTS, PORT_STRIDE, SharedGpio};
 use rcc::{FlashInterface, Pwr, Rcc, SharedClocks};
 use spi::{Spi, SpiSlot};
-use timer::{ApbBus, GpTimer, SharedPwm};
+use timer::{ApbBus, ChannelPins, GpTimer, SharedPwm};
 use usart::{SharedSerial, Usart};
 
 pub const FLASH_BASE: u32 = 0x0800_0000;
@@ -47,6 +47,29 @@ pub fn memory_map() -> MemoryMap {
 pub fn machine_config() -> MachineConfig {
     MachineConfig { memory: memory_map(), reset_cpu_hz: HSI_HZ, quantum: 200_000, masked_quantum: 1_000 }
 }
+
+/// Pins of the timer channels (LQFP144) and their alternate function.
+const fn pins(af: u32, pins: [&'static [(char, u32)]; 4]) -> ChannelPins {
+    ChannelPins { af, pins }
+}
+static TIM1_PINS: ChannelPins =
+    pins(1, [&[('A', 8), ('E', 9)], &[('A', 9), ('E', 11)], &[('A', 10), ('E', 13)], &[('A', 11), ('E', 14)]]);
+static TIM2_PINS: ChannelPins =
+    pins(1, [&[('A', 0), ('A', 5), ('A', 15)], &[('A', 1), ('B', 3)], &[('A', 2), ('B', 10)], &[('A', 3), ('B', 11)]]);
+static TIM3_PINS: ChannelPins = pins(
+    2,
+    [&[('A', 6), ('B', 4), ('C', 6)], &[('A', 7), ('B', 5), ('C', 7)], &[('B', 0), ('C', 8)], &[('B', 1), ('C', 9)]],
+);
+static TIM4_PINS: ChannelPins =
+    pins(2, [&[('B', 6), ('D', 12)], &[('B', 7), ('D', 13)], &[('B', 8), ('D', 14)], &[('B', 9), ('D', 15)]]);
+static TIM5_PINS: ChannelPins = pins(2, [&[('A', 0)], &[('A', 1)], &[('A', 2)], &[('A', 3)]]);
+static TIM8_PINS: ChannelPins = pins(3, [&[('C', 6)], &[('C', 7)], &[('C', 8)], &[('C', 9)]]);
+static TIM9_PINS: ChannelPins = pins(3, [&[('A', 2), ('E', 5)], &[('A', 3), ('E', 6)], &[], &[]]);
+static TIM10_PINS: ChannelPins = pins(3, [&[('B', 8), ('F', 6)], &[], &[], &[]]);
+static TIM11_PINS: ChannelPins = pins(3, [&[('B', 9), ('F', 7)], &[], &[], &[]]);
+static TIM12_PINS: ChannelPins = pins(9, [&[('B', 14)], &[('B', 15)], &[], &[]]);
+static TIM13_PINS: ChannelPins = pins(9, [&[('A', 6), ('F', 8)], &[], &[], &[]]);
+static TIM14_PINS: ChannelPins = pins(9, [&[('A', 7), ('F', 9)], &[], &[], &[]]);
 
 /// Handles to MCU state that board devices and front ends need.
 #[derive(Clone)]
@@ -122,30 +145,31 @@ pub fn build() -> (Bus, Stm32f429) {
     let usart3 = SharedSerial::default();
     let mut tim_pwm: Vec<SharedPwm> = Vec::new();
     let timers = [
-        ("TIM2", 0x4000_0000, 28, true, 0),
-        ("TIM3", 0x4000_0400, 29, false, 1),
-        ("TIM4", 0x4000_0800, 30, false, 2),
-        ("TIM5", 0x4000_0C00, 50, true, 3),
+        ("TIM2", 0x4000_0000, 28, true, 0, &TIM2_PINS),
+        ("TIM3", 0x4000_0400, 29, false, 1, &TIM3_PINS),
+        ("TIM4", 0x4000_0800, 30, false, 2, &TIM4_PINS),
+        ("TIM5", 0x4000_0C00, 50, true, 3, &TIM5_PINS),
     ];
-    for (name, base, irq, wide, en_bit) in timers {
-        let t = GpTimer::new(name, irq, wide, ApbBus::Apb1, en_bit, clocks.clone());
+    for (name, base, irq, wide, en_bit, pins) in timers {
+        let t = GpTimer::new(name, irq, wide, ApbBus::Apb1, en_bit, clocks.clone()).with_inputs(pins, gpio.clone());
         tim_pwm.push(t.pwm());
         bus.attach(base, 0x400, Box::new(t));
     }
     let timer = |name, irq, bus, en_bit| GpTimer::new(name, irq, false, bus, en_bit, clocks.clone());
     use ApbBus::{Apb1, Apb2};
     // TIM9..14 share their interrupt lines with TIM1/TIM8 (source 1), TIM6 with the DAC
+    let g = || gpio.clone();
     let more = [
-        (0x4001_0000, timer("TIM1", 25, Apb2, 0).advanced(27)),
-        (0x4001_0400, timer("TIM8", 44, Apb2, 1).advanced(46)),
+        (0x4001_0000, timer("TIM1", 25, Apb2, 0).advanced(27).with_inputs(&TIM1_PINS, g())),
+        (0x4001_0400, timer("TIM8", 44, Apb2, 1).advanced(46).with_inputs(&TIM8_PINS, g())),
         (0x4000_1000, timer("TIM6", 54, Apb1, 4).with_channels(0)),
         (0x4000_1400, timer("TIM7", 55, Apb1, 5).with_channels(0)),
-        (0x4001_4000, timer("TIM9", 24, Apb2, 16).with_channels(2).shared_irq(1)),
-        (0x4001_4400, timer("TIM10", 25, Apb2, 17).with_channels(1).shared_irq(1)),
-        (0x4001_4800, timer("TIM11", 26, Apb2, 18).with_channels(1).shared_irq(1)),
-        (0x4000_1800, timer("TIM12", 43, Apb1, 6).with_channels(2).shared_irq(1)),
-        (0x4000_1C00, timer("TIM13", 44, Apb1, 7).with_channels(1).shared_irq(1)),
-        (0x4000_2000, timer("TIM14", 45, Apb1, 8).with_channels(1).shared_irq(1)),
+        (0x4001_4000, timer("TIM9", 24, Apb2, 16).with_channels(2).shared_irq(1).with_inputs(&TIM9_PINS, g())),
+        (0x4001_4400, timer("TIM10", 25, Apb2, 17).with_channels(1).shared_irq(1).with_inputs(&TIM10_PINS, g())),
+        (0x4001_4800, timer("TIM11", 26, Apb2, 18).with_channels(1).shared_irq(1).with_inputs(&TIM11_PINS, g())),
+        (0x4000_1800, timer("TIM12", 43, Apb1, 6).with_channels(2).shared_irq(1).with_inputs(&TIM12_PINS, g())),
+        (0x4000_1C00, timer("TIM13", 44, Apb1, 7).with_channels(1).shared_irq(1).with_inputs(&TIM13_PINS, g())),
+        (0x4000_2000, timer("TIM14", 45, Apb1, 8).with_channels(1).shared_irq(1).with_inputs(&TIM14_PINS, g())),
     ];
     for (base, t) in more {
         bus.attach(base, 0x400, Box::new(t));

@@ -3,7 +3,9 @@
 //! The counter is evaluated lazily from virtual time. Supported: prescaler and
 //! auto-reload (with preload), update events (overflow, `EGR`), the
 //! repetition counter of TIM1/TIM8, output compare flags and interrupts, PWM
-//! duty cycles, `CNT` reads/writes. Input capture, down/center-aligned
+//! duty cycles, `CNT` reads/writes, input capture of edges that drive the
+//! channel pins from outside (buttons, analog inputs; with prescaler,
+//! polarity and overcapture). Timer outputs on pins, down/center-aligned
 //! counting and slave modes are not modelled (a warning is logged when used).
 
 use std::cell::Cell;
@@ -12,7 +14,14 @@ use std::rc::Rc;
 use emu_core::bus::{extract_read, merge_write};
 use emu_core::{Clock, DeviceCtx, Peripheral};
 
+use crate::gpio::{PinMode, SharedGpio, port};
 use crate::rcc::SharedClocks;
+
+/// Pins of the four channels of a timer, and their alternate function.
+pub struct ChannelPins {
+    pub af: u32,
+    pub pins: [&'static [(char, u32)]; 4],
+}
 
 /// Duty cycle (0.0–1.0) of each output channel in PWM mode, `None` otherwise.
 pub type SharedPwm = Rc<Cell<[Option<f32>; 4]>>;
@@ -53,6 +62,12 @@ pub struct GpTimer {
     enable_bit: u32,
     clocks: SharedClocks,
     pwm: SharedPwm,
+    /// Inputs for capture: the pins and the GPIO bank.
+    inputs: Option<(&'static ChannelPins, SharedGpio)>,
+    /// Pins watched for capture edges (port, pin).
+    watched: Vec<(usize, u32)>,
+    /// Edges counted by the input prescalers.
+    ic_events: [u32; 4],
 
     cr1: u32,
     cr2: u32,
@@ -98,6 +113,9 @@ impl GpTimer {
             enable_bit,
             clocks,
             pwm: SharedPwm::default(),
+            inputs: None,
+            watched: Vec::new(),
+            ic_events: [0; 4],
             cr1: 0,
             cr2: 0,
             smcr: 0,
@@ -144,6 +162,12 @@ impl GpTimer {
         self
     }
 
+    /// Channel inputs for input capture.
+    pub fn with_inputs(mut self, pins: &'static ChannelPins, gpio: SharedGpio) -> Self {
+        self.inputs = Some((pins, gpio));
+        self
+    }
+
     /// The timer is source `src` of an interrupt line shared with another timer.
     pub fn shared_irq(mut self, src: u8) -> Self {
         self.irq_src = src;
@@ -157,6 +181,91 @@ impl GpTimer {
         (self.psc, self.psc_active, self.arr, self.arr_active) = (0, 0, max, max);
         (self.rcr, self.rep_left, self.bdtr, self.dcr, self.or) = (0, 0, 0, 0, 0);
         (self.cnt_base, self.base_ps, self.checked, self.next_event, self.warned) = (0, 0, 0, None, false);
+        self.ic_events = [0; 4];
+        self.update_watch();
+    }
+
+    /// Capture mode of channel `ch`: the channel whose pin it captures (TI1..TI4).
+    fn capture_source(&self, ch: usize) -> Option<usize> {
+        if ch >= self.channels || self.ccer & (1 << (4 * ch)) == 0 {
+            return None;
+        }
+        match (self.ccmr[ch / 2] >> (8 * (ch % 2))) & 3 {
+            1 => Some(ch),
+            2 => Some(ch ^ 1),
+            _ => None,
+        }
+    }
+
+    /// Tells the GPIO bank which pins to report edges of.
+    fn update_watch(&mut self) {
+        let Some((pins, gpio)) = &self.inputs else { return };
+        let mut g = gpio.borrow_mut();
+        for &(p, pin) in &self.watched {
+            let ps = &mut g.ports[p];
+            ps.cap_watch &= !(1 << pin);
+            ps.cap_rise &= !(1 << pin);
+            ps.cap_fall &= !(1 << pin);
+        }
+        self.watched.clear();
+        for ch in 0..4 {
+            let Some(src) = self.capture_source(ch) else { continue };
+            for &(p, pin) in pins.pins[src] {
+                g.ports[port(p)].cap_watch |= 1 << pin;
+                self.watched.push((port(p), pin));
+            }
+        }
+    }
+
+    /// Captures the counter on the edges the watched pins had since the last call.
+    fn take_captures(&mut self, now_ps: u64) {
+        let Some((pins, gpio)) = &self.inputs else { return };
+        if self.watched.is_empty() {
+            return;
+        }
+        let mut g = gpio.borrow_mut();
+        // edges per channel input (rising, falling), from pins routed to the timer
+        let mut edges = [(false, false); 4];
+        for (src, list) in pins.pins.iter().enumerate() {
+            for &(p, pin) in *list {
+                let ps = &mut g.ports[port(p)];
+                let bit = 1u16 << pin;
+                let routed = ps.mode(pin) == PinMode::Alternate
+                    && (ps.afr[(pin / 8) as usize] >> (4 * (pin % 8))) & 0xF == pins.af;
+                if routed {
+                    edges[src].0 |= ps.cap_rise & bit != 0;
+                    edges[src].1 |= ps.cap_fall & bit != 0;
+                }
+                ps.cap_rise &= !bit;
+                ps.cap_fall &= !bit;
+            }
+        }
+        drop(g);
+        let cnt = self.cnt(now_ps);
+        for ch in 0..4 {
+            let Some(src) = self.capture_source(ch) else { continue };
+            let (rise, fall) = edges[src];
+            let (p, np) = (self.ccer & (2 << (4 * ch)) != 0, self.ccer & (8 << (4 * ch)) != 0);
+            let hit = match (p, np) {
+                (false, false) => rise,
+                (true, false) => fall,
+                _ => rise || fall,
+            };
+            if !hit {
+                continue;
+            }
+            let psc = (self.ccmr[ch / 2] >> (8 * (ch % 2) + 2)) & 3;
+            self.ic_events[ch] += 1;
+            if self.ic_events[ch] < 1 << psc {
+                continue;
+            }
+            self.ic_events[ch] = 0;
+            if self.sr & (2 << ch) != 0 {
+                self.sr |= 0x200 << ch; // CCxOF: overcapture
+            }
+            self.sr |= 2 << ch;
+            self.ccr[ch] = cnt;
+        }
     }
 
     /// Handle to the PWM duty cycles of the output channels.
@@ -310,6 +419,7 @@ impl GpTimer {
     /// Processes overflows and compare matches up to `now_ps`.
     fn advance(&mut self, ctx: &mut DeviceCtx) {
         let now_ps = ctx.clock.time_ps();
+        self.take_captures(now_ps);
         if !self.running() || self.arr_active == 0 {
             self.next_event = None;
             return;
@@ -477,8 +587,16 @@ impl Peripheral for GpTimer {
             return 0;
         }
         self.advance(ctx);
+        let v = self.reg(off & !3, ctx.clock.time_ps());
+        if let 0x34..=0x40 = off & !3 {
+            // reading a captured value clears its flag
+            let ch = ((off & !3) - 0x34) as usize / 4;
+            if self.capture_source(ch).is_some() {
+                self.sr &= !(2 << ch);
+            }
+        }
         self.sync_irq(ctx);
-        extract_read(self.reg(off & !3, ctx.clock.time_ps()), off, size)
+        extract_read(v, off, size)
     }
 
     fn write(&mut self, ctx: &mut DeviceCtx, off: u32, size: u32, value: u32) {
@@ -525,12 +643,21 @@ impl Peripheral for GpTimer {
                 self.sr |= v & (channels | 0xE0);
             }
             0x18 | 0x1C => {
-                self.ccmr[(aligned as usize - 0x18) / 4] = v;
-                if v & 0x0303 != 0 {
-                    self.warn_unsupported("input capture");
+                // CCxS can only be changed while the channel is off (CCxE = 0)
+                let i = (aligned as usize - 0x18) / 4;
+                let mut keep = 0;
+                for half in 0..2 {
+                    if self.ccer & (1 << (4 * (2 * i + half))) != 0 {
+                        keep |= 3 << (8 * half);
+                    }
                 }
+                self.ccmr[i] = (v & !keep) | (self.ccmr[i] & keep);
+                self.update_watch();
             }
-            0x20 => self.ccer = v,
+            0x20 => {
+                self.ccer = v;
+                self.update_watch();
+            }
             0x24 => {
                 self.rebase(now_ps, v & mask);
                 self.base_ps = now_ps;
@@ -542,10 +669,10 @@ impl Peripheral for GpTimer {
                     self.arr_active = self.arr;
                 }
             }
-            0x34 => self.ccr[0] = v & mask,
-            0x38 => self.ccr[1] = v & mask,
-            0x3C => self.ccr[2] = v & mask,
-            0x40 => self.ccr[3] = v & mask,
+            // read-only while capturing
+            0x34..=0x40 if self.capture_source((aligned - 0x34) as usize / 4).is_none() => {
+                self.ccr[(aligned - 0x34) as usize / 4] = v & mask
+            }
             0x30 if self.cc_irq.is_some() => self.rcr = v & 0xFF,
             0x44 if self.cc_irq.is_some() => self.bdtr = v,
             0x48 => self.dcr = v & 0x1F1F,
@@ -558,7 +685,7 @@ impl Peripheral for GpTimer {
     }
 
     fn update(&mut self, ctx: &mut DeviceCtx) {
-        if self.next_event.is_some_and(|t| ctx.now() >= t) {
+        if self.next_event.is_some_and(|t| ctx.now() >= t) || !self.watched.is_empty() {
             self.advance(ctx);
             self.sync_irq(ctx);
         }
@@ -577,6 +704,7 @@ impl Peripheral for GpTimer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpio::{SharedGpio, port};
     use crate::rcc::Clocks;
     use emu_core::nvic::Nvic;
 
@@ -643,6 +771,47 @@ mod tests {
         assert_eq!(t.read(&mut ctx, 0x24, 4), 100_000);
         // UG set UIF (URS = 0)
         assert_eq!(t.read(&mut ctx, 0x10, 4) & 1, 1);
+    }
+
+    #[test]
+    fn input_capture_of_a_button_edge() {
+        static PINS: ChannelPins = ChannelPins { af: 3, pins: [&[('F', 6)], &[], &[], &[]] };
+        let clocks = SharedClocks::default();
+        clocks.set(Clocks { apb2_timer: 180_000_000, apb2enr: 1 << 17, hclk: 180_000_000, ..Clocks::default() });
+        let gpio = SharedGpio::default();
+        {
+            let mut g = gpio.borrow_mut();
+            let f = &mut g.ports[port('F')];
+            f.moder = 2 << 12; // PF6: alternate function 3 (TIM10_CH1)
+            f.afr[0] = 3 << 24;
+            g.drive(port('F'), 6, Some(true)); // S6 released
+        }
+        let mut t = GpTimer::new("TIM10", 25, false, ApbBus::Apb2, 17, clocks)
+            .with_channels(1)
+            .with_inputs(&PINS, gpio.clone());
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        t.write(&mut ctx, 0x28, 4, 179); // 1 MHz
+        t.write(&mut ctx, 0x18, 4, 1); // CC1S = 01: TI1
+        t.write(&mut ctx, 0x20, 4, 0b1011); // CC1E, both edges
+        t.write(&mut ctx, 0x18, 4, 0); // ignored while CC1E = 1
+        assert_eq!(t.read(&mut ctx, 0x18, 4), 1);
+        t.write(&mut ctx, 0x14, 4, 1);
+        t.write(&mut ctx, 0x10, 4, 0);
+        t.write(&mut ctx, 0x00, 4, 1);
+        ctx.clock.advance(180 * 250); // 250 us
+        gpio.borrow_mut().drive(port('F'), 6, Some(false)); // pressed: falling edge
+        t.update(&mut ctx);
+        assert_eq!(t.read(&mut ctx, 0x10, 4), 2, "CC1IF");
+        ctx.clock.advance(180 * 100);
+        gpio.borrow_mut().drive(port('F'), 6, Some(true)); // released before CCR1 was read
+        t.update(&mut ctx);
+        assert_eq!(t.read(&mut ctx, 0x10, 4), 0x202, "CC1IF + CC1OF");
+        assert_eq!(t.read(&mut ctx, 0x34, 4), 350);
+        assert_eq!(t.read(&mut ctx, 0x10, 4), 0x200, "reading CCR1 clears CC1IF");
+        t.write(&mut ctx, 0x34, 4, 7); // read-only while capturing
+        assert_eq!(t.read(&mut ctx, 0x34, 4), 350);
     }
 
     #[test]
