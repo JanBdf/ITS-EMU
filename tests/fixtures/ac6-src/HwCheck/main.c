@@ -18,6 +18,9 @@
  *   time            prints durations (TIM2 ticks, 90 per us) of library calls
  *   cyc             prints core cycles (DWT->CYCCNT) of instruction kernels
  *   div             prints UDIV/SDIV cycles for a range of operands
+ *   rd ADDR         prints the 32-bit word at ADDR
+ *   wr ADDR VAL     writes the 32-bit word VAL to ADDR
+ *   exti            EXTI/SYSCFG behaviour and interrupt latency (PG0, PG5)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -408,6 +411,195 @@ static void cmd_pins(void) {
     }
 }
 
+/* ---- EXTI: PG0 and PG5 (AUX0/AUX5, open on the board) are driven as
+ * outputs; the input stage still feeds the EXTI edge detectors. */
+static volatile uint32_t exti_count, exti_cyc, exti_pr;
+
+static void exti_isr(uint32_t line) {
+    exti_cyc = DWT->CYCCNT;
+    exti_pr = EXTI->PR;
+    EXTI->PR = line;
+    exti_count++;
+}
+
+void EXTI0_IRQHandler(void) { exti_isr(1u << 0); }
+void EXTI9_5_IRQHandler(void) { exti_isr(1u << 5); }
+
+static void pg(int pin, int level) {
+    GPIOG->BSRR = level ? 1u << pin : 1u << (pin + 16);
+    __DSB();
+}
+
+#define SHOW(name, expr) printf("E %s %08lx\n", name, (unsigned long)(expr))
+
+static void cmd_exti(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOGEN;
+    SHOW("reset_imr", EXTI->IMR);
+    SHOW("reset_rtsr", EXTI->RTSR);
+    SHOW("reset_pr", EXTI->PR);
+    SHOW("reset_exticr1", SYSCFG->EXTICR[0]);
+    SHOW("apb2enr", RCC->APB2ENR);
+
+    RCC->APB2ENR &= ~RCC_APB2ENR_SYSCFGEN;
+    __DSB();
+    SYSCFG->EXTICR[0] = 0x6;
+    SHOW("exticr_noclk", SYSCFG->EXTICR[0]);
+    RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+    __DSB();
+    SHOW("exticr_clk_after_noclk_write", SYSCFG->EXTICR[0]);
+    SYSCFG->EXTICR[0] = 0xFFFFFFFF;
+    SHOW("exticr1_ones", SYSCFG->EXTICR[0]);
+    SYSCFG->EXTICR[0] = 0x6;      // line 0 = PG0
+    SYSCFG->EXTICR[1] = 0x6 << 4; // line 5 = PG5
+    SHOW("exticr1", SYSCFG->EXTICR[0]);
+
+    EXTI->IMR = 0xFFFFFFFF;
+    SHOW("imr_ones", EXTI->IMR);
+    EXTI->RTSR = 0xFFFFFFFF;
+    SHOW("rtsr_ones", EXTI->RTSR);
+    EXTI->IMR = 0;
+    EXTI->RTSR = 0;
+    EXTI->FTSR = 0;
+    EXTI->PR = 0xFFFFFFFF;
+    SHOW("pr_after_clear", EXTI->PR);
+
+    GPIOG->MODER = (GPIOG->MODER & ~((3u << 0) | (3u << 10))) | (1u << 0) | (1u << 10);
+    pg(0, 0);
+    pg(5, 0);
+
+    // edges with the line masked
+    EXTI->RTSR = 1u << 0;
+    pg(0, 1);
+    SHOW("pr_rise_masked", EXTI->PR);
+    EXTI->PR = 0xFFFFFFFF;
+    pg(0, 0);
+    SHOW("pr_fall_rtsr_only", EXTI->PR);
+    EXTI->IMR = 1u << 0;
+    pg(0, 1);
+    SHOW("pr_rise_unmasked", EXTI->PR);
+    EXTI->PR = 1u << 1;
+    SHOW("pr_clear_other", EXTI->PR);
+    EXTI->PR = 1u << 0;
+    SHOW("pr_clear", EXTI->PR);
+    EXTI->FTSR = 1u << 0;
+    pg(0, 0);
+    SHOW("pr_fall_ftsr", EXTI->PR);
+    EXTI->PR = 1u << 0;
+    EXTI->IMR = 0;
+    pg(0, 1);
+    EXTI->IMR = 1u << 0;
+    SHOW("pr_unmask_after_edge", EXTI->PR);
+    EXTI->PR = 0xFFFFFFFF;
+
+    // software trigger
+    EXTI->IMR = 0;
+    EXTI->SWIER = 1u << 3;
+    SHOW("swier_masked", EXTI->SWIER);
+    SHOW("pr_swier_masked", EXTI->PR);
+    EXTI->IMR = 1u << 3;
+    EXTI->SWIER = 1u << 3;
+    SHOW("swier_unmasked", EXTI->SWIER);
+    SHOW("pr_swier_unmasked", EXTI->PR);
+    EXTI->PR = 1u << 3;
+    SHOW("swier_after_pr_clear", EXTI->SWIER);
+    EXTI->SWIER = 0;
+    EXTI->IMR = 0;
+
+    // mode change: output high -> input with pull-down gives a falling edge
+    EXTI->IMR = 1u << 0;
+    EXTI->RTSR = 0;
+    EXTI->FTSR = 1u << 0;
+    pg(0, 1);
+    EXTI->PR = 0xFFFFFFFF;
+    GPIOG->PUPDR = (GPIOG->PUPDR & ~3u) | 2u;
+    GPIOG->MODER &= ~3u;
+    __DSB();
+    for (volatile int i = 0; i < 100; i++) {
+    }
+    SHOW("pr_mode_change", EXTI->PR);
+    GPIOG->MODER |= 1u;
+    pg(0, 0);
+    GPIOG->PUPDR &= ~3u;
+    EXTI->PR = 0xFFFFFFFF;
+
+    // other port selected: PG0 edges do not reach line 0
+    SYSCFG->EXTICR[0] = 0x0; // PA0
+    EXTI->RTSR = 1u << 0;
+    pg(0, 1);
+    SHOW("pr_other_port", EXTI->PR);
+    pg(0, 0);
+    SYSCFG->EXTICR[0] = 0x6;
+    EXTI->PR = 0xFFFFFFFF;
+
+    // interrupts: count and latency from the BSRR write to the ISR
+    EXTI->IMR = (1u << 0) | (1u << 5);
+    EXTI->RTSR = (1u << 0) | (1u << 5);
+    EXTI->FTSR = 0;
+    NVIC_EnableIRQ(EXTI0_IRQn);
+    NVIC_EnableIRQ(EXTI9_5_IRQn);
+    for (int line = 0; line <= 5; line += 5) {
+        for (int k = 0; k < 3; k++) {
+            exti_count = 0;
+            __disable_irq();
+            uint32_t t0 = DWT->CYCCNT;
+            GPIOG->BSRR = 1u << line;
+            __enable_irq();
+            for (volatile int i = 0; i < 100; i++) {
+            }
+            printf("E irq%d count %lu pr %08lx latency %lu\n", line, (unsigned long)exti_count,
+                   (unsigned long)exti_pr, (unsigned long)(exti_cyc - t0));
+            pg(line, 0);
+        }
+    }
+    // latency of a software trigger
+    for (int k = 0; k < 3; k++) {
+        exti_count = 0;
+        __disable_irq();
+        uint32_t t0 = DWT->CYCCNT;
+        EXTI->SWIER = 1u << 0;
+        __enable_irq();
+        for (volatile int i = 0; i < 100; i++) {
+        }
+        printf("E swi0 count %lu latency %lu\n", (unsigned long)exti_count, (unsigned long)(exti_cyc - t0));
+    }
+    // cycles from the BSRR write until PR reads as set (interrupts off)
+    NVIC_DisableIRQ(EXTI0_IRQn);
+    for (int k = 0; k < 3; k++) {
+        __disable_irq();
+        uint32_t t0 = DWT->CYCCNT;
+        GPIOG->BSRR = 1u << 0;
+        while (!(EXTI->PR & 1u)) {
+        }
+        uint32_t t1 = DWT->CYCCNT;
+        __enable_irq();
+        EXTI->PR = 1u;
+        pg(0, 0);
+        printf("E poll0 %lu\n", (unsigned long)(t1 - t0));
+    }
+    NVIC_EnableIRQ(EXTI0_IRQn);
+    // pending while the NVIC line is disabled, taken when it is enabled
+    NVIC_DisableIRQ(EXTI0_IRQn);
+    exti_count = 0;
+    pg(0, 1);
+    SHOW("count_nvic_off", exti_count);
+    SHOW("pr_nvic_off", EXTI->PR);
+    NVIC_EnableIRQ(EXTI0_IRQn);
+    __DSB();
+    __ISB();
+    SHOW("count_nvic_on", exti_count);
+    pg(0, 0);
+
+    NVIC_DisableIRQ(EXTI0_IRQn);
+    NVIC_DisableIRQ(EXTI9_5_IRQn);
+    EXTI->IMR = 0;
+    EXTI->RTSR = 0;
+    EXTI->FTSR = 0;
+    EXTI->PR = 0xFFFFFFFF;
+    GPIOG->MODER &= ~((3u << 0) | (3u << 10));
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -445,6 +637,13 @@ static void execute(char *line) {
         cmd_div();
     } else if (!strcmp(line, "time")) {
         cmd_time();
+    } else if (!strcmp(line, "rd")) {
+        printf("R %08lx %08lx\n", n, (unsigned long)*(volatile uint32_t *)n);
+    } else if (!strcmp(line, "wr")) {
+        char *val = arg ? strchr(arg, ' ') : NULL;
+        *(volatile uint32_t *)n = val ? (uint32_t)strtoul(val, NULL, 16) : 0;
+    } else if (!strcmp(line, "exti")) {
+        cmd_exti();
     } else {
         printf("? %s\n", line);
         return;

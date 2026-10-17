@@ -50,6 +50,12 @@ pub struct PortState {
     /// Number of rising edges per pin caused by output writes. Lets devices
     /// detect pulses (e.g. chip-select frames) between two of their accesses.
     pub rises: [u32; 16],
+    /// Pins whose edges EXTI listens to, edges seen since EXTI last looked,
+    /// and the cycle at which the first of them reaches EXTI.
+    pub exti_watch: u16,
+    pub exti_rise: u16,
+    pub exti_fall: u16,
+    pub exti_due: u64,
     /// Time-averaged levels: cycles each pin was high since `duty_since`,
     /// accounted up to `duty_last` (used for LED brightness).
     high_cycles: [u64; 16],
@@ -161,6 +167,32 @@ impl PortState {
         }
     }
 
+    /// Runs `f` and records the edges it causes on pins EXTI watches; they
+    /// reach EXTI at cycle `due`.
+    fn tracked<R>(&mut self, due: u64, f: impl FnOnce(&mut Self) -> R) -> R {
+        if self.exti_watch == 0 {
+            return f(self);
+        }
+        let before = self.idr() as u16;
+        let r = f(self);
+        let after = self.idr() as u16;
+        let rise = after & !before & self.exti_watch;
+        let fall = before & !after & self.exti_watch;
+        if rise | fall != 0 {
+            if self.exti_rise | self.exti_fall == 0 {
+                self.exti_due = due;
+            }
+            self.exti_rise |= rise;
+            self.exti_fall |= fall;
+        }
+        r
+    }
+
+    /// Cycle at which pending edges reach EXTI, if there are any.
+    pub fn exti_due(&self) -> Option<u64> {
+        (self.exti_rise | self.exti_fall != 0).then_some(self.exti_due)
+    }
+
     pub fn idr(&self) -> u32 {
         (0..16).filter(|&p| self.level(p)).fold(0, |acc, p| acc | (1 << p))
     }
@@ -180,9 +212,8 @@ impl Default for GpioBank {
 impl GpioBank {
     /// Drives an input pin from outside (`Some(level)`) or releases it (`None`).
     pub fn drive(&mut self, port: usize, pin: u32, level: Option<bool>) {
-        let p = &mut self.ports[port];
         let bit = 1u16 << pin;
-        match level {
+        self.ports[port].tracked(0, |p| match level {
             Some(l) => {
                 p.ext_mask |= bit;
                 if l {
@@ -192,7 +223,12 @@ impl GpioBank {
                 }
             }
             None => p.ext_mask &= !bit,
-        }
+        });
+    }
+
+    /// When the earliest edge on pins watched by EXTI reaches EXTI.
+    pub fn exti_due(&self) -> Option<u64> {
+        self.ports.iter().filter_map(PortState::exti_due).min()
     }
 
     pub fn level(&self, port: usize, pin: u32) -> bool {
@@ -201,7 +237,7 @@ impl GpioBank {
 
     /// Sets the levels that floating inputs (no pull, not driven) of `port` read.
     pub fn set_floating_levels(&mut self, port: usize, levels: u16) {
-        self.ports[port].float_level = levels;
+        self.ports[port].tracked(0, |p| p.float_level = levels);
     }
 
     /// Fraction of time (0.0–1.0) each pin of `port` was high since the
@@ -285,9 +321,13 @@ impl Peripheral for GpioPort {
         if !self.clock_enabled() {
             return;
         }
+        // Edges pass a synchronizer in the APB2 clock domain of EXTI: 26
+        // instead of 20 cycles from a BSRR write until a polling loop sees
+        // EXTI->PR set at 180/90 MHz.
+        let c = self.clocks.get();
+        let due = now + 4 * u64::from(c.hclk / c.pclk2.max(1));
         let mut bank = self.bank.borrow_mut();
-        let p = &mut bank.ports[self.index];
-        match off & !3 {
+        bank.ports[self.index].tracked(due, |p| match off & !3 {
             0x00 => p.moder = merge_write(p.moder, off, size, value),
             0x04 => p.otyper = merge_write(p.otyper, off, size, value) & 0xFFFF,
             0x08 => p.ospeedr = merge_write(p.ospeedr, off, size, value),
@@ -307,17 +347,23 @@ impl Peripheral for GpioPort {
             0x20 => p.afr[0] = merge_write(p.afr[0], off, size, value),
             0x24 => p.afr[1] = merge_write(p.afr[1], off, size, value),
             _ => {}
-        }
+        });
+    }
+
+    fn next_event(&self) -> Option<u64> {
+        // ends the slice so that EXTI sees the edge before the next instruction
+        self.bank.borrow().ports[self.index].exti_due()
     }
 
     fn reset(&mut self) {
         let mut bank = self.bank.borrow_mut();
         let old = &bank.ports[self.index];
-        let (ext_mask, ext_level, float_level) = (old.ext_mask, old.ext_level, old.float_level);
+        let (ext_mask, ext_level, float_level, watch) = (old.ext_mask, old.ext_level, old.float_level, old.exti_watch);
         bank.ports[self.index] = PortState::reset_for(self.index);
-        // External drivers (buttons held down, ...) survive a reset of the MCU.
+        // External drivers (buttons held down, ...) survive a reset of the MCU;
+        // the EXTI watch mask belongs to EXTI.
         let new = &mut bank.ports[self.index];
-        (new.ext_mask, new.ext_level, new.float_level) = (ext_mask, ext_level, float_level);
+        (new.ext_mask, new.ext_level, new.float_level, new.exti_watch) = (ext_mask, ext_level, float_level, watch);
         self.warned_clock = false;
     }
 }
