@@ -1,5 +1,6 @@
 //! STM32F429ZI: memory map and peripherals.
 
+pub mod adc;
 pub mod exti;
 pub mod gpio;
 pub mod rcc;
@@ -57,6 +58,8 @@ pub struct Stm32f429 {
     pub tim_pwm: [SharedPwm; 4],
     /// USART3, connected to the ST-LINK virtual COM port on the Nucleo board.
     pub usart3: SharedSerial,
+    /// Voltages on the analog inputs and the DAC outputs.
+    pub analog: adc::SharedAnalog,
 }
 
 /// Ethernet MAC/DMA registers: reads as idle, writes ignored. The LCD driver
@@ -150,6 +153,9 @@ pub fn build() -> (Bus, Stm32f429) {
         Box::new(Usart::new("USART3", 39, ApbBus::Apb1, 18, clocks.clone(), usart3.clone())),
     );
     bus.attach(0x4000_7000, 0x400, Box::new(Pwr::new()));
+    let analog = adc::SharedAnalog::default();
+    bus.attach(0x4000_7400, 0x400, Box::new(adc::Dac::new(clocks.clone(), analog.clone())));
+    bus.attach(0x4001_2000, 0x400, Box::new(adc::Adc::new(clocks.clone(), gpio.clone(), analog.clone())));
     let exti = exti::SharedExti::default();
     bus.attach(0x4001_3800, 0x400, Box::new(exti::Syscfg::new(exti.clone(), gpio.clone(), clocks.clone())));
     bus.attach(0x4001_3C00, 0x400, Box::new(exti::Exti::new(exti, gpio.clone())));
@@ -167,5 +173,5 @@ pub fn build() -> (Bus, Stm32f429) {
     bus.set_wait_states(Box::new(bus_wait_states(clocks.clone())));
 
     let tim_pwm: [SharedPwm; 4] = tim_pwm.try_into().unwrap_or_else(|_| unreachable!());
-    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3 })
+    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3, analog })
 }

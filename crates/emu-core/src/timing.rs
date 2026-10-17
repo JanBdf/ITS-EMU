@@ -50,6 +50,11 @@ pub struct BlockTiming {
     /// translator splits blocks e.g. at page boundaries) pipelines with it.
     pub first_load_rn: Option<u8>,
     pub last_load_rt: Option<u8>,
+    /// Sources of the first instruction and destination of the last one if
+    /// they are VFP data processing: a dependent chain continues across a
+    /// block split (blocks end at 1 KiB boundaries) with its stall.
+    pub first_fp_src: Option<[u8; 3]>,
+    pub last_fp_dst: Option<u8>,
 }
 
 impl BlockTiming {
@@ -58,6 +63,15 @@ impl BlockTiming {
     pub fn continuation_saving(&self, prev_rt: Option<u8>) -> u32 {
         match (prev_rt, self.first_load_rn) {
             (Some(rt), Some(rn)) if rt != rn => 1,
+            _ => 0,
+        }
+    }
+
+    /// Stall when this block directly continues one whose last instruction
+    /// was a VFP operation writing `prev_dst`.
+    pub fn continuation_stall(&self, prev_dst: Option<u8>) -> u32 {
+        match (prev_dst, self.first_fp_src) {
+            (Some(d), Some(src)) if src.contains(&d) => 1,
             _ => 0,
         }
     }
@@ -348,6 +362,9 @@ pub fn analyze_block(code: &[u8], base: u32, divs: &mut Vec<DivSite>) -> BlockTi
             if let Kind::Load { rn, .. } = insn.kind {
                 t.first_load_rn = Some(rn);
             }
+            if let Kind::Fp { src, .. } = insn.kind {
+                t.first_fp_src = Some(src);
+            }
         }
         let mut cycles = insn.cycles;
         match insn.kind {
@@ -379,6 +396,10 @@ pub fn analyze_block(code: &[u8], base: u32, divs: &mut Vec<DivSite>) -> BlockTi
         t.ends_with_jump = insn.jump;
         t.last_load_rt = match insn.kind {
             Kind::Load { rt, .. } => Some(rt),
+            _ => None,
+        };
+        t.last_fp_dst = match insn.kind {
+            Kind::Fp { dst, .. } => Some(dst),
             _ => None,
         };
         off += insn.len as usize;

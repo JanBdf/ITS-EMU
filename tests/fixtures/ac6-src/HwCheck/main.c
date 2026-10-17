@@ -23,6 +23,7 @@
  *   exti            EXTI/SYSCFG behaviour and interrupt latency (PG0, PG5)
  *   tim             timers: compare flags and interrupts, TIM1 repetition
  *                   counter, basic timers, shared interrupt lines
+ *   adc             ADC/DAC: conversion times, internal channels, Analog pins, DAC1
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -766,6 +767,279 @@ static void cmd_tim(void) {
     T("tim7_opm_cnt", TIM7->CNT);
 }
 
+/* ---- ADC and DAC: reset values, conversion times, internal channels, the
+ * Analog header pins, DAC1 (PA4) measured by ADC1, flag semantics. */
+static volatile uint32_t adc_irqs, adc_irq_dr;
+
+void ADC_IRQHandler(void) {
+    adc_irq_dr = ADC1->DR;
+    adc_irqs++;
+}
+
+#define A(name, expr) printf("A %s %lu\n", name, (unsigned long)(expr))
+
+/* One regular conversion of `ch` on `adc`; returns DR, *cycles = core cycles
+ * from SWSTART until EOC. */
+static uint32_t adc_convert(ADC_TypeDef *adc, uint32_t ch, uint32_t *cycles) {
+    adc->SQR1 = 0;
+    adc->SQR3 = ch;
+    adc->SR = 0;
+    __disable_irq();
+    uint32_t t0 = DWT->CYCCNT;
+    adc->CR2 |= ADC_CR2_SWSTART;
+    while (!(adc->SR & ADC_SR_EOC)) {
+    }
+    uint32_t t1 = DWT->CYCCNT;
+    __enable_irq();
+    if (cycles) {
+        *cycles = t1 - t0;
+    }
+    return adc->DR;
+}
+
+static void adc_stats(const char *name, ADC_TypeDef *adc, uint32_t ch) {
+    uint32_t lo = 0xFFFF, hi = 0, sum = 0;
+    for (int i = 0; i < 16; i++) {
+        uint32_t v = adc_convert(adc, ch, NULL);
+        lo = v < lo ? v : lo;
+        hi = v > hi ? v : hi;
+        sum += v;
+    }
+    printf("A %s %lu %lu %lu\n", name, (unsigned long)lo, (unsigned long)(sum / 16), (unsigned long)hi);
+}
+
+static void cmd_adc(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN | RCC_APB2ENR_ADC3EN;
+    RCC->APB1ENR |= RCC_APB1ENR_DACEN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIOBEN | RCC_AHB1ENR_GPIOCEN | RCC_AHB1ENR_GPIOFEN;
+    __DSB();
+    A("reset_sr", ADC1->SR);
+    A("reset_cr2", ADC1->CR2);
+    A("reset_htr", ADC1->HTR);
+    A("reset_ccr", ADC->CCR);
+    A("reset_dac_cr", DAC->CR);
+
+    // conversion before ADON: no effect
+    ADC1->CR2 = ADC_CR2_SWSTART;
+    for (volatile int i = 0; i < 1000; i++) {
+    }
+    A("sr_without_adon", ADC1->SR);
+    A("cr2_swstart_without_adon", ADC1->CR2);
+
+    ADC1->CR2 = ADC_CR2_ADON;
+    ADC3->CR2 = ADC_CR2_ADON;
+    for (volatile int i = 0; i < 1000; i++) {
+    }
+    // conversion times
+    uint32_t cyc, v;
+    static const uint8_t smps[] = {0, 3, 7};
+    for (int pre = 0; pre < 4; pre += 3) {
+        ADC->CCR = (uint32_t)pre << 16;
+        for (unsigned k = 0; k < sizeof(smps); k++) {
+            ADC1->SMPR1 = (uint32_t)smps[k] << 21; // channel 17
+            adc_convert(ADC1, 17, &cyc);
+            printf("A conv_pre%d_smp%d %lu\n", pre, smps[k], (unsigned long)cyc);
+        }
+    }
+    ADC->CCR = 1u << 16; // PCLK2 / 4 = 22.5 MHz
+    ADC1->SMPR1 = 0;
+    ADC1->CR1 = 2u << 24; // 8 bit
+    adc_convert(ADC1, 17, &cyc);
+    A("conv_8bit", cyc);
+    ADC1->CR1 = 0;
+
+    // internal channels (480 cycles sampling)
+    ADC1->SMPR1 = 0x07FFFFFF;
+    ADC1->SMPR2 = 0x3FFFFFFF;
+    ADC3->SMPR1 = 0x07FFFFFF;
+    ADC3->SMPR2 = 0x3FFFFFFF;
+    adc_stats("vrefint_off", ADC1, 17);
+    ADC->CCR |= ADC_CCR_TSVREFE;
+    for (volatile int i = 0; i < 10000; i++) {
+    }
+    adc_stats("vrefint", ADC1, 17);
+    adc_stats("temp", ADC1, 16);
+    ADC->CCR |= ADC_CCR_VBATE;
+    adc_stats("vbat", ADC1, 18);
+    ADC->CCR &= ~ADC_CCR_VBATE;
+
+    // Analog header pins in analog mode (open)
+    GPIOC->MODER |= (3u << 0) | (3u << 4) | (3u << 6);
+    GPIOB->MODER |= 3u << 2;
+    GPIOF->MODER |= (3u << 16) | (3u << 18) | (3u << 20);
+    adc_stats("pc3_in13", ADC1, 13);
+    adc_stats("pc2_in12", ADC1, 12);
+    adc_stats("pc0_in10", ADC1, 10);
+    adc_stats("pb1_in9", ADC1, 9);
+    adc_stats("pf10_in8", ADC3, 8);
+    adc_stats("pf9_in7", ADC3, 7);
+    adc_stats("pf8_in6", ADC3, 6);
+    // a pin that is not in analog mode (PC13, user button, input): IN? none; PA0 input with pull-up
+    GPIOA->PUPDR = (GPIOA->PUPDR & ~3u) | 1u;
+    adc_stats("pa0_input_pullup", ADC1, 0);
+    GPIOA->PUPDR &= ~3u;
+
+    // DAC1 on PA4 measured by ADC1 IN4
+    GPIOA->MODER |= 3u << 8;
+    DAC->CR = DAC_CR_EN1;
+    static const uint16_t codes[] = {0, 100, 1024, 2048, 3072, 4000, 4095};
+    for (unsigned k = 0; k < sizeof(codes) / sizeof(codes[0]); k++) {
+        DAC->DHR12R1 = codes[k];
+        uint32_t dor_now = DAC->DOR1;
+        for (volatile int i = 0; i < 2000; i++) {
+        }
+        char name[24];
+        snprintf(name, sizeof(name), "dac%u", codes[k]);
+        uint32_t dor = DAC->DOR1;
+        printf("A %s_dor %lu %lu\n", name, (unsigned long)dor_now, (unsigned long)dor);
+        adc_stats(name, ADC1, 4);
+    }
+    DAC->DHR12L1 = 0x8000;
+    for (volatile int i = 0; i < 100; i++) {
+    }
+    A("dac_dhr12l_dor", DAC->DOR1);
+    DAC->DHR8R1 = 0x80;
+    for (volatile int i = 0; i < 100; i++) {
+    }
+    A("dac_dhr8_dor", DAC->DOR1);
+    DAC->CR = DAC_CR_EN1 | DAC_CR_BOFF1;
+    DAC->DHR12R1 = 2048;
+    for (volatile int i = 0; i < 2000; i++) {
+    }
+    adc_stats("dac2048_unbuffered", ADC1, 4);
+    DAC->CR = DAC_CR_EN1 | DAC_CR_TEN1 | (7u << 3); // software trigger
+    DAC->DHR12R1 = 1000;
+    for (volatile int i = 0; i < 100; i++) {
+    }
+    A("dac_ten_before_trigger", DAC->DOR1);
+    DAC->SWTRIGR = 1;
+    for (volatile int i = 0; i < 100; i++) {
+    }
+    A("dac_ten_after_trigger", DAC->DOR1);
+    A("dac_swtrigr_after", DAC->SWTRIGR);
+    DAC->CR = 0;
+    GPIOA->MODER &= ~(3u << 8);
+
+    // flag semantics
+    ADC1->SMPR1 = 0;
+    ADC1->SMPR2 = 0;
+    ADC1->SQR3 = 17;
+    ADC1->SR = 0;
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    for (volatile int i = 0; i < 100; i++) {
+    }
+    A("sr_after_conv", ADC1->SR);
+    A("cr2_after_conv", ADC1->CR2);
+    (void)ADC1->DR;
+    A("sr_after_dr_read", ADC1->SR);
+    ADC1->CR2 |= ADC_CR2_EOCS;
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    for (volatile int i = 0; i < 100; i++) {
+    }
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    for (volatile int i = 0; i < 100; i++) {
+    }
+    A("sr_ovr_eocs1", ADC1->SR);
+    ADC1->SR = 0;
+    (void)ADC1->DR;
+    ADC1->CR2 &= ~ADC_CR2_EOCS;
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    for (volatile int i = 0; i < 100; i++) {
+    }
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    for (volatile int i = 0; i < 100; i++) {
+    }
+    A("sr_ovr_eocs0", ADC1->SR);
+    ADC1->SR = 0;
+    (void)ADC1->DR;
+
+    // scan: 17, 4 (PA4 input, floating), 17 with EOC at the end of the sequence
+    ADC1->CR1 = ADC_CR1_SCAN;
+    ADC1->SQR1 = 2u << 20;
+    ADC1->SQR3 = 17 | (17u << 5) | (17u << 10);
+    ADC1->SR = 0;
+    uint32_t t0 = DWT->CYCCNT;
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    while (!(ADC1->SR & ADC_SR_EOC)) {
+    }
+    A("scan3_cycles", DWT->CYCCNT - t0);
+    (void)ADC1->DR;
+    // EOCS = 1: EOC after the first conversion
+    ADC1->CR2 |= ADC_CR2_EOCS;
+    ADC1->SR = 0;
+    t0 = DWT->CYCCNT;
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    while (!(ADC1->SR & ADC_SR_EOC)) {
+    }
+    A("scan3_first_eoc_cycles", DWT->CYCCNT - t0);
+    for (volatile int i = 0; i < 300; i++) {
+    }
+    A("scan3_eocs_sr", ADC1->SR);
+    ADC1->SR = 0;
+    (void)ADC1->DR;
+    ADC1->CR1 = 0;
+    ADC1->SQR1 = 0;
+    ADC1->CR2 &= ~ADC_CR2_EOCS;
+
+    // continuous: conversions every period
+    ADC1->CR2 |= ADC_CR2_CONT;
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    uint32_t n = 0;
+    t0 = DWT->CYCCNT;
+    while (DWT->CYCCNT - t0 < 180000) {
+        if (ADC1->SR & ADC_SR_EOC) {
+            (void)ADC1->DR;
+            n++;
+        }
+    }
+    ADC1->CR2 &= ~ADC_CR2_CONT;
+    for (volatile int i = 0; i < 100; i++) {
+    }
+    A("cont_conversions_1ms", n);
+    ADC1->SR = 0;
+    (void)ADC1->DR;
+
+    // injected
+    ADC1->JSQR = 17u << 15; // JL = 0, JSQ4 = 17
+    ADC1->JOFR1 = 100;
+    ADC1->CR2 |= ADC_CR2_JSWSTART;
+    for (volatile int i = 0; i < 300; i++) {
+    }
+    A("inj_sr", ADC1->SR);
+    A("inj_jdr1", ADC1->JDR1);
+    A("inj_cr2", ADC1->CR2);
+    ADC1->SR = 0;
+    ADC1->JOFR1 = 0;
+
+    // left alignment
+    ADC1->CR2 |= ADC_CR2_ALIGN;
+    v = adc_convert(ADC1, 17, NULL);
+    A("left_aligned_low_bits", v & 0xF);
+    ADC1->CR2 &= ~ADC_CR2_ALIGN;
+
+    // interrupt
+    ADC1->CR1 = ADC_CR1_EOCIE;
+    adc_irqs = 0;
+    NVIC_EnableIRQ(ADC_IRQn);
+    for (int i = 0; i < 5; i++) {
+        ADC1->CR2 |= ADC_CR2_SWSTART;
+        for (volatile int k = 0; k < 300; k++) {
+        }
+    }
+    NVIC_DisableIRQ(ADC_IRQn);
+    ADC1->CR1 = 0;
+    A("eoc_irqs", adc_irqs);
+
+    ADC1->CR2 = 0;
+    ADC3->CR2 = 0;
+    ADC->CCR = 0;
+    GPIOC->MODER &= ~((3u << 0) | (3u << 4) | (3u << 6));
+    GPIOB->MODER &= ~(3u << 2);
+    GPIOF->MODER &= ~((3u << 16) | (3u << 18) | (3u << 20));
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -801,6 +1075,8 @@ static void execute(char *line) {
         cmd_cyc();
     } else if (!strcmp(line, "div")) {
         cmd_div();
+    } else if (!strcmp(line, "adc")) {
+        cmd_adc();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "rd")) {

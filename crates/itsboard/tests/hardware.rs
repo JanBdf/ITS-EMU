@@ -171,6 +171,42 @@ fn timers_match_the_board() {
 }
 
 #[test]
+fn adc_and_dac_match_the_board() {
+    let Some(out) = run("adc", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-adc.txt")).unwrap();
+    let lines = |text: &str| -> Vec<Vec<String>> {
+        text.lines()
+            .filter(|l| l.starts_with("A "))
+            .map(|l| l.split_whitespace().skip(1).map(str::to_owned).collect())
+            .collect()
+    };
+    let (emu, board) = (lines(&out), lines(&board));
+    assert_eq!(emu.len(), board.len(), "{out}");
+    for (e, b) in emu.iter().zip(&board) {
+        assert_eq!(e[0], b[0]);
+        let name = b[0].as_str();
+        // the value compared: the mean of min/mean/max statistics
+        let value = |v: &[String]| -> f64 { v[if v.len() == 4 { 2 } else { 1 }].parse().unwrap() };
+        let (x, y) = (value(e), value(b));
+        if name == "pa0_input_pullup" {
+            continue; // a digital input with pull-up reads an unstable low value
+        }
+        let tol = if name.starts_with("conv") || name.starts_with("scan3") {
+            12.0 // a polling loop measures the time
+        } else if name.starts_with('p') && name.contains("_in") {
+            250.0 // open pins pick up noise
+        } else if name.starts_with("dac") && !name.contains("dor") && b.len() == 4 || name.starts_with("inj_jdr") {
+            15.0 // noise of the converter, VREFINT at short sampling time
+        } else if name.starts_with("cont") || name.starts_with("vrefint") {
+            3.0
+        } else {
+            0.0
+        };
+        assert!((x - y).abs() <= tol, "{name}: emulator {e:?}, board {b:?}");
+    }
+}
+
+#[test]
 fn exti_matches_the_board() {
     let Some(out) = run("exti", 500) else { return };
     let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-exti.txt")).unwrap();
