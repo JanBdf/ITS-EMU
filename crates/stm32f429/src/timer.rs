@@ -17,12 +17,16 @@ use emu_core::{Clock, DeviceCtx, Peripheral};
 use crate::gpio::{PinMode, SharedGpio, port};
 use crate::rcc::SharedClocks;
 
-/// Cycle of the last trigger output (TRGO) of TIM2, TIM3 and TIM8 (index
-/// `TRGO_TIM2` ...), for the ADCs' external triggers.
-pub type SharedTriggers = Rc<Cell<[u64; 3]>>;
+/// Cycle of the last trigger output (TRGO) of TIM2..TIM8 (index
+/// `TRGO_TIM2` ...), for the external triggers of the ADCs and the DAC.
+pub type SharedTriggers = Rc<Cell<[u64; 7]>>;
 pub const TRGO_TIM2: usize = 0;
 pub const TRGO_TIM3: usize = 1;
-pub const TRGO_TIM8: usize = 2;
+pub const TRGO_TIM4: usize = 2;
+pub const TRGO_TIM5: usize = 3;
+pub const TRGO_TIM6: usize = 4;
+pub const TRGO_TIM7: usize = 5;
+pub const TRGO_TIM8: usize = 6;
 
 /// Pins of the four channels of a timer, and their alternate function.
 pub struct ChannelPins {
@@ -172,7 +176,7 @@ impl GpTimer {
         self
     }
 
-    /// Trigger output (master mode "update") for the ADCs.
+    /// Trigger output (master mode "update") for the ADCs and the DAC.
     pub fn with_trgo(mut self, triggers: SharedTriggers, index: usize) -> Self {
         self.trgo = Some((triggers, index));
         self

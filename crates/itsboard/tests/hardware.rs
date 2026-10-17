@@ -256,6 +256,15 @@ fn adc_timer_trigger_matches_the_board() {
 }
 
 #[test]
+fn dac_waves_and_trigger_match_the_board() {
+    // noise/triangle generation by software triggers, TIM6 TRGO with DMA, underrun
+    let Some(out) = run("dacwave", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-dacwave.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("W ")).collect();
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
 fn interrupt_latency_matches_the_board() {
     // Cycles from the pending write to the handler's first instruction. Only
     // with interrupts masked until CPSIE: the emulator takes interrupts at the
