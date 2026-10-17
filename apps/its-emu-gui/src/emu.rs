@@ -160,6 +160,9 @@ struct Worker {
     rate_sample: (Instant, u64),
     measured_speed: f64,
     published_generation: u64,
+    /// The next display frame, rendered outside the snapshot lock and then
+    /// swapped in.
+    display: Vec<u8>,
     ideal_colors: bool,
     /// External inputs, re-applied when new firmware is loaded.
     buttons: [bool; 8],
@@ -208,6 +211,7 @@ impl Worker {
             rate_sample: (now, 0),
             measured_speed: 0.0,
             published_generation: u64::MAX,
+            display: vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * 4],
             ideal_colors: false,
             buttons: [false; 8],
             ints: [None; 6],
@@ -453,6 +457,21 @@ impl Worker {
             self.rate_sample = (now, virt);
         }
 
+        // Render outside the lock: the UI thread waits for it.
+        let new_frame = self.sim.as_ref().and_then(|sim| {
+            let b = &sim.board;
+            let generation = b.display_generation() ^ (b.backlight().to_bits() as u64);
+            if generation == self.published_generation {
+                return None;
+            }
+            if self.ideal_colors {
+                b.render_display(&mut self.display);
+            } else {
+                b.render_display_as_seen(&mut self.display);
+            }
+            Some(generation)
+        });
+
         let mut snap = self.snapshot.lock().unwrap();
         snap.firmware = if self.uploaded {
             Some("uploaded by debugger".to_owned())
@@ -466,13 +485,8 @@ impl Worker {
         snap.gdb_attached = self.gdb.as_ref().is_some_and(GdbServer::has_controller);
         if let Some(sim) = &self.sim {
             let b = &sim.board;
-            let generation = b.display_generation() ^ (b.backlight().to_bits() as u64);
-            if generation != self.published_generation {
-                if self.ideal_colors {
-                    b.render_display(&mut snap.display);
-                } else {
-                    b.render_display_as_seen(&mut snap.display);
-                }
+            if let Some(generation) = new_frame {
+                std::mem::swap(&mut snap.display, &mut self.display);
                 snap.display_generation = snap.display_generation.wrapping_add(1);
                 self.published_generation = generation;
             }

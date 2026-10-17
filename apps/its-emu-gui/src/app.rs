@@ -19,6 +19,9 @@ const NUCLEO_RED: Color32 = Color32::from_rgb(0xFF, 0x2A, 0x22);
 pub struct App {
     emu: EmuHandle,
     display: Option<egui::TextureHandle>,
+    /// Display frame taken from the snapshot (buffers are swapped, so that the
+    /// emulator thread does not wait while the texture is made).
+    display_frame: Vec<u8>,
     /// Board drawing; rendered at the size it is shown at.
     board: Option<board::Textures>,
     display_generation: u64,
@@ -108,6 +111,7 @@ impl App {
         Self {
             emu,
             display: None,
+            display_frame: vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * 4],
             board: None,
             display_generation: u64::MAX,
             latched: [false; 8],
@@ -138,15 +142,13 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
 
         // ---- take the latest snapshot
+        let mut new_frame = false;
         let (state, firmware, led_duty, inputs, nucleo_duty, virtual_ns, core_mhz, speed, gdb, dac1) = {
             let mut snap = self.emu.snapshot.lock().unwrap();
             if snap.display_generation != self.display_generation {
                 self.display_generation = snap.display_generation;
-                let image = egui::ColorImage::from_rgba_unmultiplied([SCREEN_WIDTH, SCREEN_HEIGHT], &snap.display);
-                match &mut self.display {
-                    Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
-                    None => self.display = Some(ctx.load_texture("display", image, egui::TextureOptions::LINEAR)),
-                }
+                std::mem::swap(&mut snap.display, &mut self.display_frame);
+                new_frame = true;
             }
             if !snap.serial.is_empty() {
                 self.console.push_str(&String::from_utf8_lossy(&snap.serial));
@@ -170,6 +172,14 @@ impl eframe::App for App {
                 snap.dac1,
             )
         };
+
+        if new_frame {
+            let image = egui::ColorImage::from_rgba_unmultiplied([SCREEN_WIDTH, SCREEN_HEIGHT], &self.display_frame);
+            match &mut self.display {
+                Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
+                None => self.display = Some(ctx.load_texture("display", image, egui::TextureOptions::LINEAR)),
+            }
+        }
 
         // ---- toolbar
         egui::Panel::top("toolbar").show(ui, |ui| {
