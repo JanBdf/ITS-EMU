@@ -7,10 +7,11 @@
 //! channel pins from outside (buttons, analog inputs; with prescaler,
 //! polarity and overcapture), and the output compare channels driving their
 //! pins (frozen, active/inactive/toggle on match, forced, PWM 1/2; MOE of
-//! TIM1/TIM8). OCxREF changes only at compare matches, counter wraps and
+//! TIM1/TIM8), encoder mode (SMS 1–3: TI1 and/or TI2 edges count up/down by the
+//! other input's level, as measured with HwCheck `enc`). OCxREF changes only at compare matches, counter wraps and
 //! forced levels, as measured on the board (HwCheck `timout`): a mode change
-//! takes effect at the next of them. Down/center-aligned counting, slave modes
-//! and the complementary outputs are not modelled (a warning is logged when used).
+//! takes effect at the next of them. Down/center-aligned counting, the other
+//! slave modes and the complementary outputs are not modelled (a warning is logged when used).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -47,6 +48,7 @@ const CR1_CEN: u32 = 1 << 0;
 const CR1_UDIS: u32 = 1 << 1;
 const CR1_URS: u32 = 1 << 2;
 const CR1_OPM: u32 = 1 << 3;
+const CR1_DIR: u32 = 1 << 4;
 const CR1_DIR_CMS: u32 = 0x70;
 const CR1_ARPE: u32 = 1 << 7;
 const SR_UIF: u32 = 1 << 0;
@@ -92,6 +94,10 @@ pub struct GpTimer {
     /// Output compare reference (OCxREF) and the level driven on the pins.
     oc_ref: [bool; 4],
     oc_out: [Option<bool>; 4],
+    /// Encoder mode: pins of TI1/TI2 whose edges are logged, and the inputs'
+    /// levels (after the polarity CCxP).
+    enc_watched: Vec<(usize, u32)>,
+    enc_level: [bool; 2],
 
     cr1: u32,
     cr2: u32,
@@ -143,6 +149,8 @@ impl GpTimer {
             trgo: None,
             oc_ref: [false; 4],
             oc_out: [None; 4],
+            enc_watched: Vec::new(),
+            enc_level: [false; 2],
             cr1: 0,
             cr2: 0,
             smcr: 0,
@@ -244,10 +252,110 @@ impl GpTimer {
         }
     }
 
+    /// Encoder mode (SMS = 1, 2, 3): the counter counts edges of TI1/TI2.
+    fn encoder(&self) -> bool {
+        self.channels >= 2 && (1..=3).contains(&(self.smcr & 7))
+    }
+
+    /// Level of input TI1 (`i` = 0) or TI2 from its routed pin, after CCxP.
+    fn ti_level(&self, i: usize) -> bool {
+        let Some((pins, gpio)) = &self.inputs else { return false };
+        let g = gpio.borrow();
+        let level = pins.pins[i]
+            .iter()
+            .find(|&&(p, pin)| {
+                let ps = &g.ports[port(p)];
+                ps.mode(pin) == PinMode::Alternate && ps.af(pin) == pins.af
+            })
+            .is_some_and(|&(p, pin)| g.level(port(p), pin));
+        level ^ (self.ccer & (2 << (4 * i)) != 0)
+    }
+
+    /// Counts the logged edges of TI1/TI2 in encoder mode.
+    fn take_encoder_edges(&mut self) {
+        let Some((pins, gpio)) = &self.inputs else { return };
+        if self.enc_watched.is_empty() {
+            return;
+        }
+        let mut edges = Vec::new();
+        {
+            let mut g = gpio.borrow_mut();
+            for &(p, pin) in &self.enc_watched {
+                let routed = {
+                    let ps = &g.ports[p];
+                    ps.mode(pin) == PinMode::Alternate && ps.af(pin) == pins.af
+                };
+                for (_, level, cycle) in g.take_edges(p, 1 << pin) {
+                    if routed {
+                        let i = usize::from(!pins.pins[0].iter().any(|&(pp, pn)| port(pp) == p && pn == pin));
+                        edges.push((cycle, i, level));
+                    }
+                }
+            }
+        }
+        edges.sort_by_key(|&(cycle, _, _)| cycle);
+        let max = self.arr_active;
+        for (_, i, level) in edges {
+            let level = level ^ (self.ccer & (2 << (4 * i)) != 0);
+            if level == self.enc_level[i] {
+                continue;
+            }
+            self.enc_level[i] = level;
+            let counts = match self.smcr & 7 {
+                1 => i == 0,
+                2 => i == 1,
+                _ => true,
+            };
+            if !counts || !self.running() {
+                continue;
+            }
+            let [a, b] = self.enc_level;
+            let up = if i == 0 { a != b } else { a == b };
+            if up {
+                self.cr1 &= !CR1_DIR;
+                if self.cnt_base >= max {
+                    self.cnt_base = 0;
+                    self.encoder_update();
+                } else {
+                    self.cnt_base += 1;
+                }
+            } else {
+                self.cr1 |= CR1_DIR;
+                if self.cnt_base == 0 {
+                    self.cnt_base = max;
+                    self.encoder_update();
+                } else {
+                    self.cnt_base -= 1;
+                }
+            }
+        }
+    }
+
+    /// Over- or underflow in encoder mode.
+    fn encoder_update(&mut self) {
+        if self.cr1 & CR1_UDIS == 0 {
+            self.update_event(true);
+        }
+    }
+
     /// Tells the GPIO bank which pins to report edges of.
     fn update_watch(&mut self) {
+        let encoder = self.encoder();
+        let levels = [self.ti_level(0), self.ti_level(1)];
         let Some((pins, gpio)) = &self.inputs else { return };
         let mut g = gpio.borrow_mut();
+        for &(p, pin) in &self.enc_watched {
+            g.ports[p].log_watch &= !(1 << pin);
+            g.take_edges(p, 1 << pin);
+        }
+        self.enc_watched.clear();
+        if encoder {
+            for &(p, pin) in pins.pins[0].iter().chain(pins.pins[1]) {
+                g.ports[port(p)].log_watch |= 1 << pin;
+                self.enc_watched.push((port(p), pin));
+            }
+            self.enc_level = levels;
+        }
         for &(p, pin) in &self.watched {
             let ps = &mut g.ports[p];
             ps.cap_watch &= !(1 << pin);
@@ -507,7 +615,7 @@ impl GpTimer {
 
     /// Ticks elapsed since `base_ps` and the remainder in "ps * hz" units.
     fn elapsed_ticks(&self, now_ps: u64) -> (u128, u128) {
-        if !self.running() {
+        if !self.running() || self.encoder() {
             return (0, 0);
         }
         let dt = u128::from(now_ps.saturating_sub(self.base_ps)) * u128::from(self.kernel_hz());
@@ -598,6 +706,7 @@ impl GpTimer {
     /// Processes overflows and compare matches up to `now_ps`.
     fn advance(&mut self, ctx: &mut DeviceCtx) {
         let now_ps = ctx.clock.time_ps();
+        self.take_encoder_edges();
         self.take_captures(now_ps);
         if !self.running() || self.arr_active == 0 {
             self.next_event = None;
@@ -819,9 +928,11 @@ impl Peripheral for GpTimer {
         match aligned {
             0x00 => {
                 let cnt = self.cnt(now_ps);
-                self.cr1 = v & self.cr1_mask;
+                // DIR is read-only in encoder mode
+                let dir = if self.encoder() { self.cr1 & CR1_DIR } else { v & CR1_DIR };
+                self.cr1 = (v & self.cr1_mask & !CR1_DIR) | dir;
                 self.rebase(now_ps, cnt);
-                if self.cr1 & CR1_DIR_CMS != 0 {
+                if self.cr1 & CR1_DIR_CMS != 0 && !self.encoder() {
                     self.warn_unsupported("down/center-aligned counting");
                 }
                 if self.cr1 & CR1_ARPE == 0 {
@@ -830,10 +941,13 @@ impl Peripheral for GpTimer {
             }
             0x04 => self.cr2 = v,
             0x08 => {
+                let cnt = self.cnt(now_ps);
                 self.smcr = v;
-                if v & 7 != 0 {
+                self.rebase(now_ps, cnt);
+                if v & 7 > 3 || (v & 7 != 0 && !self.encoder()) {
                     self.warn_unsupported("slave mode");
                 }
+                self.update_watch();
             }
             0x0C => self.dier = v & self.dier_mask,
             0x10 => self.sr &= v, // rc_w0
@@ -916,7 +1030,7 @@ impl Peripheral for GpTimer {
     }
 
     fn update(&mut self, ctx: &mut DeviceCtx) {
-        if self.next_event.is_some_and(|t| ctx.now() >= t) || !self.watched.is_empty() {
+        if self.next_event.is_some_and(|t| ctx.now() >= t) || !self.watched.is_empty() || !self.enc_watched.is_empty() {
             self.advance(ctx);
             self.sync_irq(ctx);
         }

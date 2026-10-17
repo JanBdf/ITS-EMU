@@ -62,6 +62,10 @@ pub struct PortState {
     pub cap_rise: u16,
     pub cap_fall: u16,
     pub cap_ps: [u64; 16],
+    /// Pins whose edges are logged in order (timer encoder inputs, devices)
+    /// and the log: (pin, new level, cycle).
+    pub log_watch: u16,
+    pub edge_log: Vec<(u8, bool, u64)>,
     /// Levels that peripherals drive on the pins, per alternate function
     /// (timer outputs); they apply while the pin selects that function.
     af_drive: [[Option<bool>; 16]; 16],
@@ -141,7 +145,9 @@ impl PortState {
 
     /// Accounts the time since the last change to the pins that are high.
     fn accumulate(&mut self, now: u64) {
-        let dt = now.saturating_sub(self.duty_last);
+        // edges of peripheral outputs may carry a time before the last call
+        let now = now.max(self.duty_last);
+        let dt = now - self.duty_last;
         if dt > 0 {
             let levels = self.idr();
             for (pin, high) in self.high_cycles.iter_mut().enumerate() {
@@ -192,12 +198,17 @@ impl PortState {
 
     /// `tracked` for edges at a known time `edge_ps` (for input capture).
     fn tracked_at<R>(&mut self, due: u64, edge_ps: u64, f: impl FnOnce(&mut Self) -> R) -> R {
-        if self.exti_watch | self.cap_watch == 0 {
+        if self.exti_watch | self.cap_watch | self.log_watch == 0 {
             return f(self);
         }
         let before = self.idr() as u16;
         let r = f(self);
         let after = self.idr() as u16;
+        for pin in 0..16u8 {
+            if (before ^ after) & self.log_watch & (1 << pin) != 0 {
+                self.edge_log.push((pin, after & (1 << pin) != 0, due));
+            }
+        }
         let pending = self.cap_rise | self.cap_fall;
         self.cap_rise |= after & !before & self.cap_watch;
         self.cap_fall |= before & !after & self.cap_watch;
@@ -242,8 +253,13 @@ impl Default for GpioBank {
 impl GpioBank {
     /// Drives an input pin from outside (`Some(level)`) or releases it (`None`).
     pub fn drive(&mut self, port: usize, pin: u32, level: Option<bool>) {
+        self.drive_at(port, pin, level, 0);
+    }
+
+    /// [`Self::drive`] at a known cycle (edges are logged with it).
+    pub fn drive_at(&mut self, port: usize, pin: u32, level: Option<bool>, cycle: u64) {
         let bit = 1u16 << pin;
-        self.ports[port].tracked(0, |p| match level {
+        self.ports[port].tracked(cycle, |p| match level {
             Some(l) => {
                 p.ext_mask |= bit;
                 if l {
@@ -254,6 +270,14 @@ impl GpioBank {
             }
             None => p.ext_mask &= !bit,
         });
+    }
+
+    /// Takes the logged edges of the pins in `mask`, in order.
+    pub fn take_edges(&mut self, port: usize, mask: u16) -> Vec<(u8, bool, u64)> {
+        let log = &mut self.ports[port].edge_log;
+        let (taken, kept) = std::mem::take(log).into_iter().partition(|&(pin, _, _)| mask & (1 << pin) != 0);
+        *log = kept;
+        taken
     }
 
     /// When the earliest edge on pins watched by EXTI reaches EXTI.
@@ -394,21 +418,21 @@ impl Peripheral for GpioPort {
     fn next_event(&self) -> Option<u64> {
         // ends the slice so that EXTI sees the edge before the next instruction
         let p = &self.bank.borrow().ports[self.index];
-        // edges for timer inputs are captured at once
-        if p.cap_rise | p.cap_fall != 0 { Some(0) } else { p.exti_due() }
+        // edges for timer inputs are captured (and logged edges taken) at once
+        if p.cap_rise | p.cap_fall != 0 || !p.edge_log.is_empty() { Some(0) } else { p.exti_due() }
     }
 
     fn reset(&mut self) {
         let mut bank = self.bank.borrow_mut();
         let old = &bank.ports[self.index];
-        let (ext_mask, ext_level, float_level, watch, cap) =
-            (old.ext_mask, old.ext_level, old.float_level, old.exti_watch, old.cap_watch);
+        let (ext_mask, ext_level, float_level, watch, cap, log) =
+            (old.ext_mask, old.ext_level, old.float_level, old.exti_watch, old.cap_watch, old.log_watch);
         bank.ports[self.index] = PortState::reset_for(self.index);
         // External drivers (buttons held down, ...) survive a reset of the MCU;
         // the EXTI watch mask belongs to EXTI.
         let new = &mut bank.ports[self.index];
-        (new.ext_mask, new.ext_level, new.float_level, new.exti_watch, new.cap_watch) =
-            (ext_mask, ext_level, float_level, watch, cap);
+        (new.ext_mask, new.ext_level, new.float_level, new.exti_watch, new.cap_watch, new.log_watch) =
+            (ext_mask, ext_level, float_level, watch, cap, log);
         self.warned_clock = false;
     }
 }
