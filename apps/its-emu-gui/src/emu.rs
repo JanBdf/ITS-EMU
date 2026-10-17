@@ -7,8 +7,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use emu_core::StopReason;
 use emu_core::gdb::{Execution, GdbServer};
+use emu_core::{ElfImage, StopReason};
 use itsboard::sim::DEFAULT_FONTS;
 use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH, Simulator};
 
@@ -145,6 +145,8 @@ struct Worker {
     repaint: Box<dyn Fn() + Send>,
     sim: Option<Simulator>,
     firmware: Option<PathBuf>,
+    /// A debugger has written flash since the last load (`firmware` is stale).
+    uploaded: bool,
     state: RunState,
     speed: Speed,
     /// Pacing reference: (wall instant, virtual ns) at the last speed change/resume.
@@ -189,8 +191,10 @@ impl Worker {
             commands,
             snapshot,
             repaint,
-            sim: None,
+            // Like a board with empty flash: a debugger can attach and load a program.
+            sim: blank_board(),
             firmware: None,
+            uploaded: false,
             state: RunState::NoFirmware,
             speed: Speed::Factor(1.0),
             anchor: (now, 0),
@@ -247,10 +251,19 @@ impl Worker {
         match cmd {
             Command::Load(path) => self.load(path),
             Command::Reset => {
-                if let Some(sim) = &mut self.sim {
+                if let RunState::Error(_) = self.state
+                    && !self.uploaded
+                    && let Some(path) = self.firmware.clone()
+                {
+                    // Try loading the file again.
+                    self.load(path);
+                } else if let Some(sim) = &mut self.sim {
                     sim.reset();
-                    self.state = RunState::Running;
-                    self.reanchor();
+                    // Nothing to run on a blank board.
+                    if self.firmware.is_some() || self.uploaded {
+                        self.state = RunState::Running;
+                        self.reanchor();
+                    }
                 } else if let Some(path) = self.firmware.clone() {
                     self.load(path);
                 }
@@ -290,16 +303,38 @@ impl Worker {
     /// Lets the debugger talk to the target and follows its run/halt requests.
     fn poll_gdb(&mut self) {
         let (Some(gdb), Some(sim)) = (&mut self.gdb, &mut self.sim) else { return };
+        let flash_writes = sim.machine.flash_writes();
         let execution = gdb.poll(&mut sim.machine);
         let changed = execution != self.execution;
         self.execution = execution;
+        let loaded = sim.machine.take_gdb_loaded();
+        if loaded.is_some() || sim.machine.flash_writes() != flash_writes {
+            match loaded {
+                // `monitor load FILE`: as if the file had been opened.
+                Some((path, image)) => {
+                    sim.image = image;
+                    self.firmware = Some(path);
+                    self.uploaded = false;
+                }
+                // Written by GDB's `load`: the symbols of the old file are stale.
+                None => {
+                    sim.image = ElfImage { entry: 0, segments: Vec::new(), symbols: Vec::new() };
+                    self.uploaded = true;
+                }
+            }
+            if matches!(self.state, RunState::NoFirmware | RunState::Error(_)) {
+                self.state = RunState::Halted;
+            }
+        }
         match execution {
             // Also after a reset from the UI: the debugger keeps the core halted.
             Execution::Halted if self.state == RunState::Running => self.state = RunState::Halted,
             Execution::Halted => return,
             Execution::Running | Execution::Free if changed => {
                 // Continuing or detaching resumes the core, as on the real board.
-                if matches!(self.state, RunState::Halted | RunState::Paused | RunState::Stopped(_)) {
+                if matches!(self.state, RunState::Halted | RunState::Paused | RunState::Stopped(_))
+                    || (self.state == RunState::NoFirmware && execution == Execution::Running)
+                {
                     self.state = RunState::Running;
                     self.reanchor();
                 }
@@ -332,11 +367,12 @@ impl Worker {
                 log::info!("loaded {}", path.display());
             }
             Err(e) => {
-                self.sim = None;
+                self.sim = blank_board();
                 self.state = RunState::Error(format!("cannot load {}: {e}", path.display()));
             }
         }
         self.firmware = Some(path);
+        self.uploaded = false;
         self.published_generation = u64::MAX;
         self.reanchor();
     }
@@ -398,8 +434,11 @@ impl Worker {
         }
 
         let mut snap = self.snapshot.lock().unwrap();
-        snap.firmware =
-            self.firmware.as_ref().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned());
+        snap.firmware = if self.uploaded {
+            Some("uploaded by debugger".to_owned())
+        } else {
+            self.firmware.as_ref().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
+        };
         snap.state = self.state.clone();
         snap.virtual_ns = virt;
         snap.speed = if self.state == RunState::Running { self.measured_speed } else { 0.0 };
@@ -431,4 +470,8 @@ impl Worker {
         drop(snap);
         (self.repaint)();
     }
+}
+
+fn blank_board() -> Option<Simulator> {
+    Simulator::blank(Some(DEFAULT_FONTS)).map_err(|e| log::warn!("cannot create the board: {e}")).ok()
 }

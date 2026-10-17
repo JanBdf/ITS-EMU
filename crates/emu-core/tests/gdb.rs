@@ -44,14 +44,20 @@ struct Emulator {
 
 impl Emulator {
     fn start() -> Self {
+        Self::with_firmware(Some("exceptions.elf"))
+    }
+
+    /// Without firmware the flash is empty, as on a new board.
+    fn with_firmware(firmware: Option<&'static str>) -> Self {
         let _ = env_logger::builder().is_test(true).try_init();
         let (tx, rx) = channel();
         let quit = Arc::new(AtomicBool::new(false));
         let q = quit.clone();
         let thread = std::thread::spawn(move || {
-            let image = ElfImage::parse(&std::fs::read(fixture_path("exceptions.elf")).unwrap()).unwrap();
             let mut m = Machine::new(config(), Bus::new()).unwrap();
-            m.load_elf(&image).unwrap();
+            if let Some(name) = firmware {
+                m.load_elf(&ElfImage::parse(&std::fs::read(fixture_path(name)).unwrap()).unwrap()).unwrap();
+            }
             m.reset();
             let mut server = GdbServer::bind("127.0.0.1:0").unwrap();
             tx.send(server.local_addr().unwrap().port()).unwrap();
@@ -258,4 +264,32 @@ fn observer_reads_while_controller_runs() {
     assert_eq!(le_u32(&obs.request("p0")), halted, "target halted");
     let pc = le_u32(&ctl.request("pf"));
     assert!((0x2000_F000..0x2000_F004).contains(&pc), "pc {pc:#x} inside the loop");
+}
+
+#[test]
+fn monitor_load_flashes_a_blank_board() {
+    let Some(gdb) = arm_gdb() else {
+        eprintln!("no GDB with Arm support found (set ITS_EMU_GDB); skipping");
+        return;
+    };
+    let emu = Emulator::with_firmware(None);
+    let out = Command::new(gdb)
+        .args(["-nx", "-batch", "-q"])
+        .args(["-ex", &format!("target remote 127.0.0.1:{}", emu.port)])
+        .args(["-ex", "monitor load /nonexistent.elf"])
+        .args(["-ex", &format!("monitor load {}", fixture_path("exceptions.elf"))])
+        .args(["-ex", "maintenance flush register-cache"])
+        .args(["-ex", "print $pc == &Reset_Handler"])
+        .args(["-ex", "break SysTick_Handler"])
+        .args(["-ex", "continue"])
+        .args(["-ex", "detach"])
+        .arg(fixture_path("exceptions.elf"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let msg = format!("stdout:\n{stdout}\nstderr:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(msg.contains("cannot load '/nonexistent.elf'"), "{msg}");
+    assert!(msg.contains("target reset and halted"), "{msg}");
+    assert_eq!(printed_values(&stdout), ["1"], "pc at the reset vector of the loaded file; {msg}");
+    assert!(stdout.contains("Breakpoint 1, SysTick_Handler"), "loaded program runs; {msg}");
 }

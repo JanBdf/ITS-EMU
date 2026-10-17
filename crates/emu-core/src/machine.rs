@@ -214,9 +214,14 @@ pub struct Machine {
     watch_stopper: Option<UcHookId>,
     /// Timing hooks of division instructions (operand-dependent duration).
     div_hooks: Vec<(u32, UcHookId)>,
+    /// Number of writes to flash so far (programming by loader or debugger).
+    flash_writes: u64,
     /// Last resume request of the GDB client, taken by the server.
     #[cfg(feature = "gdb")]
     pub(crate) gdb_resume: Option<crate::gdb::Resume>,
+    /// File flashed with `monitor load`, not yet taken by the host.
+    #[cfg(feature = "gdb")]
+    pub(crate) gdb_loaded: Option<(std::path::PathBuf, crate::ElfImage)>,
 }
 
 /// Wrapper implementing [`CoreAccess`] for Unicorn.
@@ -798,9 +803,17 @@ impl Machine {
             watchpoints: Vec::new(),
             watch_stopper: None,
             div_hooks: Vec::new(),
+            flash_writes: 0,
             #[cfg(feature = "gdb")]
             gdb_resume: None,
+            #[cfg(feature = "gdb")]
+            gdb_loaded: None,
         })
+    }
+
+    /// Changes whenever flash is written, e.g. when a debugger loads a program.
+    pub fn flash_writes(&self) -> u64 {
+        self.flash_writes
     }
 
     pub fn system(&self) -> &System {
@@ -842,9 +855,15 @@ impl Machine {
         let fb = mem.flash_base;
         let in_flash =
             |a: u32| a >= fb && u64::from(a) + data.len() as u64 <= u64::from(fb) + u64::from(mem.flash_size);
+        let alias = mem.flash_alias_at_zero;
         let ok = if in_flash(addr) {
             let off = (addr - fb) as usize;
             self.flash[off..off + data.len()].copy_from_slice(data);
+            self.flash_writes += 1;
+            if alias {
+                // The same code may also have been translated at its alias at 0.
+                let _ = self.uc.ctl_remove_cache(u64::from(off as u32), off as u64 + data.len() as u64);
+            }
             true
         } else {
             self.uc.mem_write(u64::from(addr), data).is_ok()
