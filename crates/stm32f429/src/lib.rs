@@ -1,6 +1,7 @@
 //! STM32F429ZI: memory map and peripherals.
 
 pub mod adc;
+pub mod crc;
 pub mod exti;
 pub mod gpio;
 pub mod i2c;
@@ -243,7 +244,9 @@ pub fn build() -> (Bus, Stm32f429) {
             Box::new(GpioPort::new(i, gpio.clone(), clocks.clone())),
         );
     }
+    bus.attach(0x4002_3000, 0x400, Box::new(crc::Crc::new(clocks.clone())));
     bus.attach(0x4002_3800, 0x400, Box::new(Rcc::new(clocks.clone())));
+    bus.attach(0x5006_0800, 0x400, Box::new(crc::Rng::new(clocks.clone())));
     bus.attach(0x4002_3C00, 0x400, Box::new(FlashInterface::new()));
     bus.attach(0x4002_8000, 0x1400, Box::new(EthStub));
     bus.set_wait_states(Box::new(bus_wait_states(clocks.clone())));

@@ -27,6 +27,7 @@ pub struct Clocks {
     /// Kernel clock of the timers on APB2 (TIM1, 8–11).
     pub apb2_timer: u32,
     pub ahb1enr: u32,
+    pub ahb2enr: u32,
     pub apb1enr: u32,
     pub apb2enr: u32,
 }
@@ -41,6 +42,7 @@ impl Default for Clocks {
             apb1_timer: HSI_HZ,
             apb2_timer: HSI_HZ,
             ahb1enr: AHB1ENR_RESET,
+            ahb2enr: 0,
             apb1enr: 0,
             apb2enr: 0,
         }
@@ -158,6 +160,7 @@ impl Rcc {
             apb1_timer: timer(d1),
             apb2_timer: timer(d2),
             ahb1enr: self.enr[0],
+            ahb2enr: self.enr[1],
             apb1enr: self.enr[3],
             apb2enr: self.enr[4],
         };
