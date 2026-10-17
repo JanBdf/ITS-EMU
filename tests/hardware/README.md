@@ -19,6 +19,7 @@ ITS-Board (Rev 02, NUCLEO-F429ZI, 180 MHz, ART accelerator on), taken
 | `HwCheck-dmaspi.txt` | `dmaspi` | SPI3 transfer by DMA1 with nothing on the header |
 | `HwCheck-adctrig.txt` | `adctrig` | ADC1 started by TIM3 TRGO at 1 kHz: conversions, delay after the trigger |
 | `HwCheck-dacwave.txt` | `dacwave` | DAC1 noise and triangle generation (software trigger), TIM6 TRGO trigger with DMA1 stream 5 feeding DHR, DMA underrun |
+| `HwCheck-timout.txt` | `timout` | TIM3/TIM8 CH1 driving PC6: PWM levels against CNT, CCR = 0 / above ARR, polarity, CCxE off, forced levels, mode change, toggle captured by CH2, MOE |
 | `HwCheck-irqlat.txt` | `irqlat` | interrupt latency to a handler that reads DWT->CYCCNT first: pended by NVIC->STIR or EXTI->SWIER, with interrupts enabled or masked until CPSIE |
 | `HwCheck-regs.txt` | `wr`/`dump` (first line) | reset values of the registers of timers, SPIs, U(S)ARTs, I2Cs, ADC, DAC, SYSCFG, EXTI |
 

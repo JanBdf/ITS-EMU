@@ -5,8 +5,12 @@
 //! repetition counter of TIM1/TIM8, output compare flags and interrupts, PWM
 //! duty cycles, `CNT` reads/writes, input capture of edges that drive the
 //! channel pins from outside (buttons, analog inputs; with prescaler,
-//! polarity and overcapture). Timer outputs on pins, down/center-aligned
-//! counting and slave modes are not modelled (a warning is logged when used).
+//! polarity and overcapture), and the output compare channels driving their
+//! pins (frozen, active/inactive/toggle on match, forced, PWM 1/2; MOE of
+//! TIM1/TIM8). OCxREF changes only at compare matches, counter wraps and
+//! forced levels, as measured on the board (HwCheck `timout`): a mode change
+//! takes effect at the next of them. Down/center-aligned counting, slave modes
+//! and the complementary outputs are not modelled (a warning is logged when used).
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -47,6 +51,10 @@ const CR1_DIR_CMS: u32 = 0x70;
 const CR1_ARPE: u32 = 1 << 7;
 const SR_UIF: u32 = 1 << 0;
 const DIER_UIE: u32 = 1 << 0;
+const BDTR_MOE: u32 = 1 << 15;
+/// Timer clocks from an output edge until its own channel input captures it
+/// (measured: toggle on CCR1 = 500, CH2 captures 512).
+const LOOPBACK_CLOCKS: u64 = 12;
 
 /// Which APB bus clocks the timer (selects the kernel clock and enable register).
 #[derive(Debug, Clone, Copy)]
@@ -81,6 +89,9 @@ pub struct GpTimer {
     ic_events: [u32; 4],
     /// Trigger output to the ADCs.
     trgo: Option<(SharedTriggers, usize)>,
+    /// Output compare reference (OCxREF) and the level driven on the pins.
+    oc_ref: [bool; 4],
+    oc_out: [Option<bool>; 4],
 
     cr1: u32,
     cr2: u32,
@@ -130,6 +141,8 @@ impl GpTimer {
             watched: Vec::new(),
             ic_events: [0; 4],
             trgo: None,
+            oc_ref: [false; 4],
+            oc_out: [None; 4],
             cr1: 0,
             cr2: 0,
             smcr: 0,
@@ -215,6 +228,7 @@ impl GpTimer {
         (self.rcr, self.rep_left, self.bdtr, self.dcr, self.or) = (0, 0, 0, 0, 0);
         (self.cnt_base, self.base_ps, self.checked, self.next_event, self.warned) = (0, 0, 0, None, false);
         self.ic_events = [0; 4];
+        self.oc_ref = [false; 4];
         self.update_watch();
     }
 
@@ -257,27 +271,28 @@ impl GpTimer {
             return;
         }
         let mut g = gpio.borrow_mut();
-        // edges per channel input (rising, falling), from pins routed to the timer
-        let mut edges = [(false, false); 4];
+        // edges per channel input (rising, falling, time if known), from pins routed to the timer
+        let mut edges = [(false, false, 0u64); 4];
         for (src, list) in pins.pins.iter().enumerate() {
             for &(p, pin) in *list {
                 let ps = &mut g.ports[port(p)];
                 let bit = 1u16 << pin;
-                let routed = ps.mode(pin) == PinMode::Alternate
-                    && (ps.afr[(pin / 8) as usize] >> (4 * (pin % 8))) & 0xF == pins.af;
-                if routed {
+                let routed = ps.mode(pin) == PinMode::Alternate && ps.af(pin) == pins.af;
+                if routed && (ps.cap_rise | ps.cap_fall) & bit != 0 {
                     edges[src].0 |= ps.cap_rise & bit != 0;
                     edges[src].1 |= ps.cap_fall & bit != 0;
+                    edges[src].2 = ps.cap_ps[pin as usize];
                 }
                 ps.cap_rise &= !bit;
                 ps.cap_fall &= !bit;
             }
         }
         drop(g);
-        let cnt = self.cnt(now_ps);
+        let delay_ps = (u128::from(LOOPBACK_CLOCKS) * PS_PER_S / u128::from(self.kernel_hz().max(1))) as u64;
         for ch in 0..4 {
             let Some(src) = self.capture_source(ch) else { continue };
-            let (rise, fall) = edges[src];
+            let (rise, fall, edge_ps) = edges[src];
+            let cnt = self.cnt(if edge_ps == 0 { now_ps } else { edge_ps + delay_ps });
             let (p, np) = (self.ccer & (2 << (4 * ch)) != 0, self.ccer & (8 << (4 * ch)) != 0);
             let hit = match (p, np) {
                 (false, false) => rise,
@@ -298,6 +313,137 @@ impl GpTimer {
             }
             self.sr |= 2 << ch;
             self.ccr[ch] = cnt;
+        }
+    }
+
+    /// Output compare mode (OCxM) of channel `ch`.
+    fn oc_mode(&self, ch: usize) -> u32 {
+        (self.ccmr[ch / 2] >> (8 * (ch % 2) + 4)) & 7
+    }
+
+    /// Level the channel drives on its pins: an enabled output compare
+    /// channel (with MOE on TIM1/TIM8), OCxREF with the polarity CCxP.
+    fn oc_level(&self, ch: usize) -> Option<bool> {
+        let enabled = self.compares(ch)
+            && self.ccer & (1 << (4 * ch)) != 0
+            && (self.cc_irq.is_none() || self.bdtr & BDTR_MOE != 0);
+        enabled.then(|| self.oc_ref[ch] ^ (self.ccer & (2 << (4 * ch)) != 0))
+    }
+
+    /// The counter wrapped to 0: PWM channels compare again (CNT < CCR).
+    fn oc_wrap(&mut self, ch: usize) -> bool {
+        let before = self.oc_ref[ch];
+        match self.oc_mode(ch) {
+            6 => self.oc_ref[ch] = self.ccr[ch] > 0,
+            7 => self.oc_ref[ch] = self.ccr[ch] == 0,
+            _ => {}
+        }
+        self.oc_ref[ch] != before
+    }
+
+    /// The counter reached CCR.
+    fn oc_match(&mut self, ch: usize) -> bool {
+        let before = self.oc_ref[ch];
+        match self.oc_mode(ch) {
+            1 | 7 => self.oc_ref[ch] = true,
+            2 | 6 => self.oc_ref[ch] = false,
+            3 => self.oc_ref[ch] = !before,
+            _ => {}
+        }
+        self.oc_ref[ch] != before
+    }
+
+    /// Counter value of the output match of `ch` (0 matches at the wrap, a
+    /// CCR above ARR never), as a position in a period: 1..=ARR+1.
+    fn oc_match_pos(&self, ch: usize) -> Option<u128> {
+        let ccr = self.ccr[ch];
+        (self.compares(ch) && ccr <= self.arr_active).then(|| if ccr == 0 { self.period() } else { u128::from(ccr) })
+    }
+
+    /// Updates OCxREF for the counter going from position `from` (exclusive)
+    /// to `to` (inclusive) of a period, `to` = ARR + 1 being the wrap to 0.
+    /// Returns per channel the position of its last change.
+    fn oc_span(&mut self, from: u128, to: u128) -> [Option<u128>; 4] {
+        let mut last = [None; 4];
+        let wrap = self.period();
+        for (ch, last) in last.iter_mut().enumerate().take(self.channels) {
+            let m = self.oc_match_pos(ch).filter(|&m| from < m && m <= to);
+            if let Some(m) = m
+                && m < wrap
+                && self.oc_match(ch)
+            {
+                *last = Some(m);
+            }
+            if from < wrap && wrap <= to {
+                // the wrap first, then a match at 0
+                if self.oc_wrap(ch) {
+                    *last = Some(wrap);
+                }
+                if m == Some(wrap) && self.oc_match(ch) {
+                    *last = Some(wrap);
+                }
+            }
+        }
+        last
+    }
+
+    /// `n` complete periods (each with its match and the wrap at the end).
+    fn oc_periods(&mut self, n: u128) -> [bool; 4] {
+        let mut changed = [false; 4];
+        for (ch, changed) in changed.iter_mut().enumerate().take(self.channels) {
+            let before = self.oc_ref[ch];
+            let matches = self.oc_match_pos(ch).is_some();
+            match self.oc_mode(ch) {
+                3 if matches && n % 2 == 1 => self.oc_ref[ch] = !before,
+                1 | 2 if matches => {
+                    self.oc_match(ch);
+                }
+                6 | 7 => {
+                    self.oc_wrap(ch);
+                    if self.oc_match_pos(ch) == Some(self.period()) {
+                        self.oc_match(ch);
+                    }
+                }
+                _ => {}
+            }
+            *changed = self.oc_ref[ch] != before;
+        }
+        changed
+    }
+
+    /// Drives the pins of the channels whose level changed; `edge_ps` is
+    /// the time of the change.
+    fn push_outputs(&mut self, clock: &Clock, edge_ps: [u64; 4]) {
+        let Some((pins, gpio)) = &self.inputs else { return };
+        for (ch, &edge) in edge_ps.iter().enumerate().take(self.channels) {
+            let level = self.oc_level(ch);
+            if level == self.oc_out[ch] {
+                continue;
+            }
+            self.oc_out[ch] = level;
+            let t = edge.max(1);
+            let mut g = gpio.borrow_mut();
+            for &(p, pin) in pins.pins[ch] {
+                g.drive_af(port(p), pin, pins.af, level, clock.cycle_at_ps(t), t);
+            }
+        }
+    }
+
+    /// Time (ps) of position `pos` of the counter, relative to `base`.
+    fn pos_ps(&self, pos: u128, base: u128) -> u64 {
+        let hz = u128::from(self.kernel_hz().max(1));
+        self.base_ps + ((pos - base) * self.tick_ps_num()).div_ceil(hz) as u64
+    }
+
+    /// PWM channels follow a change of the comparison CNT < CCR (by a write
+    /// of CCR or CNT) at once; a mode change alone waits for the next event.
+    fn oc_compare_changed(&mut self, ch: usize, before: bool, after: bool) {
+        if before != after {
+            match self.oc_mode(ch) {
+                6 => self.oc_ref[ch] = after,
+                7 => self.oc_ref[ch] = !after,
+                _ => {}
+            }
         }
     }
 
@@ -455,16 +601,30 @@ impl GpTimer {
         self.take_captures(now_ps);
         if !self.running() || self.arr_active == 0 {
             self.next_event = None;
+            self.push_outputs(ctx.clock, [now_ps; 4]);
+            self.take_captures(now_ps);
             return;
         }
         let (ticks, _) = self.elapsed_ticks(now_ps);
         let base = u128::from(self.cnt_base.min(self.arr_active));
         let to_overflow = u128::from(self.arr_active) - base + 1;
+        let mut edges = [now_ps; 4];
+        let note = |edges: &mut [u64; 4], t: &Self, last: [Option<u128>; 4], base: u128| {
+            for (e, pos) in edges.iter_mut().zip(last) {
+                if let Some(pos) = pos {
+                    *e = t.pos_ps(pos, base);
+                }
+            }
+        };
         if ticks < to_overflow {
             self.flag_matches(base + self.checked, base + ticks);
+            let last = self.oc_span(base + self.checked, base + ticks);
+            note(&mut edges, self, last, base);
             self.checked = ticks;
         } else {
             self.flag_matches(base + self.checked, u128::from(self.arr_active) + 1);
+            let last = self.oc_span(base + self.checked, u128::from(self.arr_active) + 1);
+            note(&mut edges, self, last, base);
             // Time of the (first) overflow, then restart from 0 there.
             let hz = u128::from(self.kernel_hz().max(1));
             let wrap_ps = self.base_ps + (to_overflow * self.tick_ps_num() / hz) as u64;
@@ -485,15 +645,24 @@ impl GpTimer {
                 if wraps > 0 {
                     self.base_ps += (wraps * self.period() * self.tick_ps_num() / hz) as u64;
                     self.flag_matches(0, self.period());
+                    for (e, changed) in edges.iter_mut().zip(self.oc_periods(wraps)) {
+                        if changed {
+                            *e = self.base_ps;
+                        }
+                    }
                     if !udis && self.overflows(wraps) {
                         self.update_event(true);
                     }
                 }
                 let (ticks, _) = self.elapsed_ticks(now_ps);
                 self.flag_matches(0, ticks);
+                let last = self.oc_span(0, ticks);
+                note(&mut edges, self, last, 0);
                 self.checked = ticks;
             }
         }
+        self.push_outputs(ctx.clock, edges);
+        self.take_captures(now_ps);
         self.schedule(ctx);
     }
 
@@ -503,7 +672,7 @@ impl GpTimer {
         let base = u128::from(self.cnt_base.min(self.arr_active));
         let period = self.period();
         (0..4)
-            .filter(|&ch| self.compares(ch) && self.dier & (2 << ch) != 0)
+            .filter(|&ch| self.compares(ch) && (self.dier & (2 << ch) != 0 || self.oc_level(ch).is_some()))
             .map(|ch| {
                 let m = u128::from(self.match_value(ch));
                 let m = if m == 0 { period } else { m };
@@ -523,7 +692,8 @@ impl GpTimer {
             return;
         }
         let base = u128::from(self.cnt_base.min(self.arr_active));
-        let wake = self.dier & DIER_UIE != 0 || self.trgo_on_update();
+        let driving = (0..self.channels).any(|ch| self.oc_level(ch).is_some() && matches!(self.oc_mode(ch), 6 | 7));
+        let wake = self.dier & DIER_UIE != 0 || self.trgo_on_update() || driving;
         let overflow = wake.then(|| u128::from(self.arr_active) - base + 1);
         let Some(ticks) = [overflow, self.next_match_ticks()].into_iter().flatten().min() else { return };
         self.next_event = Some(self.cycle_of_tick(ticks, ctx.clock).max(ctx.now() + 1));
@@ -674,6 +844,9 @@ impl Peripheral for GpTimer {
                     self.update_event(flag);
                     self.rebase(now_ps, 0);
                     self.base_ps = now_ps;
+                    for ch in 0..self.channels {
+                        self.oc_wrap(ch);
+                    }
                     if self.trgo_on_update() {
                         self.emit_trgo(ctx.now()); // UG is an update event for TRGO, too
                     }
@@ -692,6 +865,13 @@ impl Peripheral for GpTimer {
                     }
                 }
                 self.ccmr[i] = (v & !keep) | (self.ccmr[i] & keep);
+                for ch in [2 * i, 2 * i + 1] {
+                    match self.oc_mode(ch) {
+                        4 if self.compares(ch) => self.oc_ref[ch] = false,
+                        5 if self.compares(ch) => self.oc_ref[ch] = true,
+                        _ => {}
+                    }
+                }
                 self.update_watch();
             }
             0x20 => {
@@ -699,6 +879,10 @@ impl Peripheral for GpTimer {
                 self.update_watch();
             }
             0x24 => {
+                let cnt = self.cnt(now_ps);
+                for ch in 0..self.channels {
+                    self.oc_compare_changed(ch, cnt < self.ccr[ch], v & mask < self.ccr[ch]);
+                }
                 self.rebase(now_ps, v & mask);
                 self.base_ps = now_ps;
             }
@@ -711,7 +895,12 @@ impl Peripheral for GpTimer {
             }
             // read-only while capturing
             0x34..=0x40 if self.capture_source((aligned - 0x34) as usize / 4).is_none() => {
-                self.ccr[(aligned - 0x34) as usize / 4] = v & mask
+                let ch = (aligned - 0x34) as usize / 4;
+                let cnt = self.cnt(now_ps);
+                if ch < self.channels {
+                    self.oc_compare_changed(ch, cnt < self.ccr[ch], cnt < v & mask);
+                }
+                self.ccr[ch] = v & mask
             }
             0x30 if self.cc_irq.is_some() => self.rcr = v & 0xFF,
             0x44 if self.cc_irq.is_some() => self.bdtr = v,
@@ -719,6 +908,8 @@ impl Peripheral for GpTimer {
             0x50 => self.or = v,
             _ => {}
         }
+        self.push_outputs(ctx.clock, [now_ps; 4]);
+        self.take_captures(now_ps);
         self.schedule(ctx);
         self.sync_irq(ctx);
         self.update_pwm();
@@ -738,6 +929,15 @@ impl Peripheral for GpTimer {
     fn reset(&mut self) {
         self.reset_regs();
         self.update_pwm();
+        if let Some((pins, gpio)) = &self.inputs {
+            let mut g = gpio.borrow_mut();
+            for (ch, list) in pins.pins.iter().enumerate() {
+                for &(p, pin) in *list {
+                    g.drive_af(port(p), pin, pins.af, None, 0, 0);
+                }
+                self.oc_out[ch] = None;
+            }
+        }
     }
 }
 

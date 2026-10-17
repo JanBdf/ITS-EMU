@@ -265,6 +265,16 @@ fn dac_waves_and_trigger_match_the_board() {
 }
 
 #[test]
+fn timer_outputs_match_the_board() {
+    // PC6 driven by TIM3/TIM8 CH1: PWM levels against CNT, forced levels,
+    // stale OCxREF after a mode change, capture of the own toggling output
+    let Some(out) = run("timout", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timout.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("O ")).collect();
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
 fn interrupt_latency_matches_the_board() {
     // Cycles from the pending write to the handler's first instruction. Only
     // with interrupts masked until CPSIE: the emulator takes interrupts at the
