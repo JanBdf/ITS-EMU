@@ -65,6 +65,8 @@ pub struct Nvic {
     active: Bits,
     /// Current level of external interrupt request lines (level-sensitive).
     level: Bits,
+    /// Requests of the sources of lines that several peripherals share.
+    sources: [u8; NUM_IRQS as usize],
     priority: [u8; NUM_EXCEPTIONS],
     prigroup: u8,
     /// SHCSR enable bits for MemManage/BusFault/UsageFault.
@@ -86,6 +88,7 @@ impl Nvic {
             pending: Bits::default(),
             active: Bits::default(),
             level: Bits::default(),
+            sources: [0; NUM_IRQS as usize],
             priority: [0; NUM_EXCEPTIONS],
             prigroup: 0,
             mem_fault_ena: false,
@@ -147,6 +150,19 @@ impl Nvic {
     /// Sets the level of an external interrupt line. A high level pends the
     /// interrupt unless it is already pending or active; on deactivation a still
     /// asserted line pends it again.
+    /// Sets the request of source `src` (0..8) of a shared interrupt line; the
+    /// line is high while any of its sources requests.
+    pub fn set_irq_source(&mut self, irq: u32, src: u8, high: bool) {
+        let Some(s) = self.sources.get_mut(irq as usize) else { return };
+        if high {
+            *s |= 1 << src;
+        } else {
+            *s &= !(1 << src);
+        }
+        let level = *s != 0;
+        self.set_irq_level(irq, level);
+    }
+
     pub fn set_irq_level(&mut self, irq: u32, high: bool) {
         if irq >= NUM_IRQS {
             return;

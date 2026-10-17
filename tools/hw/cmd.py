@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Sends HwCheck commands to the real board over the ST-LINK virtual COM port
 and prints the answers.  Usage: cmd.py [--port /dev/ttyACM0] [--wait-ready] CMD...
-Each command is sent as one line; the script waits for "ok <cmd>" or "? <cmd>"."""
+Each command is sent as one line; the script waits for "ok <cmd>" or "? <cmd>".
+"sleep SECONDS" waits between commands."""
 import os
 import select
 import sys
@@ -59,6 +60,9 @@ else:
     termios.tcflush(fd, termios.TCIFLUSH)
 
 for cmd in args:
+    if cmd.startswith("sleep "):
+        time.sleep(float(cmd.split()[1]))
+        continue
     os.write(fd, (cmd + "\n").encode())
     name = cmd.split()[0]
     while True:

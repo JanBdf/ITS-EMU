@@ -24,6 +24,11 @@ impl DeviceCtx<'_> {
     pub fn set_irq(&mut self, irq: u32, high: bool) {
         self.nvic.set_irq_level(irq, high);
     }
+
+    /// Drives source `src` of an interrupt line that several peripherals share.
+    pub fn set_irq_source(&mut self, irq: u32, src: u8, high: bool) {
+        self.nvic.set_irq_source(irq, src, high);
+    }
 }
 
 pub trait Peripheral {
