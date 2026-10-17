@@ -2192,6 +2192,28 @@ static void cmd_timslave(void) {
     TIM3->CR1 = 0;
     printf("S trigger cen %lu -> %lu cnt %lu sr %02lx\n", (unsigned long)cen_before, (unsigned long)cen,
            (unsigned long)cnt, (unsigned long)sr);
+    // PWM input: CH1 captures the period on the rising edge that resets the
+    // counter, CH2 the high time on the falling edge (300 us high, 700 us low)
+    slave_pin(6, 0);
+    TIM3->CR1 = 0;
+    TIM3->SMCR = 0;
+    TIM3->CCMR1 = (1u << 0) | (2u << 8); // IC1 <- TI1, IC2 <- TI1
+    TIM3->CCER = TIM_CCER_CC1E | TIM_CCER_CC2E | TIM_CCER_CC2P;
+    TIM3->PSC = 89;
+    TIM3->ARR = 0xFFFF;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->SMCR = (5u << 4) | 4u;
+    TIM3->CR1 = TIM_CR1_CEN;
+    for (int i = 0; i < 4; i++) {
+        slave_pin(6, 1);
+        slave_wait_us(280);
+        slave_pin(6, 0);
+        slave_wait_us(680);
+    }
+    slave_pin(6, 1);
+    slave_wait_us(50);
+    TIM3->CR1 = 0;
+    printf("S pwm_input period %lu high %lu\n", (unsigned long)TIM3->CCR1, (unsigned long)TIM3->CCR2);
     TIM3->SMCR = 0;
     TIM3->CCMR1 = 0;
     TIM3->CCER = 0;
