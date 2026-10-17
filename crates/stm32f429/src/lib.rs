@@ -126,6 +126,24 @@ pub fn build() -> (Bus, Stm32f429) {
         tim_pwm.push(t.pwm());
         bus.attach(base, 0x400, Box::new(t));
     }
+    let timer = |name, irq, bus, en_bit| GpTimer::new(name, irq, false, bus, en_bit, clocks.clone());
+    use ApbBus::{Apb1, Apb2};
+    // TIM9..14 share their interrupt lines with TIM1/TIM8 (source 1), TIM6 with the DAC
+    let more = [
+        (0x4001_0000, timer("TIM1", 25, Apb2, 0).advanced(27)),
+        (0x4001_0400, timer("TIM8", 44, Apb2, 1).advanced(46)),
+        (0x4000_1000, timer("TIM6", 54, Apb1, 4).with_channels(0)),
+        (0x4000_1400, timer("TIM7", 55, Apb1, 5).with_channels(0)),
+        (0x4001_4000, timer("TIM9", 24, Apb2, 16).with_channels(2).shared_irq(1)),
+        (0x4001_4400, timer("TIM10", 25, Apb2, 17).with_channels(1).shared_irq(1)),
+        (0x4001_4800, timer("TIM11", 26, Apb2, 18).with_channels(1).shared_irq(1)),
+        (0x4000_1800, timer("TIM12", 43, Apb1, 6).with_channels(2).shared_irq(1)),
+        (0x4000_1C00, timer("TIM13", 44, Apb1, 7).with_channels(1).shared_irq(1)),
+        (0x4000_2000, timer("TIM14", 45, Apb1, 8).with_channels(1).shared_irq(1)),
+    ];
+    for (base, t) in more {
+        bus.attach(base, 0x400, Box::new(t));
+    }
     bus.attach(
         0x4000_4800,
         0x400,

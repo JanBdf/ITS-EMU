@@ -21,6 +21,8 @@
  *   rd ADDR         prints the 32-bit word at ADDR
  *   wr ADDR VAL     writes the 32-bit word VAL to ADDR
  *   exti            EXTI/SYSCFG behaviour and interrupt latency (PG0, PG5)
+ *   tim             timers: compare flags and interrupts, TIM1 repetition
+ *                   counter, basic timers, shared interrupt lines
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -600,6 +602,170 @@ static void cmd_exti(void) {
     GPIOG->MODER &= ~((3u << 0) | (3u << 10));
 }
 
+/* ---- Timers: compare flags, CC interrupts, repetition counter, basic and
+ * shared-interrupt timers. */
+static volatile uint32_t tim3_cc, tim3_cnt_at_isr, tim1_up, tim10_up, tim1_cc, tim6_up;
+
+void TIM3_IRQHandler(void) {
+    tim3_cnt_at_isr = TIM3->CNT;
+    TIM3->SR = ~TIM_SR_CC1IF;
+    tim3_cc++;
+}
+
+void TIM1_UP_TIM10_IRQHandler(void) {
+    if (TIM1->SR & TIM_SR_UIF) {
+        TIM1->SR = ~TIM_SR_UIF;
+        tim1_up++;
+    }
+    if (TIM10->SR & TIM_SR_UIF) {
+        TIM10->SR = ~TIM_SR_UIF;
+        tim10_up++;
+    }
+}
+
+void TIM1_CC_IRQHandler(void) {
+    TIM1->SR = ~TIM_SR_CC2IF;
+    tim1_cc++;
+}
+
+void TIM6_DAC_IRQHandler(void) {
+    TIM6->SR = 0;
+    tim6_up++;
+}
+
+#define T(name, expr) printf("M %s %08lx\n", name, (unsigned long)(expr))
+
+static void wait_ms(uint32_t ms) {
+    uint32_t t0 = DWT->CYCCNT;
+    while (DWT->CYCCNT - t0 < ms * 180000u) {
+    }
+}
+
+static void cmd_tim(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN | RCC_APB1ENR_TIM6EN | RCC_APB1ENR_TIM7EN;
+    RCC->APB2ENR |= RCC_APB2ENR_TIM1EN | RCC_APB2ENR_TIM9EN | RCC_APB2ENR_TIM10EN;
+    __DSB();
+    T("tim1_arr_reset", TIM1->ARR);
+    T("tim6_arr_reset", TIM6->ARR);
+    TIM1->RCR = 0xFFFF;
+    T("tim1_rcr_mask", TIM1->RCR);
+    TIM1->RCR = 0;
+    TIM1->DCR = 0xFFFF;
+    T("tim1_dcr_mask", TIM1->DCR);
+    TIM1->DCR = 0;
+    TIM9->SR = 0;
+    TIM9->EGR = 0x1E;
+    T("tim9_egr_cc", TIM9->SR);
+    TIM9->SR = 0;
+    TIM6->DIER = 0xFFFF;
+    T("tim6_dier_mask", TIM6->DIER);
+    TIM6->DIER = 0;
+
+    // TIM3 compare flags: 90 MHz, period 1000 ticks
+    TIM3->CR1 = 0;
+    TIM3->PSC = 0;
+    TIM3->ARR = 999;
+    TIM3->CCR1 = 300;
+    TIM3->CCR2 = 2000;
+    TIM3->CCR3 = 0;
+    TIM3->CCR4 = 500;
+    TIM3->CCMR1 = 0;
+    TIM3->CCMR2 = 1u << 8; // CC4: input
+    TIM3->EGR = 1;
+    TIM3->SR = 0;
+    __disable_irq();
+    TIM3->CR1 = 1;
+    while (TIM3->CNT < 200) {
+    }
+    uint32_t sr_200 = TIM3->SR;
+    while (TIM3->CNT < 350) {
+    }
+    uint32_t sr_350 = TIM3->SR;
+    while (!(TIM3->SR & TIM_SR_UIF)) {
+    }
+    uint32_t sr_wrap = TIM3->SR;
+    __enable_irq();
+    TIM3->CR1 = 0;
+    T("tim3_sr_200", sr_200);
+    T("tim3_sr_350", sr_350);
+    T("tim3_sr_wrap", sr_wrap);
+
+    // TIM3 CC1 interrupt: 1 kHz (PSC 89 -> 1 MHz, ARR 999), 20 ms
+    TIM3->PSC = 89;
+    TIM3->CCR1 = 250;
+    TIM3->EGR = 1;
+    TIM3->SR = 0;
+    TIM3->DIER = TIM_DIER_CC1IE;
+    tim3_cc = 0;
+    NVIC_EnableIRQ(TIM3_IRQn);
+    TIM3->CR1 = 1;
+    wait_ms(20);
+    TIM3->CR1 = 0;
+    NVIC_DisableIRQ(TIM3_IRQn);
+    TIM3->DIER = 0;
+    T("tim3_cc_irqs_20ms", tim3_cc);
+    T("tim3_cnt_at_isr", tim3_cnt_at_isr);
+
+    // TIM1 repetition counter: 180 MHz / 18000 = 10 kHz, ARR 9 -> 1 ms
+    // overflows, RCR 2 -> update every 3 ms; CC2 at 5 every overflow.
+    TIM1->PSC = 17999;
+    TIM1->ARR = 9;
+    TIM1->RCR = 2;
+    TIM1->CCR2 = 5;
+    TIM1->EGR = 1;
+    TIM1->SR = 0;
+    TIM1->DIER = TIM_DIER_UIE | TIM_DIER_CC2IE;
+    // TIM10 on the same interrupt line: 180 MHz / 18000, ARR 49 -> 5 ms
+    TIM10->PSC = 17999;
+    TIM10->ARR = 49;
+    TIM10->EGR = 1;
+    TIM10->SR = 0;
+    TIM10->DIER = TIM_DIER_UIE;
+    tim1_up = tim10_up = tim1_cc = 0;
+    NVIC_EnableIRQ(TIM1_UP_TIM10_IRQn);
+    NVIC_EnableIRQ(TIM1_CC_IRQn);
+    TIM1->CR1 = 1;
+    TIM10->CR1 = 1;
+    wait_ms(31);
+    TIM1->CR1 = 0;
+    TIM10->CR1 = 0;
+    NVIC_DisableIRQ(TIM1_UP_TIM10_IRQn);
+    NVIC_DisableIRQ(TIM1_CC_IRQn);
+    TIM1->DIER = 0;
+    TIM10->DIER = 0;
+    T("tim1_up_irqs_31ms", tim1_up);
+    T("tim1_cc_irqs_31ms", tim1_cc);
+    T("tim10_up_irqs_31ms", tim10_up);
+
+    // TIM6: 90 MHz / 9000 = 10 kHz, ARR 19 -> 2 ms, one-pulse mode off
+    TIM6->PSC = 8999;
+    TIM6->ARR = 19;
+    TIM6->EGR = 1;
+    TIM6->SR = 0;
+    TIM6->DIER = TIM_DIER_UIE;
+    tim6_up = 0;
+    NVIC_EnableIRQ(TIM6_DAC_IRQn);
+    TIM6->CR1 = 1;
+    wait_ms(21);
+    TIM6->CR1 = 0;
+    NVIC_DisableIRQ(TIM6_DAC_IRQn);
+    TIM6->DIER = 0;
+    T("tim6_up_irqs_21ms", tim6_up);
+
+    // TIM7 one-pulse: stops after the first overflow
+    TIM7->PSC = 8999;
+    TIM7->ARR = 9;
+    TIM7->EGR = 1;
+    TIM7->SR = 0;
+    TIM7->CR1 = TIM_CR1_OPM | TIM_CR1_CEN;
+    wait_ms(5);
+    T("tim7_opm_cr1", TIM7->CR1);
+    T("tim7_opm_sr", TIM7->SR);
+    T("tim7_opm_cnt", TIM7->CNT);
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -641,9 +807,15 @@ static void execute(char *line) {
         printf("R %08lx %08lx\n", n, (unsigned long)*(volatile uint32_t *)n);
     } else if (!strcmp(line, "wr")) {
         char *val = arg ? strchr(arg, ' ') : NULL;
-        *(volatile uint32_t *)n = val ? (uint32_t)strtoul(val, NULL, 16) : 0;
+        if (!val) {
+            printf("? %s\n", line);
+            return;
+        }
+        *(volatile uint32_t *)n = (uint32_t)strtoul(val, NULL, 16);
     } else if (!strcmp(line, "exti")) {
         cmd_exti();
+    } else if (!strcmp(line, "tim")) {
+        cmd_tim();
     } else {
         printf("? %s\n", line);
         return;

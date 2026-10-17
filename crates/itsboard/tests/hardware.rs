@@ -161,6 +161,16 @@ fn division_timing_matches_the_board() {
 }
 
 #[test]
+fn timers_match_the_board() {
+    // compare flags, CC/update interrupt counts, TIM1 repetition counter,
+    // basic timers, TIM1/TIM10 on one interrupt line, register masks
+    let Some(out) = run("tim", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-tim.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("M ")).collect();
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
 fn exti_matches_the_board() {
     let Some(out) = run("exti", 500) else { return };
     let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-exti.txt")).unwrap();
