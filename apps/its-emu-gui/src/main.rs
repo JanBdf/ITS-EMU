@@ -36,6 +36,8 @@ fn main() -> eframe::Result {
             .with_title("ITS-Board Emulator")
             .with_inner_size([1280.0, 1000.0])
             .with_drag_and_drop(true),
+        // dithering adds noise that makes the small print of the board drawing hard to read
+        dithering: false,
         ..Default::default()
     };
     eframe::run_native(

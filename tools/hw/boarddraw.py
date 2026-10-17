@@ -82,16 +82,16 @@ def ortho(x, y, m):
 
 
 # ---- colours
-MASK = '#30598a'          # solder mask over bare laminate
-MASK_CU = '#386395'       # solder mask over copper (traces, planes)
-MASK_EDGE = '#264a75'
-SILK = '#eef5fa'
+MASK = '#294f7d'          # solder mask over bare laminate
+MASK_CU = '#2f5786'       # solder mask over copper (traces, planes)
+MASK_EDGE = '#203f66'
+SILK = '#e3eaef'
 GOLD = '#e2b35a'
 HOLE = '#16193a'
 TIN = '#d9d6cf'
 LED_BODY = '#f3ecd9'
 HEADER = '#1c1c1e'
-NUCLEO = '#f1f1ec'
+NUCLEO = '#e3e3dd'
 ST_BLUE = '#1f6fd0'
 FELT = '#66665f'          # the grey sockets the Morpho pins are bent into
 CAP_RED = '#d9434b'       # caps of S0..S7
@@ -347,26 +347,31 @@ def ftext(x, y, s, fontname, cap, anchor='l', fill=SILK, rot=0, track=0.0, extra
 # ======================================================================
 # Parts
 
-def pad(x, y, r=8.4, hole=4.9, square=False, color=GOLD):
+# Holes through the carrier (x, y, r): cut out of the board, so that what is
+# behind the board shows through them.
+HOLES = []
+
+
+def pad(x, y, r=7.6, hole=4.9, square=False, color=GOLD):
     """Plated through hole with annular ring."""
+    HOLES.append((x, y, hole))
     out = []
     if square:
         out.append(rect(x - r, y - r, x + r, y + r, color))
     else:
         out.append(circle(x, y, r, color))
-    out.append(circle(x, y, hole, HOLE))
-    out.append(ring(x, y, hole + 0.35, '#b88a3c', 0.7))
+    out.append(ring(x, y, hole + 0.3, '#b88a3c', 0.6))
     return '\n'.join(out)
 
 
-def small_pad(x, y, r=3.4, hole=1.5, square=False):
-    out = [rect(x - r, y - r, x + r, y + r, GOLD) if square else circle(x, y, r, GOLD)]
-    out.append(circle(x, y, hole, HOLE))
-    return '\n'.join(out)
+def small_pad(x, y, r=3.0, hole=1.5, square=False):
+    HOLES.append((x, y, hole))
+    return rect(x - r, y - r, x + r, y + r, GOLD) if square else circle(x, y, r, GOLD)
 
 
 def mount_hole(x, y, r=6.2):
-    return '\n'.join([circle(x, y, r + 0.7, MASK_EDGE), circle(x, y, r, HOLE)])
+    HOLES.append((x, y, r))
+    return ring(x, y, r + 0.35, MASK_EDGE, 0.7)
 
 
 def led_smd(x, y):
@@ -498,6 +503,7 @@ SECTIONS = [
     [(413, 464.4), (413, 358.8), (418, 353.8), (728, 353.8), (761, 386.6), (761, 469.6)],
     [(895.1, 190.5), (895.1, 469.6)],          # above y = 300 never seen (under the display), assumed
     [(870.0, -1), (870.0, 50.0), (840.0, 80.0)],
+    [(344.2, -1), (344.2, 45.0)],
 ]
 
 
@@ -612,7 +618,7 @@ NOTCH = (900.0, 93.5, 190.5)    # cut-out at the right edge (cable of the Nucleo
 
 
 def board_outline():
-    r, n, i = CORNER, 3.5, 4.0       # board corners, outer and inner corners of the notch
+    r = n = i = CORNER               # board corners, outer and inner corners of the notch
     x, t, b = NOTCH
     return (f'M{r},0 H{W - r} A{r},{r} 0 0 1 {W},{r} V{t - n} A{n},{n} 0 0 1 {W - n},{t} H{x + i} '
             f'A{i},{i} 0 0 0 {x},{t + i} V{b - i} A{i},{i} 0 0 0 {x + i},{b} H{W - n} '
@@ -620,10 +626,11 @@ def board_outline():
             f'V{r} A{r},{r} 0 0 1 {r},0 Z')
 
 
-def gradients():
-    svg.defs += [
-        f'<clipPath id="board"><path d="{board_outline()}"/></clipPath>',
-    ]
+def board_clip():
+    """The board outline with the holes cut out."""
+    holes = ''.join(f'M{f(x - r)},{f(y)} a{f(r)},{f(r)} 0 1 0 {f(2 * r)},0 a{f(r)},{f(r)} 0 1 0 {f(-2 * r)},0 Z'
+                    for x, y, r in HOLES)
+    svg.defs.append(f'<clipPath id="board"><path clip-rule="evenodd" d="{board_outline()} {holes}"/></clipPath>')
 
 
 LABEL_FIT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'boardlabels.json')
@@ -652,10 +659,19 @@ def fitted(labels):
     return out
 
 
+EDGE_GAP = 1.5     # silkscreen keeps this distance from the board edge
+
+
 def silk_labels(labels):
     out = []
     for l in fitted(labels):
-        out.append(stext(l['x'], l['y'], l['text'], l['h'], l['anchor'], l['rot'], l['sw'], adv=l['adv']))
+        x, y = l['x'], l['y']
+        sw = l['sw'] if l['sw'] is not None else 0.2 * l['h']
+        pts = [p for pl in text_lines(l['text'], x, y, l['h'], l['anchor'], l['rot'], l['adv']) for p in pl]
+        if pts:
+            x += max(0.0, EDGE_GAP + sw / 2 - min(p[0] for p in pts)) - max(0.0, max(p[0] for p in pts) + sw / 2 + EDGE_GAP - W)
+            y += max(0.0, EDGE_GAP + sw / 2 - min(p[1] for p in pts)) - max(0.0, max(p[1] for p in pts) + sw / 2 + EDGE_GAP - H)
+        out.append(stext(x, y, l['text'], l['h'], l['anchor'], l['rot'], sw, adv=l['adv']))
     return '\n'.join(out)
 
 
@@ -711,7 +727,7 @@ def carrier():
         out.append(rect_stroke(*bx, SILK, sw))
         out.append(circle(*dot, 0.7, SILK))
     # J3 (I2C module footprint), header brackets
-    out.append(rect_stroke(31.8, 316.9, 99.2, 379.3, SILK, sw))
+    out.append(rect_stroke(32.2, 316.9, 98.5, 379.3, SILK, sw))
     out.append(line(129.4, 332.6, 129.4, 375.4, SILK, sw))
     out.append(line(129.4, 405.8, 129.4, 449.6, SILK, sw))
     out.append(line(319.0, 385.0, 319.0, 449.0, SILK, sw))
@@ -722,7 +738,7 @@ def carrier():
 
     # ---- holes and pads
     for x, y in [(15.4, 15.4), (316.5, 16.5), (708.2, 14.0), (985.2, 13.3), (985.2, 75.9), (985.2, 209.2),
-                 (16.3, 326.4), (15.1, 633.3), (623.7, 633.2), (985.0, 633.8), (39.9, 338.2), (92.8, 338.2)]:
+                 (16.3, 326.4), (15.1, 633.3), (623.7, 633.2), (985.0, 633.8), (38.8, 338.2), (91.9, 338.2)]:
         out.append(mount_hole(x, y))
     for x in TIM_PADS:
         out.append(pad(x, TIM_Y))
@@ -809,19 +825,21 @@ def rs232():
                          'c', '#727270', -90, mid=True))
     # J1: flange, D shell, insulator with the contacts, standoffs
     cx, cy = DSUB
-    out.append(rect(cx - 63.5, cy - 25.5, cx + 63.5, cy + 25.5, '#d4d0c6', 2.5))
-    out.append(rect_stroke(cx - 63.5, cy - 25.5, cx + 63.5, cy + 25.5, '#a19c90', 0.7, 2.5))
-    out.append(path(d_shape(cx, cy, 34.5, 30.0, 18.5, 5.0), '#bcb8ad'))
-    out.append(path(d_shape(cx, cy, 33.0, 28.5, 17.0, 4.5), '#e6e2d8', ' stroke="#a8a397" stroke-width="0.6"'))
-    out.append(path(d_shape(cx, cy, 30.0, 26.0, 14.0, 4.0), '#46463f'))
+    out.append(rect(cx - 63.5, cy - 25.5, cx + 63.5, cy + 25.5, '#d4d0c6', 5.0))
+    out.append(rect_stroke(cx - 63.5, cy - 25.5, cx + 63.5, cy + 25.5, '#a19c90', 0.7, 5.0))
+    # the short side of the D (4 contacts) is at the top
+    out.append(path(d_shape(cx, cy, 30.0, 34.5, 18.5, 9.0), '#bcb8ad'))
+    out.append(path(d_shape(cx, cy, 28.5, 33.0, 17.0, 8.0), '#e6e2d8', ' stroke="#a8a397" stroke-width="0.6"'))
+    out.append(path(d_shape(cx, cy, 26.0, 30.0, 14.0, 6.5), '#46463f'))
     for i in range(4):
         out.append(circle(cx - 17.25 + i * 11.5, cy - 6.0, 2.9, '#0c0c0c'))
     for i in range(5):
         out.append(circle(cx - 23.0 + i * 11.5, cy + 6.0, 2.9, '#0c0c0c'))
-    for dx in (-51.9, 51.9):                         # screw locks (round knurled tops)
+    for dx in (-51.9, 51.9):                         # hex standoffs (screw locks)
         x = cx + dx
-        out.append(circle(x, cy, 8.6, '#cfcabe', ' stroke="#9d978a" stroke-width="0.7"'))
-        out.append(ring(x, cy, 6.4, '#b3ad9f', 0.8))
+        hexagon = [(x + 9.8 * math.cos(math.radians(a)), cy + 9.8 * math.sin(math.radians(a))) for a in range(0, 360, 60)]
+        out.append(poly(hexagon, '#cfcabe', ' stroke="#9d978a" stroke-width="0.7" stroke-linejoin="round"'))
+        out.append(ring(x, cy, 5.6, '#b3ad9f', 0.8))
         out.append(circle(x, cy, 2.8, '#4d4a43'))
     return '\n'.join(out)
 
@@ -929,7 +947,7 @@ def nucleo():
     # ZIO sockets CN7 / CN10 (CN8 / CN9 are under the display)
     for x, y in [(400.5, 101.5), (401.5, 300.5)]:          # mounting holes beside them
         out.append(circle(x, y, 6.6, '#1b1b1d'))
-    out.append(on_nucleo(8.5, zio(404.6, 83.0, 474.5, 113.9, [410.3, 421.6, 432.9, 444.2, 455.5, 466.8], [87.5, 99.8])))
+    out.append(on_nucleo(8.5, zio(404.6, 83.0, 474.5, 105.0, [410.3, 421.6, 432.9, 444.2, 455.5, 466.8], [88.5, 99.5])))
     out.append(on_nucleo(8.5, zio(405.4, 286.3, 478.6, 311.9, [411.5, 422.9, 434.3, 445.6, 456.9, 468.2],
                                   [291.2, 302.6])))
     out += [nt(419.6, 118.9, 'IO', 3.6, 180), nt(448.6, 119.6, 'SAI_B', 3.6, 180),
@@ -954,10 +972,14 @@ def nucleo():
                                           rect_stroke(271.5, 123.0, 292.4, 155.8, '#a9aaa8', 0.5, 1.5),
                                           nt(281.0, 139.4, '2021', 2.6, 90, '#a8a294')])))
     # CN14 RJ45 (opening to the left): top of the shield
-    out.append(on_nucleo(13.5, '\n'.join([rect(255.5, 203.2, 322.5, 274.5, '#d3cdbd', 1.5,
-                                                ' stroke="#aaa391" stroke-width="0.5"'),
-                                           line(258.0, 207.5, 320.0, 207.5, '#bdb6a4', 0.6),
-                                           line(258.0, 270.2, 320.0, 270.2, '#bdb6a4', 0.6)])))
+    n0, n1, depth = 230.0, 247.7, 18.0
+    shell = (f'M257,203.2 H321 Q322.5,203.2 322.5,204.7 V273 Q322.5,274.5 321,274.5 H257 Q255.5,274.5 255.5,273 '
+             f'V{n1} H{255.5 + depth} V{n0} H255.5 V204.7 Q255.5,203.2 257,203.2 Z')
+    out.append(on_nucleo(13.5, '\n'.join([rect(255.5, n0, 255.5 + depth, n1, '#3b3935'),
+                                           rect(255.5 + depth - 5.0, n0 + 1.0, 255.5 + depth, n1 - 1.0, '#8d8e8f'),
+                                           path(shell, '#c9c3b3', ' stroke="#a39c8a" stroke-width="0.5"'),
+                                           line(258.0, 207.5, 320.0, 207.5, '#b3ac9a', 0.6),
+                                           line(258.0, 270.2, 320.0, 270.2, '#b3ac9a', 0.6)])))
     # small parts
     for x, y in [(328.2, 85.8), (328.2, 92.0), (328.2, 105.2), (327.7, 131.5), (309.4, 165.8), (309.4, 172.5),
                  (328.2, 183.5), (309.4, 195.7), (309.4, 199.8), (328.2, 193.3), (328.2, 199.6), (360.5, 181.9),
@@ -1042,9 +1064,9 @@ def nucleo():
         out.append(smd_r(x, 336.5, 3.6, 5.6, '#3a3631', vertical=True))
     out.append(rect_stroke(769.0, 333.5, 776.0, 341.0, '#3a64c4', 0.6))
     out.append(rect(770.2, 334.5, 774.8, 340.0, '#efe9d6', 0.4))
-    out.append(poly([(795.0, 332.0), (803.0, 332.0), (797.5, 345.0)], N_BLUE))
-    out.append(poly([(803.5, 346.0), (811.5, 337.0), (809.0, 350.5)], N_BLUE))
-    out.append(path('M822.8,333 H829 A5,5 0 0 1 829,343 H822.8 Z', N_BLUE))
+    out.append(poly([(794.5, 326.0), (794.5, 350.5), (816.0, 338.2)], N_BLUE, ' stroke-linejoin="round"'))
+    out.append(path('M798,334 C801,332 805,333 806,336 L808,341 C806,344 801,345 799,343 Z', NUCLEO))  # hand
+    out.append(line(797.5, 330.5, 811.0, 344.0, NUCLEO, 1.6, cap='butt'))
     out.append(rect_stroke(822.0, 333.0, 844.0, 346.0, N_SILK, 0.5))
     for x in (827.6, 839.5):
         out.append(circle(x, 337.5, 2.6, '#d6c8a6'))
@@ -1098,10 +1120,9 @@ def morpho_pins():
 
 def shield():
     """The display module (photo coordinates, drawn inside layer(M_SHIELD))."""
-    out = [rect(475.5, 50.6, 908.6, 330.8, '#ece7d9', 1.5),               # touch panel
-           rect(482.4, 56.5, 903.6, 326.0, '#d9d3c5', 0.8),
-           rect(496.0, 58.7, 900.6, 322.0, '#c4beaf', 0.8),               # glass edge
-           rect(505.5, 60.5, 901.0, 320.0, '#2f3438', 0.5)]
+    out = [rect(475.5, 50.6, 908.6, 330.8, '#3a3d40', 1.2, ' stroke="#6e6d69" stroke-width="0.5"'),  # glass rim
+           rect_stroke(478.4, 53.5, 905.7, 327.9, '#9b9890', 2.2, 0.8),    # frame line of the touch panel
+           rect(479.6, 54.7, 904.5, 326.7, '#1f2528', 0.5)]                # border of the LCD
     out.append(rect(479.8, 150.0, 491.6, 327.5, '#141414', 1.0))           # FPC tape
     out.append(nt(485.7, 293.5, 'H1043  5 2', 3.6, 90, '#d9d9d9'))
     out.append(rect(481.5, 52.5, 489.5, 148.0, '#f1ede2', 0.8))            # FPC clamp
@@ -1112,9 +1133,10 @@ def shield():
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), '..', '..', 'apps',
                                                               'its-emu-gui', 'assets', 'board.svg')
-    gradients()
+    board = carrier()
+    board_clip()
     svg.add('<g clip-path="url(#board)">')
-    svg.add(carrier())
+    svg.add(board)
     svg.add('</g>')
     svg.add(f'<g transform="{layer(M_NUCLEO)}">')
     svg.add(nucleo())
