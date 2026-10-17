@@ -56,10 +56,15 @@ pub struct PortState {
     pub exti_rise: u16,
     pub exti_fall: u16,
     pub exti_due: u64,
-    /// Pins timer channels capture from, and their edges not yet captured.
+    /// Pins timer channels capture from, and their edges not yet captured;
+    /// time (ps) of the first of them if known (0: when the timer looks).
     pub cap_watch: u16,
     pub cap_rise: u16,
     pub cap_fall: u16,
+    pub cap_ps: [u64; 16],
+    /// Levels that peripherals drive on the pins, per alternate function
+    /// (timer outputs); they apply while the pin selects that function.
+    af_drive: [[Option<bool>; 16]; 16],
     /// Time-averaged levels: cycles each pin was high since `duty_since`,
     /// accounted up to `duty_last` (used for LED brightness).
     high_cycles: [u64; 16],
@@ -92,6 +97,11 @@ impl PortState {
         }
     }
 
+    /// Alternate function selected for a pin (AFRL/AFRH).
+    pub fn af(&self, pin: u32) -> u32 {
+        (self.afr[(pin / 8) as usize] >> (4 * (pin % 8))) & 0xF
+    }
+
     pub fn pull(&self, pin: u32) -> Pull {
         match (self.pupdr >> (2 * pin)) & 3 {
             1 => Pull::Up,
@@ -112,12 +122,15 @@ impl PortState {
             Pull::Down => false,
             Pull::None => self.float_level & bit as u16 != 0,
         };
+        let open_drain = self.otyper & bit != 0;
         match self.mode(pin) {
-            // The peripheral's output level is not modelled: alternate
-            // function pins read their idle level (pull or floating level).
-            PinMode::Alternate => ext.unwrap_or_else(pulled),
+            // Without a peripheral driving it, an alternate function pin
+            // reads its idle level (pull or floating level).
+            PinMode::Alternate => match self.af_drive[pin as usize][self.af(pin) as usize] {
+                Some(high) if !(open_drain && high) => high,
+                _ => ext.unwrap_or_else(pulled),
+            },
             PinMode::Output => {
-                let open_drain = self.otyper & bit != 0;
                 let driven_high = self.odr & bit != 0;
                 if open_drain && driven_high { ext.unwrap_or_else(pulled) } else { driven_high }
             }
@@ -174,14 +187,25 @@ impl PortState {
     /// Runs `f` and records the edges it causes on pins EXTI watches; they
     /// reach EXTI at cycle `due`.
     fn tracked<R>(&mut self, due: u64, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.tracked_at(due, 0, f)
+    }
+
+    /// `tracked` for edges at a known time `edge_ps` (for input capture).
+    fn tracked_at<R>(&mut self, due: u64, edge_ps: u64, f: impl FnOnce(&mut Self) -> R) -> R {
         if self.exti_watch | self.cap_watch == 0 {
             return f(self);
         }
         let before = self.idr() as u16;
         let r = f(self);
         let after = self.idr() as u16;
+        let pending = self.cap_rise | self.cap_fall;
         self.cap_rise |= after & !before & self.cap_watch;
         self.cap_fall |= before & !after & self.cap_watch;
+        for pin in 0..16 {
+            if (self.cap_rise | self.cap_fall) & !pending & (1 << pin) != 0 {
+                self.cap_ps[pin] = edge_ps;
+            }
+        }
         let rise = after & !before & self.exti_watch;
         let fall = before & !after & self.exti_watch;
         if rise | fall != 0 {
@@ -235,6 +259,17 @@ impl GpioBank {
     /// When the earliest edge on pins watched by EXTI reaches EXTI.
     pub fn exti_due(&self) -> Option<u64> {
         self.ports.iter().filter_map(PortState::exti_due).min()
+    }
+
+    /// A peripheral output (alternate function `af`) drives a pin to `level`
+    /// (`None`: released) at cycle `due` = time `edge_ps`.
+    pub fn drive_af(&mut self, port: usize, pin: u32, af: u32, level: Option<bool>, due: u64, edge_ps: u64) {
+        let p = &mut self.ports[port];
+        if p.af_drive[pin as usize][af as usize] == level {
+            return;
+        }
+        p.accumulate(due);
+        p.tracked_at(due, edge_ps, |p| p.af_drive[pin as usize][af as usize] = level);
     }
 
     pub fn level(&self, port: usize, pin: u32) -> bool {

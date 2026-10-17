@@ -33,6 +33,7 @@
  *   adctrig         ADC1 triggered by TIM3 TRGO at 1 kHz
  *   irqlat          interrupt latency: NVIC STIR, EXTI SWIER
  *   dacwave         DAC wave generation, TIM6 trigger with DMA
+ *   timout          timer outputs on PC6 (TIM3/TIM8 CH1)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1583,6 +1584,134 @@ static void cmd_dacwave(void) {
     TIM6->CR2 = 0;
 }
 
+/* ---- Timer outputs on PC6 (TIM3_CH1 AF2, TIM8_CH1 AF3; open on the board):
+ * level read back through IDR against CNT, capture of the own output. */
+static void timout_scan(const char *name, uint32_t level) {
+    uint32_t lo = 0xFFFFFFFF, hi = 0;
+    for (int i = 0; i < 40000; i++) {
+        uint32_t c = TIM3->CNT;
+        uint32_t l = (GPIOC->IDR >> 6) & 1;
+        if (TIM3->CNT != c) {
+            continue;
+        }
+        if (l == level) {
+            lo = c < lo ? c : lo;
+            hi = c > hi ? c : hi;
+        }
+    }
+    if (hi == 0 && lo == 0xFFFFFFFF) {
+        printf("O %s none\n", name);
+    } else {
+        printf("O %s %lu %lu\n", name, (unsigned long)lo, (unsigned long)hi);
+    }
+}
+
+/* PC6 after the pin settled (an open pin follows its pull slowly). */
+static uint32_t timout_level(void) {
+    uint32_t t0 = DWT->CYCCNT;
+    while (DWT->CYCCNT - t0 < 1800) {
+    }
+    return (GPIOC->IDR >> 6) & 1;
+}
+
+static void timout_pc6(uint32_t af) {
+    GPIOC->AFR[0] = (GPIOC->AFR[0] & ~(0xFu << 24)) | (af << 24);
+    GPIOC->MODER = (GPIOC->MODER & ~(3u << 12)) | (2u << 12);
+}
+
+static void cmd_timout(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
+    RCC->APB2ENR |= RCC_APB2ENR_TIM8EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+    __DSB();
+    GPIOC->PUPDR &= ~(3u << 12);
+    timout_pc6(2);
+    // PWM mode 1 at 1 MHz, period 1000: high while CNT < CCR1
+    TIM3->CR1 = 0;
+    TIM3->PSC = 89;
+    TIM3->ARR = 999;
+    TIM3->CCR1 = 300;
+    TIM3->CCMR1 = 6u << 4;
+    TIM3->CCER = TIM_CCER_CC1E;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->CR1 = TIM_CR1_CEN;
+    timout_scan("pwm1_high", 1);
+    timout_scan("pwm1_low", 0);
+    TIM3->CCMR1 = 7u << 4; // PWM mode 2
+    timout_scan("pwm2_high", 1);
+    // a mode change keeps OCxREF until the next match or wrap
+    while (TIM3->CNT < 100 || TIM3->CNT >= 150) {
+    }
+    TIM3->CCMR1 = 6u << 4; // PWM1 would be high below 300
+    printf("O mode_change_stale %lu\n", (unsigned long)timout_level());
+    while (TIM3->CNT >= 100) {
+    }
+    printf("O mode_change_after_wrap %lu\n", (unsigned long)timout_level());
+    TIM3->CCER = TIM_CCER_CC1E | TIM_CCER_CC1P; // active low
+    timout_scan("pwm1_inv_high", 1);
+    TIM3->CCER = TIM_CCER_CC1E;
+    TIM3->CCR1 = 0;
+    timout_scan("pwm1_ccr0_high", 1);
+    TIM3->CCR1 = 1200; // above ARR
+    timout_scan("pwm1_ccr_above_arr_low", 0);
+    // output disabled: the pin reads its pull
+    TIM3->CCR1 = 300;
+    TIM3->CCER = 0;
+    GPIOC->PUPDR |= 1u << 12;
+    printf("O ccxe_off_pullup %lu\n", (unsigned long)timout_level());
+    GPIOC->PUPDR = (GPIOC->PUPDR & ~(3u << 12)) | (2u << 12);
+    printf("O ccxe_off_pulldown %lu\n", (unsigned long)timout_level());
+    // forced levels, counter stopped
+    TIM3->CR1 = 0;
+    TIM3->CCER = TIM_CCER_CC1E;
+    TIM3->CCMR1 = 5u << 4;
+    printf("O force_active %lu\n", (unsigned long)timout_level());
+    TIM3->CCMR1 = 4u << 4;
+    printf("O force_inactive %lu\n", (unsigned long)timout_level());
+    // the frozen mode keeps the level
+    TIM3->CCMR1 = 5u << 4;
+    TIM3->CCMR1 = 0;
+    printf("O frozen_after_active %lu\n", (unsigned long)timout_level());
+    // toggle on match at full speed, CH2 captures TI1 on both edges
+    TIM3->CCMR1 = 4u << 4; // force inactive first
+    TIM3->CCMR1 = (3u << 4) | (2u << 8); // OC1 toggle, IC2 <- TI1
+    TIM3->CCER = TIM_CCER_CC1E | TIM_CCER_CC2E | TIM_CCER_CC2P | TIM_CCER_CC2NP;
+    TIM3->PSC = 0;
+    TIM3->ARR = 999;
+    TIM3->CCR1 = 500;
+    TIM3->CNT = 0;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->SR = 0;
+    TIM3->CR1 = TIM_CR1_CEN;
+    while (!(TIM3->SR & TIM_SR_CC2IF)) {
+    }
+    uint32_t first = TIM3->CCR2;
+    while (!(TIM3->SR & TIM_SR_CC2IF)) {
+    }
+    uint32_t second = TIM3->CCR2;
+    uint32_t level = (GPIOC->IDR >> 6) & 1;
+    TIM3->CR1 = 0;
+    printf("O toggle_capture %lu %lu\n", (unsigned long)first, (unsigned long)second);
+    printf("O toggle_level_after_two %lu\n", (unsigned long)level);
+    TIM3->CCER = 0;
+    TIM3->CCMR1 = 0;
+    // TIM8_CH1: forced active, without and with MOE
+    timout_pc6(3);
+    TIM8->CCMR1 = 5u << 4;
+    TIM8->CCER = TIM_CCER_CC1E;
+    printf("O tim8_moe0 %lu\n", (unsigned long)timout_level());
+    TIM8->BDTR = TIM_BDTR_MOE;
+    printf("O tim8_moe1 %lu\n", (unsigned long)timout_level());
+    TIM8->BDTR = 0;
+    TIM8->CCER = 0;
+    TIM8->CCMR1 = 0;
+    // back to an input without pull
+    GPIOC->MODER &= ~(3u << 12);
+    GPIOC->PUPDR &= ~(3u << 12);
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -1636,6 +1765,8 @@ static void execute(char *line) {
         cmd_irqlat();
     } else if (!strcmp(line, "dacwave")) {
         cmd_dacwave();
+    } else if (!strcmp(line, "timout")) {
+        cmd_timout();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {

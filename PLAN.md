@@ -27,9 +27,9 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
 
 ## Next steps
 
-- Timer outputs on pins (also as capture input: on the board, CH1 toggling
-  PC6 is captured by CH2 12 timer clocks after the match), down/center-aligned
-  counting, slave modes
+- Timers: down/center-aligned counting, slave modes (encoder mode for a
+  rotary encoder), complementary outputs and dead time of TIM1/TIM8, CCR
+  preload (OCxPE)
 - DMA requests of I2C and timers (the controllers and the ADC, U(S)ART, SPI
   and DAC requests exist), DMA FIFO/bursts; then Ethernet (`Programs/Stack`)
 - External devices on the headers (I2C sensor via `I2cDevice`, 1-Wire
