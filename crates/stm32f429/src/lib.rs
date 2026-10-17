@@ -94,6 +94,25 @@ pub struct Stm32f429 {
     pub dma: dma::SharedDma,
 }
 
+/// What an SPI master receives with no device on the bus: the idle level of
+/// its MISO pin (on the board, the open SPI3 header reads 0x00).
+struct OpenMiso {
+    gpio: SharedGpio,
+    pins: &'static [(char, u32)],
+}
+
+impl spi::SpiDevice for OpenMiso {
+    fn transfer(&mut self, _mosi: u16) -> u16 {
+        let g = self.gpio.borrow();
+        let pin = self.pins.iter().find(|&&(p, pin)| g.ports[gpio::port(p)].mode(pin) == gpio::PinMode::Alternate);
+        match pin {
+            Some(&(p, pin)) if g.level(gpio::port(p), pin) => 0xFFFF,
+            Some(_) => 0,
+            None => 0xFFFF,
+        }
+    }
+}
+
 /// Ethernet MAC/DMA registers: reads as idle, writes ignored. The LCD driver
 /// briefly switches the MAC off around every SPI transfer, so the window must
 /// exist (and stay quiet) even though Ethernet is not emulated.
@@ -228,17 +247,23 @@ pub fn build() -> (Bus, Stm32f429) {
     let exti = exti::SharedExti::default();
     bus.attach(0x4001_3800, 0x400, Box::new(exti::Syscfg::new(exti.clone(), gpio.clone(), clocks.clone())));
     bus.attach(0x4001_3C00, 0x400, Box::new(exti::Exti::new(exti, gpio.clone())));
-    bus.attach(0x4001_3000, 0x400, Box::new(Spi::new("SPI1", 35, ApbBus::Apb2, 12, clocks.clone(), spi1.clone())));
+    let spi1_dma = (DmaLine(&[(1, 0, 3), (1, 2, 3)]), DmaLine(&[(1, 3, 3), (1, 5, 3)]));
+    let spi = Spi::new("SPI1", 35, ApbBus::Apb2, 12, clocks.clone(), spi1.clone());
+    bus.attach(0x4001_3000, 0x400, Box::new(spi.with_dma(dma.clone(), spi1_dma.0, spi1_dma.1)));
     // further SPIs and U(S)ARTs: nothing connected (SPI3 is on the SPI header)
-    let spis = [
-        ("SPI2", 0x4000_3800, 36, Apb1, 14),
-        ("SPI3", 0x4000_3C00, 51, Apb1, 15),
-        ("SPI4", 0x4001_3400, 84, Apb2, 13),
-        ("SPI5", 0x4001_5000, 85, Apb2, 20),
-        ("SPI6", 0x4001_5400, 86, Apb2, 21),
+    // DMA request lines (controller, stream, channel) and MISO pins
+    let spis: [(_, _, _, _, _, &'static [_], &'static [_], &'static [_]); 5] = [
+        ("SPI2", 0x4000_3800, 36, Apb1, 14, &[(0, 3, 0)], &[(0, 4, 0)], &[('B', 14), ('C', 2)]),
+        ("SPI3", 0x4000_3C00, 51, Apb1, 15, &[(0, 0, 0), (0, 2, 0)], &[(0, 5, 0), (0, 7, 0)], &[('C', 11), ('B', 4)]),
+        ("SPI4", 0x4001_3400, 84, Apb2, 13, &[(1, 0, 4), (1, 3, 5)], &[(1, 1, 4), (1, 4, 5)], &[('E', 5), ('E', 13)]),
+        ("SPI5", 0x4001_5000, 85, Apb2, 20, &[(1, 3, 2), (1, 5, 7)], &[(1, 4, 2), (1, 6, 7)], &[('F', 8)]),
+        ("SPI6", 0x4001_5400, 86, Apb2, 21, &[(1, 6, 1)], &[(1, 5, 1)], &[('G', 12)]),
     ];
-    for (name, base, irq, apb, en_bit) in spis {
-        let spi = Spi::new(name, irq, apb, en_bit, clocks.clone(), SpiSlot::default());
+    for (name, base, irq, apb, en_bit, rx, tx, miso) in spis {
+        let open: Box<dyn spi::SpiDevice> = Box::new(OpenMiso { gpio: gpio.clone(), pins: miso });
+        let spi =
+            Spi::new(name, irq, apb, en_bit, clocks.clone(), std::rc::Rc::new(std::cell::RefCell::new(Some(open))))
+                .with_dma(dma.clone(), DmaLine(rx), DmaLine(tx));
         let spi = if matches!(name, "SPI2" | "SPI3") { spi.with_i2s() } else { spi };
         bus.attach(base, 0x400, Box::new(spi));
     }

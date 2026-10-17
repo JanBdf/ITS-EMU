@@ -29,6 +29,7 @@
  *   iwdg PR RLR     starts the watchdog, prints the time (us) until it resets
  *   dma             DMA2: memory-to-memory copy, ADC1 scan into memory
  *   dmatx           USART3 transmission by DMA1
+ *   dmaspi          SPI3 transfer by DMA1 (nothing connected)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1300,6 +1301,55 @@ static void cmd_dmatx(void) {
     DMA1->LIFCR = 0x3Du << 22;
 }
 
+/* ---- SPI3 (SPI header, nothing connected) with DMA1: stream 5 sends,
+ * stream 0 receives 8 bytes. */
+static const uint8_t spi_tx[8] = {1, 2, 3, 4, 0x55, 0xAA, 0x0F, 0xF0};
+static volatile uint8_t spi_rx[8];
+
+static void cmd_dmaspi(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->AHB1ENR |= RCC_AHB1ENR_DMA1EN | RCC_AHB1ENR_GPIOCEN;
+    RCC->APB1ENR |= RCC_APB1ENR_SPI3EN;
+    __DSB();
+    // PC10 SCK, PC11 MISO, PC12 MOSI: AF6
+    GPIOC->AFR[1] = (GPIOC->AFR[1] & ~0xFFF00u) | 0x66600u;
+    GPIOC->MODER = (GPIOC->MODER & ~(0x3Fu << 20)) | (0x2Au << 20);
+    SPI3->CR1 = SPI_CR1_MSTR | SPI_CR1_SSM | SPI_CR1_SSI | (4u << 3); // /32
+    SPI3->CR1 |= SPI_CR1_SPE;
+    (void)SPI3->DR;
+    DMA_Stream_TypeDef *rx = DMA1_Stream0, *tx = DMA1_Stream5;
+    rx->CR = 0;
+    tx->CR = 0;
+    DMA1->LIFCR = 0x3D;
+    DMA1->HIFCR = 0x3Du << 6;
+    rx->PAR = (uint32_t)&SPI3->DR;
+    rx->M0AR = (uint32_t)spi_rx;
+    rx->NDTR = 8;
+    rx->CR = DMA_SxCR_MINC;                   // channel 0, P2M, bytes
+    tx->PAR = (uint32_t)&SPI3->DR;
+    tx->M0AR = (uint32_t)spi_tx;
+    tx->NDTR = 8;
+    tx->CR = DMA_SxCR_MINC | DMA_SxCR_DIR_0; // channel 0, M2P, bytes
+    rx->CR |= DMA_SxCR_EN;
+    tx->CR |= DMA_SxCR_EN;
+    uint32_t t0 = DWT->CYCCNT;
+    SPI3->CR2 = SPI_CR2_RXDMAEN | SPI_CR2_TXDMAEN;
+    while (!(DMA1->LISR & DMA_LISR_TCIF0) && DWT->CYCCNT - t0 < 1800000) {
+    }
+    uint32_t t1 = DWT->CYCCNT;
+    printf("S rx %02x %02x %02x %02x %02x %02x %02x %02x\n", spi_rx[0], spi_rx[1], spi_rx[2], spi_rx[3],
+           spi_rx[4], spi_rx[5], spi_rx[6], spi_rx[7]);
+    printf("S lisr %08lx hisr %08lx sr %04lx\n", (unsigned long)DMA1->LISR, (unsigned long)DMA1->HISR,
+           (unsigned long)SPI3->SR);
+    printf("S cycles %lu\n", (unsigned long)(t1 - t0));
+    SPI3->CR2 = 0;
+    SPI3->CR1 = 0;
+    DMA1->LIFCR = 0x3D;
+    DMA1->HIFCR = 0x3Du << 6;
+    GPIOC->MODER &= ~(0x3Fu << 20);
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -1345,6 +1395,8 @@ static void execute(char *line) {
         cmd_dma();
     } else if (!strcmp(line, "dmatx")) {
         cmd_dmatx();
+    } else if (!strcmp(line, "dmaspi")) {
+        cmd_dmaspi();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {
