@@ -1,0 +1,5 @@
+Q sms3 up8 108 dir 0 down3 105 dir 1 glitch 105
+Q sms1 up8 104 dir 0 down3 103 dir 1 glitch 103
+Q sms2 up8 104 dir 0 down3 102 dir 1 glitch 102
+Q sms3_inv1 up8 92 dir 1 down3 95 dir 0 glitch 95
+Q wrap_down cnt 18 uif 1

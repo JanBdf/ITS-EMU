@@ -1,0 +1,17 @@
+O pwm1_high 0 299
+O pwm1_low 300 999
+O pwm2_high 300 999
+O mode_change_stale 0
+O mode_change_after_wrap 1
+O pwm1_inv_high 300 999
+O pwm1_ccr0_high none
+O pwm1_ccr_above_arr_low none
+O ccxe_off_pullup 1
+O ccxe_off_pulldown 0
+O force_active 1
+O force_inactive 0
+O frozen_after_active 1
+O toggle_capture 512 512
+O toggle_level_after_two 0
+O tim8_moe0 0
+O tim8_moe1 1

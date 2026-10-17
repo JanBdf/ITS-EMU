@@ -27,14 +27,22 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
 
 ## Next steps
 
-- Timer outputs on pins (also as capture input: on the board, CH1 toggling
-  PC6 is captured by CH2 12 timer clocks after the match), down/center-aligned
-  counting, slave modes
-- DMA requests of SPI, I2C, DAC and timers (the controllers and the
-  ADC and U(S)ART requests exist), DMA FIFO/bursts; then Ethernet (`Programs/Stack`)
-- External devices on the headers (I2C sensor via `I2cDevice`, 1-Wire
-  sensor, rotary encoder) and in the GUI
-- ADC/DAC hardware triggers (timer TRGO)
+- Timers: slave modes with internal triggers (ITR: timer chaining) or ETR,
+  complementary outputs and dead time of TIM1/TIM8. On the board, UG while
+  the counter is stopped does not change CNT until it runs again (the
+  emulator clears it at once)
+- DMA requests of I2C and timers (the controllers and the ADC, U(S)ART, SPI
+  and DAC requests exist), DMA FIFO/bursts; then Ethernet (`Programs/Stack`)
+- External devices: an I2C sensor via `I2cDevice`; the devices in the GUI
+  (rotary encoder and DS18B20 exist on the command line, `itsboard::devices`;
+  which header pins the course uses for them is still open)
+- ADC injected-group triggers, the CCx/EXTI11 (ADC) and EXTI9 (DAC) trigger
+  sources; TRGO other than the update event (the ADC regular group starts on
+  TIM2/TIM3/TIM8 TRGO, the DAC on TIM2/4/5/6/7/8 TRGO)
+- Time within a block: DWT->CYCCNT reads are placed at their instruction, but
+  peripheral accesses see the end of their translated block, and interrupts
+  pended by a write are taken only at the end of the block (`irqlat` without
+  masking: the emulator is late by the rest of the block)
 - Speed: most time goes to Unicorn's per-block hook and MMIO callbacks
   (measured; the models themselves are cheap)
 - Release builds for students (cargo-dist)

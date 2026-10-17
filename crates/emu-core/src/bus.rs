@@ -160,6 +160,8 @@ pub struct Bus {
     maps: Vec<Mapping>,
     /// Index of the mapping found last (polling loops hit the same one).
     last: usize,
+    /// Devices without registers (circuitry on the pins, see [`Bus::attach_device`]).
+    devices: Vec<Box<dyn Peripheral>>,
     warned: HashSet<u32>,
     /// Earliest [`Peripheral::next_event`] of the peripherals accessed since
     /// the last [`Bus::take_access_event`].
@@ -181,6 +183,12 @@ impl Bus {
         );
         let pos = self.maps.partition_point(|m| m.base < base);
         self.maps.insert(pos, Mapping { base, size, dev });
+    }
+
+    /// Adds a device without registers (external circuitry on the pins): it
+    /// only takes part in time keeping (`update`, `next_event`) and resets.
+    pub fn attach_device(&mut self, dev: Box<dyn Peripheral>) {
+        self.devices.push(dev);
     }
 
     fn find(&mut self, addr: u32) -> Option<&mut Mapping> {
@@ -267,6 +275,9 @@ impl Bus {
         for m in &mut self.maps {
             m.dev.update(ctx);
         }
+        for d in &mut self.devices {
+            d.update(ctx);
+        }
     }
 
     /// Sets the function that gives the wait states of peripheral accesses
@@ -302,12 +313,12 @@ impl Bus {
     }
 
     pub fn next_event(&self) -> Option<u64> {
-        self.maps.iter().filter_map(|m| m.dev.next_event()).min()
+        self.maps.iter().map(|m| &m.dev).chain(&self.devices).filter_map(|d| d.next_event()).min()
     }
 
     pub fn reset(&mut self, kind: ResetKind) {
-        for m in &mut self.maps {
-            m.dev.system_reset(kind);
+        for d in self.maps.iter_mut().map(|m| &mut m.dev).chain(&mut self.devices) {
+            d.system_reset(kind);
         }
     }
 }

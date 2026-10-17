@@ -3,8 +3,10 @@
 //! Conversions take (sampling time + resolution) ADC clocks, after a start
 //! latency of one ADC clock and four APB2 clocks; regular
 //! (single, scan, continuous) and injected groups, EOC/JEOC/OVR/STRT flags,
-//! the analog watchdog and the interrupt are modelled, external triggers and
-//! DMA are not. Readings of the internal channels, of open pins and the
+//! the analog watchdog, the interrupt, DMA requests and the regular group's
+//! external trigger by TIM2/TIM3/TIM8 TRGO (update event) are modelled. The
+//! DAC: software and timer triggers, noise/triangle waves, DMA and underrun
+//! (HwCheck `dacwave`). Readings of the internal channels, of open pins and the
 //! transfer function of the buffered DAC were measured on the board
 //! (HwCheck `adc`).
 
@@ -17,6 +19,7 @@ use emu_core::{Clock, DeviceCtx, Peripheral};
 use crate::dma::{DmaLine, SharedDma};
 use crate::gpio::{NUM_PORTS, PinMode, SharedGpio, port};
 use crate::rcc::SharedClocks;
+use crate::timer::{SharedTriggers, TRGO_TIM2, TRGO_TIM3, TRGO_TIM4, TRGO_TIM5, TRGO_TIM6, TRGO_TIM7, TRGO_TIM8};
 
 /// Analog supply, from VREFINT (1.21 V) reading 1495.
 pub const VDDA: f32 = 3.31;
@@ -123,6 +126,8 @@ struct Unit {
     dr: u32,
     /// DMA requests stopped after the last transfer (DDS = 0) until DMA is set again.
     dma_stopped: bool,
+    /// Last trigger (cycle) that started or was ignored by the regular group.
+    trigger_seen: u64,
     /// Regular group: position in the sequence and end of the running conversion.
     regular: Option<(usize, u64)>,
     injected: Option<(usize, u64)>,
@@ -131,6 +136,19 @@ struct Unit {
 impl Unit {
     fn reset() -> Self {
         Self { htr: 0xFFF, ..Self::default() }
+    }
+
+    /// The timer trigger output that starts the regular group (EXTEN, EXTSEL).
+    fn trigger_source(&self) -> Option<usize> {
+        if (self.cr2 >> 28) & 3 == 0 || self.cr2 & CR2_ADON == 0 {
+            return None;
+        }
+        match (self.cr2 >> 24) & 0xF {
+            6 => Some(TRGO_TIM2),
+            8 => Some(TRGO_TIM3),
+            14 => Some(TRGO_TIM8),
+            _ => None,
+        }
     }
 
     fn regular_len(&self) -> usize {
@@ -199,13 +217,26 @@ pub struct Adc {
     gpio: SharedGpio,
     analog: SharedAnalog,
     dma: SharedDma,
+    triggers: SharedTriggers,
     warned: bool,
 }
 
 impl Adc {
-    pub fn new(clocks: SharedClocks, gpio: SharedGpio, analog: SharedAnalog, dma: SharedDma) -> Self {
+    pub fn new(
+        clocks: SharedClocks,
+        gpio: SharedGpio,
+        analog: SharedAnalog,
+        dma: SharedDma,
+        triggers: SharedTriggers,
+    ) -> Self {
         let units = [Unit::reset(), Unit::reset(), Unit::reset()];
-        Self { units, ccr: 0, clocks, gpio, analog, dma, warned: false }
+        Self { units, ccr: 0, clocks, gpio, analog, dma, triggers, warned: false }
+    }
+
+    /// A trigger that the regular group of `unit` has not seen yet.
+    fn new_trigger(&self, unit: &Unit) -> Option<u64> {
+        let t = self.triggers.get()[unit.trigger_source()?];
+        (t > unit.trigger_seen).then_some(t)
     }
 
     fn clock_enabled(&self, unit: usize) -> bool {
@@ -260,6 +291,21 @@ impl Adc {
 
     /// Completes the conversions that end by `now`.
     fn advance(&mut self, ctx: &mut DeviceCtx) {
+        // timer triggers start the regular group (ignored while it converts)
+        let (per_clock, latency) = (self.cycles_per_adc_clock(ctx), self.start_latency(ctx));
+        for u in 0..3 {
+            if let Some(t) = self.new_trigger(&self.units[u])
+                && t <= ctx.now()
+            {
+                let unit = &mut self.units[u];
+                unit.trigger_seen = t;
+                if unit.regular.is_none() {
+                    let ch = unit.regular_channel(0);
+                    unit.sr |= SR_STRT;
+                    unit.regular = Some((0, t + latency + unit.conversion_adc_clocks(ch) * per_clock));
+                }
+            }
+        }
         for (u, unit) in self.units.iter_mut().enumerate() {
             if DMA_LINES[u].take_end(&self.dma) && unit.cr2 & CR2_DDS == 0 {
                 unit.dma_stopped = true;
@@ -451,10 +497,13 @@ impl Peripheral for Adc {
                     unit.regular = None;
                     unit.injected = None;
                 } else {
-                    if v & 0x3030_0000 != 0 && !self.warned {
+                    let unsupported = v & 0x0030_0000 != 0 || v & 0x3000_0000 != 0 && unit.trigger_source().is_none();
+                    if unsupported && !self.warned {
                         self.warned = true;
-                        log::warn!("ADC: external triggers are not emulated");
+                        log::warn!("ADC: only TIM2/TIM3/TIM8 TRGO are emulated as external triggers");
                     }
+                    // triggers before the trigger was enabled do not count
+                    unit.trigger_seen = unit.trigger_seen.max(ctx.now());
                     if v & CR2_SWSTART != 0 && unit.regular.is_none() {
                         self.start_regular(u, ctx);
                     }
@@ -483,7 +532,9 @@ impl Peripheral for Adc {
     }
 
     fn next_event(&self) -> Option<u64> {
-        self.units.iter().flat_map(|u| [u.regular, u.injected]).flatten().map(|(_, end)| end).min()
+        let conversions = self.units.iter().flat_map(|u| [u.regular, u.injected]).flatten().map(|(_, end)| end);
+        let triggers = self.units.iter().filter_map(|u| self.new_trigger(u));
+        conversions.chain(triggers).min()
     }
 
     fn reset(&mut self) {
@@ -498,14 +549,133 @@ pub struct Dac {
     dhr: [u32; 2],
     dor: [u32; 2],
     sr: u32,
+    /// Per channel: last timer trigger seen, noise LFSR, triangle counter and
+    /// direction, DMA request for the next DHR value.
+    trigger_seen: [u64; 2],
+    lfsr: [u32; 2],
+    triangle: [u32; 2],
+    falling: [bool; 2],
+    dma_request: [bool; 2],
     clocks: SharedClocks,
     analog: SharedAnalog,
+    dma: SharedDma,
+    triggers: SharedTriggers,
     warned: bool,
 }
 
+/// DMA requests of the channels: DMA1 stream 5 / 6, channel 7.
+const DAC_DMA_LINES: [DmaLine; 2] = [DmaLine(&[(0, 5, 7)]), DmaLine(&[(0, 6, 7)])];
+/// TIM6_DAC interrupt; the DAC is source 1 (TIM6 is 0).
+const DAC_IRQ: u32 = 54;
+const DAC_CR_DMAEN: u32 = 1 << 12;
+const DAC_CR_DMAUDRIE: u32 = 1 << 13;
+const DAC_SR_DMAUDR: u32 = 1 << 13;
+const LFSR_RESET: u32 = 0xAAA;
+
 impl Dac {
-    pub fn new(clocks: SharedClocks, analog: SharedAnalog) -> Self {
-        Self { cr: 0, dhr: [0; 2], dor: [0; 2], sr: 0, clocks, analog, warned: false }
+    pub fn new(clocks: SharedClocks, analog: SharedAnalog, dma: SharedDma, triggers: SharedTriggers) -> Self {
+        Self {
+            cr: 0,
+            dhr: [0; 2],
+            dor: [0; 2],
+            sr: 0,
+            trigger_seen: [0; 2],
+            lfsr: [LFSR_RESET; 2],
+            triangle: [0; 2],
+            falling: [false; 2],
+            dma_request: [false; 2],
+            clocks,
+            analog,
+            dma,
+            triggers,
+            warned: false,
+        }
+    }
+
+    /// The timer trigger output selected for a channel (TEN, TSEL).
+    fn trigger_source(&self, ch: usize) -> Option<usize> {
+        let cr = self.ch_cr(ch);
+        if cr & 0x5 != 0x5 {
+            return None;
+        }
+        [
+            Some(TRGO_TIM6),
+            Some(TRGO_TIM8),
+            Some(TRGO_TIM7),
+            Some(TRGO_TIM5),
+            Some(TRGO_TIM2),
+            Some(TRGO_TIM4),
+            None,
+            None,
+        ][((cr >> 3) & 7) as usize]
+    }
+
+    /// A timer trigger that channel `ch` has not seen yet.
+    fn new_trigger(&self, ch: usize) -> Option<u64> {
+        let t = self.triggers.get()[self.trigger_source(ch)?];
+        (t > self.trigger_seen[ch]).then_some(t)
+    }
+
+    /// A trigger: DHR (plus the wave) goes to DOR, the wave steps, and with
+    /// DMA the next value is requested; a request still pending is an underrun.
+    fn trigger(&mut self, ch: usize) {
+        let cr = self.ch_cr(ch);
+        let mask = (2u32 << ((cr >> 8) & 0xF).min(11)) - 1;
+        let wave = match (cr >> 6) & 3 {
+            1 => {
+                let v = self.lfsr[ch];
+                let feedback = if v == 0 { 1 } else { (v ^ (v >> 1) ^ (v >> 4) ^ (v >> 6)) & 1 };
+                self.lfsr[ch] = (v >> 1) | (feedback << 11);
+                v & mask
+            }
+            2.. => {
+                let v = self.triangle[ch];
+                if self.falling[ch] {
+                    self.triangle[ch] = v.saturating_sub(1);
+                    self.falling[ch] = v > 1;
+                } else if v >= mask {
+                    self.triangle[ch] = v - 1;
+                    self.falling[ch] = true;
+                } else {
+                    self.triangle[ch] = v + 1;
+                }
+                v
+            }
+            0 => 0,
+        };
+        self.dor[ch] = (self.dhr[ch] + wave) & 0xFFF;
+        if cr & DAC_CR_DMAEN != 0 {
+            if self.dma_request[ch] {
+                self.sr |= DAC_SR_DMAUDR << (16 * ch);
+            }
+            self.dma_request[ch] = true;
+        }
+    }
+
+    fn sync(&self, ctx: &mut DeviceCtx) {
+        for (ch, line) in DAC_DMA_LINES.iter().enumerate() {
+            line.set(&self.dma, self.dma_request[ch] && self.ch_cr(ch) & DAC_CR_DMAEN != 0);
+        }
+        let irq = (0..2).any(|ch| self.sr & (DAC_SR_DMAUDR << (16 * ch)) != 0 && self.ch_cr(ch) & DAC_CR_DMAUDRIE != 0);
+        ctx.set_irq_source(DAC_IRQ, 1, irq);
+    }
+
+    /// Processes the timer triggers up to `now`.
+    fn advance(&mut self, ctx: &mut DeviceCtx) {
+        let mut any = false;
+        for ch in 0..2 {
+            if let Some(t) = self.new_trigger(ch)
+                && t <= ctx.now()
+            {
+                self.trigger_seen[ch] = t;
+                self.trigger(ch);
+                any = true;
+            }
+        }
+        if any {
+            self.output();
+            self.sync(ctx);
+        }
     }
 
     fn clock_enabled(&self) -> bool {
@@ -562,39 +732,53 @@ impl Peripheral for Dac {
     }
 
     fn read_stable_until(&self, _off: u32, _clock: &Clock) -> u64 {
-        u64::MAX
+        self.next_event().unwrap_or(u64::MAX)
     }
 
-    fn read(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
+    fn read(&mut self, ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
         if !self.clock_enabled() {
             return 0;
         }
+        self.advance(ctx);
         extract_read(self.reg(off & !3), off, size)
     }
 
-    fn write(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32, value: u32) {
+    fn write(&mut self, ctx: &mut DeviceCtx, off: u32, size: u32, value: u32) {
         if !self.clock_enabled() {
             return;
         }
+        self.advance(ctx);
         let reg = off & !3;
         let v = merge_write(self.reg(reg), off, size, value);
         match reg {
             0x00 => {
+                let old = self.cr;
                 self.cr = v & 0x3FFF_3FFF;
                 for ch in 0..2 {
-                    let cr = self.ch_cr(ch);
-                    let software = (cr >> 3) & 7 == 7;
-                    let unsupported = cr & 0x4 != 0 && !software || (cr >> 6) & 3 != 0 || cr & 0x1000 != 0;
-                    if unsupported && !self.warned {
+                    let (was, cr) = (old >> (16 * ch), self.ch_cr(ch));
+                    // the waves restart when the channel is off or the wave changes
+                    if cr & 1 == 0 || (cr >> 6) & 3 != 1 {
+                        self.lfsr[ch] = LFSR_RESET;
+                    }
+                    if cr & 1 == 0 || (cr >> 6) & 3 < 2 {
+                        (self.triangle[ch], self.falling[ch]) = (0, false);
+                    }
+                    // DMAEN requests the first value
+                    if cr & !was & DAC_CR_DMAEN != 0 {
+                        self.dma_request[ch] = true;
+                    }
+                    // triggers before the trigger was enabled do not count
+                    self.trigger_seen[ch] = self.trigger_seen[ch].max(ctx.now());
+                    if cr & 0x4 != 0 && (cr >> 3) & 7 == 6 && !self.warned {
                         self.warned = true;
-                        log::warn!("DAC: hardware triggers, wave generation and DMA are not emulated");
+                        log::warn!("DAC: the EXTI9 trigger is not emulated");
                     }
                 }
             }
             0x04 => {
                 for ch in 0..2 {
-                    if v & (1 << ch) != 0 && (self.ch_cr(ch) >> 3) & 7 == 7 {
-                        self.load(ch, true);
+                    if v & (1 << ch) != 0 && self.ch_cr(ch) & 0x3C == 0x3C {
+                        self.trigger(ch);
                     }
                 }
             }
@@ -611,14 +795,32 @@ impl Peripheral for Dac {
             _ => {}
         }
         if (0x08..=0x28).contains(&reg) {
+            // a write to DHR answers the DMA request
+            let dual = reg >= 0x20;
+            for ch in 0..2 {
+                if dual || (reg >= 0x14) == (ch == 1) {
+                    self.dma_request[ch] = false;
+                }
+            }
             self.load(0, false);
             self.load(1, false);
         }
         self.output();
+        self.sync(ctx);
+    }
+
+    fn update(&mut self, ctx: &mut DeviceCtx) {
+        self.advance(ctx);
+    }
+
+    fn next_event(&self) -> Option<u64> {
+        (0..2).filter_map(|ch| self.new_trigger(ch)).min()
     }
 
     fn reset(&mut self) {
         (self.cr, self.dhr, self.dor, self.sr) = (0, [0; 2], [0; 2], 0);
+        (self.trigger_seen, self.lfsr, self.triangle) = ([0; 2], [LFSR_RESET; 2], [0; 2]);
+        (self.falling, self.dma_request) = ([false; 2], [false; 2]);
         self.output();
     }
 }
@@ -634,7 +836,7 @@ mod tests {
         let hz = 180_000_000;
         clocks.set(Clocks { hclk: hz, pclk2: hz / 2, apb2enr: 1 << 8, ..Clocks::default() });
         let analog = SharedAnalog::default();
-        (Adc::new(clocks, SharedGpio::default(), analog.clone(), SharedDma::default()), analog)
+        (Adc::new(clocks, SharedGpio::default(), analog.clone(), SharedDma::default(), Default::default()), analog)
     }
 
     #[test]
