@@ -1,6 +1,6 @@
 //! Runs the clang-built self-test firmware in `tests/fixtures/micro`.
 
-use emu_core::{Bus, ElfImage, Machine, MachineConfig, MemoryMap, StopReason, WatchKind};
+use emu_core::{Bus, CoreReg, ElfImage, Machine, MachineConfig, MemoryMap, StopReason, WatchKind};
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!("{}/../../tests/fixtures/micro/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -178,4 +178,70 @@ fn breakpoint_at_current_pc_does_not_block_run() {
     m.add_breakpoint(pc);
     assert_eq!(m.run(1_000), StopReason::Budget);
     assert!(m.clock().cycles() >= 1_000);
+}
+
+/// Boots hand-assembled Thumb code: vector table (SP 0x2000_1000, all fault
+/// handlers at 0x0800_0060 = `BKPT #2`), `code` at the reset vector 0x0800_0040.
+fn boot_thumb(code: &[u16], literals: &[u32]) -> Machine {
+    let mut flash = vec![0u8; 0x80];
+    let mut vectors = [0x0800_0061u32; 16];
+    vectors[0] = 0x2000_1000;
+    vectors[1] = 0x0800_0041;
+    for (i, v) in vectors.iter().enumerate() {
+        flash[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    let mut at = 0x40;
+    for half in code {
+        flash[at..at + 2].copy_from_slice(&half.to_le_bytes());
+        at += 2;
+    }
+    for lit in literals {
+        flash[at..at + 4].copy_from_slice(&lit.to_le_bytes());
+        at += 4;
+    }
+    flash[0x60..0x62].copy_from_slice(&0xBE02u16.to_le_bytes());
+    let mut m = Machine::new(stm32f4_config(), Bus::new()).unwrap();
+    m.load_bin(0x0800_0000, &flash).unwrap();
+    m.reset();
+    m
+}
+
+#[test]
+fn code_runs_from_ram_and_may_modify_itself() {
+    let mut m = boot_thumb(
+        &[
+            0x4803, // ldr r0, =0x2000_0101
+            0x4780, // blx r0           (r1 = 42)
+            0x1C0C, // adds r4, r1, #0
+            0x4A03, // ldr r2, =0x2000_0100
+            0x4B03, // ldr r3, =0x2107  (movs r1, #7)
+            0x8013, // strh r3, [r2]    (patches the code in RAM)
+            0x4780, // blx r0           (r1 = 7)
+            0xBE01, // bkpt #1
+        ],
+        &[0x2000_0101, 0x2000_0100, 0x2107],
+    );
+    // in RAM: movs r1, #42; bx lr
+    assert!(m.write_mem(0x2000_0100, &[0x2A, 0x21, 0x70, 0x47]));
+    let stop = m.run(10_000);
+    assert_eq!(stop, StopReason::Breakpoint { pc: 0x0800_004E });
+    assert_eq!(m.reg(CoreReg::R(4)), 42, "code in RAM ran");
+    assert_eq!(m.reg(CoreReg::R(1)), 7, "the modified code ran");
+}
+
+#[test]
+fn fetch_from_peripheral_space_faults() {
+    let mut m = boot_thumb(
+        &[
+            0x4801, // ldr r0, =0x4000_0001
+            0x4700, // bx r0
+            0xBF00, 0xBF00,
+        ],
+        &[0x4000_0001],
+    );
+    let stop = m.run(10_000);
+    assert_eq!(stop, StopReason::Breakpoint { pc: 0x0800_0060 }, "fault handler");
+    let scs = &m.system().scs;
+    assert_ne!(scs.cfsr & (1 << 9), 0, "CFSR.PRECISERR {:#x}", scs.cfsr);
+    assert_ne!(scs.hfsr & (1 << 30), 0, "escalated to HardFault {:#x}", scs.hfsr);
 }
