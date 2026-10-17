@@ -370,10 +370,9 @@ struct IdleDetector {
     prev_block: u64,
     /// Snapshot taken at a visit of `head`.
     snapshot: Option<Snapshot>,
-    /// Reused buffers for RAM snapshots and comparisons (allocating a fresh
-    /// 256 KiB buffer each time costs a page fault per 4 KiB).
+    /// Reused buffer for RAM snapshots (allocating a fresh 256 KiB buffer
+    /// each time costs a page fault per 4 KiB).
     ram_spare: Vec<u8>,
-    ram_scratch: Vec<u8>,
     /// Nothing outside registers/RAM happened since the snapshot.
     clean: bool,
     /// RAM may have been written since the snapshot.
@@ -392,7 +391,7 @@ struct Snapshot {
     /// Cycle count when the snapshot was taken.
     at: u64,
     regs: [u32; IDLE_REGS.len()],
-    /// RAM contents, if stores happened in the previous period.
+    /// RAM contents, taken once the registers repeat in a loop that stores.
     ram: Option<Vec<u8>>,
 }
 
@@ -447,50 +446,66 @@ impl IdleDetector {
     }
 
     fn read_regs(uc: &Unicorn<System>) -> [u32; IDLE_REGS.len()] {
+        // one call instead of one per register
+        let mut ids = IDLE_REGS;
         let mut r = [0u32; IDLE_REGS.len()];
-        for (v, reg) in r.iter_mut().zip(IDLE_REGS) {
-            *v = uc.reg_read(reg).unwrap_or(0) as u32;
+        if let Ok(values) = uc.reg_read_batch(&mut ids, IDLE_REGS.len() as i32) {
+            for (v, value) in r.iter_mut().zip(values) {
+                *v = value as u32;
+            }
         }
         r
     }
 
-    fn read_ram(uc: &Unicorn<System>, buf: &mut Vec<u8>) {
-        let ram = &uc.get_data().config.memory.ram;
-        buf.resize(ram.iter().map(|&(_, size)| size as usize).sum(), 0);
-        let mut off = 0;
-        for &(base, size) in ram {
-            let _ = uc.mem_read(u64::from(base), &mut buf[off..off + size as usize]);
-            off += size as usize;
-        }
-    }
-
     /// Compares RAM with the snapshot's copy.
-    fn ram_unchanged(uc: &mut Unicorn<System>) -> bool {
-        let mut scratch = std::mem::take(&mut uc.get_data_mut().idle.ram_scratch);
-        Self::read_ram(uc, &mut scratch);
-        let d = &mut uc.get_data_mut().idle;
-        let same = d.snapshot.as_ref().and_then(|s| s.ram.as_ref()).is_some_and(|ram| *ram == scratch);
-        d.ram_scratch = scratch;
-        same
+    fn ram_unchanged(sys: &System) -> bool {
+        let Some(copy) = sys.idle.snapshot.as_ref().and_then(|s| s.ram.as_deref()) else { return false };
+        let mut rest = copy;
+        for region in sys.ram.writable() {
+            let Some((head, tail)) = rest.split_at_checked(region.len()) else { return false };
+            if head != region {
+                return false;
+            }
+            rest = tail;
+        }
+        rest.is_empty()
     }
 
     fn take_snapshot(uc: &mut Unicorn<System>, with_ram: bool) {
         let regs = Self::read_regs(uc);
+        let sys = uc.get_data_mut();
+        let d = &mut sys.idle;
         let ram = with_ram.then(|| {
-            let d = &mut uc.get_data_mut().idle;
             let mut buf = match d.snapshot.take().and_then(|s| s.ram) {
                 Some(old) => old,
                 None => std::mem::take(&mut d.ram_spare),
             };
-            Self::read_ram(uc, &mut buf);
+            buf.clear();
+            for region in sys.ram.writable() {
+                buf.extend_from_slice(region);
+            }
             buf
         });
-        let at = uc.get_data().clock.cycles();
-        let d = &mut uc.get_data_mut().idle;
-        d.snapshot = Some(Snapshot { at, regs, ram });
-        d.clean = true;
-        d.stored = false;
-        d.stable_until = u64::MAX;
+        if let Some(old) = d.snapshot.take().and_then(|s| s.ram) {
+            d.ram_spare = old;
+        }
+        d.snapshot = Some(Snapshot { at: sys.clock.cycles(), regs, ram });
+        d.restart_period();
+    }
+
+    /// The registers and RAM are those of the snapshot (just compared): a new
+    /// period starts at `now` without copying anything.
+    fn restamp(&mut self, now: u64) {
+        if let Some(s) = &mut self.snapshot {
+            s.at = now;
+        }
+        self.restart_period();
+    }
+
+    fn restart_period(&mut self) {
+        self.clean = true;
+        self.stored = false;
+        self.stable_until = u64::MAX;
     }
 
     /// Called at the start of every block. Returns `Some(t)` if the core
@@ -525,7 +540,7 @@ impl IdleDetector {
                     d.restart();
                     Action::Nothing
                 } else if d.snapshot.is_none() {
-                    Action::Snapshot { with_ram: d.stored }
+                    Action::Snapshot { with_ram: false }
                 } else if d.skip > 0 {
                     d.skip -= 1;
                     Action::Nothing
@@ -542,22 +557,17 @@ impl IdleDetector {
             }
             Action::Compare => {
                 let regs = Self::read_regs(uc);
-                let (regs_same, ram_check) = {
-                    let d = &uc.get_data().idle;
-                    let snap = d.snapshot.as_ref().expect("snapshot present");
-                    (regs == snap.regs, d.stored.then_some(snap.ram.is_some()))
-                };
-                let same = regs_same
-                    && match ram_check {
-                        None => true,
-                        Some(true) => Self::ram_unchanged(uc),
-                        Some(false) => false,
-                    };
-                let d = &uc.get_data().idle;
+                let sys = uc.get_data();
+                let d = &sys.idle;
                 let snap = d.snapshot.as_ref().expect("snapshot present");
-                if !same {
-                    let with_ram = d.stored;
-                    Self::take_snapshot(uc, with_ram);
+                let regs_same = regs == snap.regs;
+                if regs_same && d.stored && snap.ram.is_none() {
+                    // The loop stores: compare RAM from the next visit on.
+                    Self::take_snapshot(uc, true);
+                    None
+                } else if !regs_same || (d.stored && !Self::ram_unchanged(sys)) {
+                    // RAM is only worth copying once the registers repeat.
+                    Self::take_snapshot(uc, regs_same);
                     // The loop makes progress (e.g. a counting delay loop):
                     // compare less and less often.
                     let d = &mut uc.get_data_mut().idle;
@@ -568,15 +578,14 @@ impl IdleDetector {
                     // Skip whole iterations whose reads all happen before
                     // `stable_until` and the slice end, so that the timing
                     // stays identical to running them.
-                    let (at, with_ram) = (snap.at, d.stored);
-                    let until = d.stable_until.min(uc.get_data().slice_end);
-                    let now = uc.get_data().clock.cycles();
-                    let period = now - at;
+                    let until = d.stable_until.min(sys.slice_end);
+                    let now = sys.clock.cycles();
+                    let period = now - snap.at;
                     if period == 0 || until <= now {
                         None
                     } else {
                         // The next period starts here; its reads are noted afresh.
-                        Self::take_snapshot(uc, with_ram);
+                        uc.get_data_mut().idle.restamp(now);
                         Some(now + (until - now) / period * period)
                     }
                 }
