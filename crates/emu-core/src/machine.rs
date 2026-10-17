@@ -136,6 +136,12 @@ pub struct System {
     fell_through: Option<(u64, BlockTiming)>,
     /// Division instructions found in new blocks, waiting for their timing hook.
     new_divs: Vec<DivSite>,
+    /// Address and size of the executing block (`None` while stepping) and
+    /// the number of DWT_CYCCNT reads in it so far (see `cyccnt_now`).
+    block: Option<(u64, u32)>,
+    cyccnt_reads: usize,
+    /// Word loads of the block that last read DWT_CYCCNT (polling loops).
+    cyccnt_sites: Option<((u64, u32), Vec<timing::LoadSite>)>,
     /// Division instructions that have a timing hook.
     hooked_divs: std::collections::HashSet<u32>,
 }
@@ -579,8 +585,10 @@ fn core_reg(n: u8) -> RegisterARM {
     [R0, R1, R2, R3, R4, R5, R6, R7, R8, R9, R10, R11, R12, SP, LR, PC][usize::from(n & 15)]
 }
 
-// Cortex-M4 exception latencies (zero wait state memory).
-const EXCEPTION_ENTRY_CYCLES: u64 = 12;
+// Cortex-M4 exception latencies. Entry: the TRM's 12 cycles are for zero
+// wait state memory; measured from an NVIC->STIR write (interrupts masked, then
+// CPSIE) to the handler's first instruction: 21 (HwCheck `irqlat`).
+const EXCEPTION_ENTRY_CYCLES: u64 = 21;
 const EXCEPTION_RETURN_CYCLES: u64 = 10;
 const TAIL_CHAIN_CYCLES: u64 = 6;
 
@@ -611,6 +619,9 @@ impl Machine {
             branch_from: None,
             fell_through: None,
             new_divs: Vec::new(),
+            block: None,
+            cyccnt_reads: 0,
+            cyccnt_sites: None,
             hooked_divs: std::collections::HashSet::new(),
             block_insns: BlockCache::new(),
             last_invalid: None,
@@ -695,11 +706,12 @@ impl Machine {
             u64::from(PPB_SIZE),
             Some(|uc: &mut Unicorn<System>, off: u64, size: usize| {
                 let ipsr = uc.reg_read(RegisterARM::IPSR).unwrap_or(0) as u32;
+                let at = if off == 0x1004 { Self::cyccnt_now(uc) } else { uc.get_data().clock.cycles() };
                 let sys = uc.get_data_mut();
                 let now = sys.clock.cycles();
                 let until = sys.scs.read_stable_until(off as u32, now);
                 sys.idle.note_read(until, now);
-                u64::from(sys.scs.read(&sys.nvic, now, ipsr, off as u32, size as u32))
+                u64::from(sys.scs.read(&sys.nvic, at, ipsr, off as u32, size as u32))
             }),
             Some(|uc: &mut Unicorn<System>, off: u64, size: usize, value: u64| {
                 let sys = uc.get_data_mut();
@@ -746,6 +758,7 @@ impl Machine {
             if uc.get_data().stepping {
                 // `step` accounts for its single instruction. (With a branch the
                 // hook also fires for the next block before the step ends.)
+                uc.get_data_mut().block = None;
                 return;
             }
             // Taken branch at the end of the previous block: pipeline refill
@@ -817,6 +830,8 @@ impl Machine {
             };
             let cycles = u64::from(info.cycles + refill + stall - saving);
             sys.clock.advance(cycles);
+            sys.block = Some((addr, size));
+            sys.cyccnt_reads = 0;
             // Peripheral accesses see the time of their block; a block that
             // continues a split one counts as part of it.
             sys.mmio_shift = if continues { sys.mmio_shift + cycles } else { 0 };
@@ -926,6 +941,7 @@ impl Machine {
             let end = u64::from(addr) + data.len() as u64;
             let _ = self.uc.ctl_remove_cache(u64::from(addr), end);
             self.uc.get_data_mut().block_insns.clear();
+            self.uc.get_data_mut().cyccnt_sites = None;
             let (stale, keep) = std::mem::take(&mut self.div_hooks)
                 .into_iter()
                 .partition(|&(a, _)| u64::from(a) + 4 > u64::from(addr) && u64::from(a) < end);
@@ -936,6 +952,38 @@ impl Machine {
             }
         }
         ok
+    }
+
+    /// Time of a DWT_CYCCNT read. The clock counts a block's cycles at its
+    /// start; a measurement must not depend on where the translator splits
+    /// blocks, so the read is placed at its instruction: the nth read in the
+    /// block is the nth word load that addresses CYCCNT. (An earlier load
+    /// whose base register is changed to CYCCNT's address afterwards matches,
+    /// too; the error stays within the block, as without placing.)
+    fn cyccnt_now(uc: &mut Unicorn<System>) -> u64 {
+        let sys = uc.get_data_mut();
+        let now = sys.clock.cycles();
+        let Some(block) = sys.block else {
+            return now;
+        };
+        let n = sys.cyccnt_reads;
+        sys.cyccnt_reads += 1;
+        if sys.cyccnt_sites.as_ref().is_none_or(|(b, _)| *b != block) {
+            let mut code = vec![0u8; block.1 as usize];
+            if uc.mem_read(block.0, &mut code).is_err() {
+                return now;
+            }
+            uc.get_data_mut().cyccnt_sites = Some((block, timing::load_sites(&code)));
+        }
+        let target = PPB_BASE + 0x1004;
+        let reg = |r: u8| uc.reg_read(core_reg(r)).unwrap_or(0) as u32;
+        let sites = uc.get_data().cyccnt_sites.as_ref().map_or(&[][..], |(_, s)| s);
+        let after = if sites.len() == 1 && n == 0 {
+            sites.first() // the only candidate (polling loops): no register reads
+        } else {
+            sites.iter().filter(|(a, _)| a.resolve(reg) == target).nth(n)
+        };
+        now - after.map_or(0, |(_, cycles)| u64::from(*cycles))
     }
 
     /// Installs timing hooks for division instructions found since the last

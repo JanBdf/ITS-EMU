@@ -34,7 +34,13 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   ADC and U(S)ART requests exist), DMA FIFO/bursts; then Ethernet (`Programs/Stack`)
 - External devices on the headers (I2C sensor via `I2cDevice`, 1-Wire
   sensor, rotary encoder) and in the GUI
-- ADC/DAC hardware triggers (timer TRGO)
+- DAC hardware triggers (TIM6/TIM7 TRGO ...), ADC injected-group triggers and
+  the CCx/EXTI11 trigger sources (the regular group starts on TIM2/TIM3/TIM8
+  TRGO = update event)
+- Time within a block: DWT->CYCCNT reads are placed at their instruction, but
+  peripheral accesses see the end of their translated block, and interrupts
+  pended by a write are taken only at the end of the block (`irqlat` without
+  masking: the emulator is late by the rest of the block)
 - Speed: most time goes to Unicorn's per-block hook and MMIO callbacks
   (measured; the models themselves are cheap)
 - Release builds for students (cargo-dist)

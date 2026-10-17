@@ -174,6 +174,7 @@ pub fn build() -> (Bus, Stm32f429) {
     let clocks = SharedClocks::default();
     let mut bus = Bus::new();
     let dma = dma::SharedDma::default();
+    let triggers = timer::SharedTriggers::default();
 
     let spi1 = SpiSlot::default();
     let usart3 = SharedSerial::default();
@@ -186,6 +187,11 @@ pub fn build() -> (Bus, Stm32f429) {
     ];
     for (name, base, irq, wide, en_bit, pins) in timers {
         let t = GpTimer::new(name, irq, wide, ApbBus::Apb1, en_bit, clocks.clone()).with_inputs(pins, gpio.clone());
+        let t = match name {
+            "TIM2" => t.with_trgo(triggers.clone(), timer::TRGO_TIM2),
+            "TIM3" => t.with_trgo(triggers.clone(), timer::TRGO_TIM3),
+            _ => t,
+        };
         tim_pwm.push(t.pwm());
         bus.attach(base, 0x400, Box::new(t));
     }
@@ -195,7 +201,13 @@ pub fn build() -> (Bus, Stm32f429) {
     let g = || gpio.clone();
     let more = [
         (0x4001_0000, timer("TIM1", 25, Apb2, 0).advanced(27).with_inputs(&TIM1_PINS, g())),
-        (0x4001_0400, timer("TIM8", 44, Apb2, 1).advanced(46).with_inputs(&TIM8_PINS, g())),
+        (
+            0x4001_0400,
+            timer("TIM8", 44, Apb2, 1)
+                .advanced(46)
+                .with_inputs(&TIM8_PINS, g())
+                .with_trgo(triggers.clone(), timer::TRGO_TIM8),
+        ),
         (0x4000_1000, timer("TIM6", 54, Apb1, 4).with_channels(0)),
         (0x4000_1400, timer("TIM7", 55, Apb1, 5).with_channels(0)),
         (0x4001_4000, timer("TIM9", 24, Apb2, 16).with_channels(2).shared_irq(1).with_inputs(&TIM9_PINS, g())),
@@ -243,7 +255,11 @@ pub fn build() -> (Bus, Stm32f429) {
     }
     let analog = adc::SharedAnalog::default();
     bus.attach(0x4000_7400, 0x400, Box::new(adc::Dac::new(clocks.clone(), analog.clone())));
-    bus.attach(0x4001_2000, 0x400, Box::new(adc::Adc::new(clocks.clone(), gpio.clone(), analog.clone(), dma.clone())));
+    bus.attach(
+        0x4001_2000,
+        0x400,
+        Box::new(adc::Adc::new(clocks.clone(), gpio.clone(), analog.clone(), dma.clone(), triggers.clone())),
+    );
     let exti = exti::SharedExti::default();
     bus.attach(0x4001_3800, 0x400, Box::new(exti::Syscfg::new(exti.clone(), gpio.clone(), clocks.clone())));
     bus.attach(0x4001_3C00, 0x400, Box::new(exti::Exti::new(exti, gpio.clone())));

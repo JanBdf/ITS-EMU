@@ -1,0 +1,2 @@
+G eocs_10_5ms 11
+G tim3_cnt_at_eoc 22

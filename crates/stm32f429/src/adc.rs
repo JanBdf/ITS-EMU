@@ -3,8 +3,8 @@
 //! Conversions take (sampling time + resolution) ADC clocks, after a start
 //! latency of one ADC clock and four APB2 clocks; regular
 //! (single, scan, continuous) and injected groups, EOC/JEOC/OVR/STRT flags,
-//! the analog watchdog and the interrupt are modelled, external triggers and
-//! DMA are not. Readings of the internal channels, of open pins and the
+//! the analog watchdog, the interrupt, DMA requests and the regular group's
+//! external trigger by TIM2/TIM3/TIM8 TRGO (update event) are modelled. Readings of the internal channels, of open pins and the
 //! transfer function of the buffered DAC were measured on the board
 //! (HwCheck `adc`).
 
@@ -17,6 +17,7 @@ use emu_core::{Clock, DeviceCtx, Peripheral};
 use crate::dma::{DmaLine, SharedDma};
 use crate::gpio::{NUM_PORTS, PinMode, SharedGpio, port};
 use crate::rcc::SharedClocks;
+use crate::timer::{SharedTriggers, TRGO_TIM2, TRGO_TIM3, TRGO_TIM8};
 
 /// Analog supply, from VREFINT (1.21 V) reading 1495.
 pub const VDDA: f32 = 3.31;
@@ -123,6 +124,8 @@ struct Unit {
     dr: u32,
     /// DMA requests stopped after the last transfer (DDS = 0) until DMA is set again.
     dma_stopped: bool,
+    /// Last trigger (cycle) that started or was ignored by the regular group.
+    trigger_seen: u64,
     /// Regular group: position in the sequence and end of the running conversion.
     regular: Option<(usize, u64)>,
     injected: Option<(usize, u64)>,
@@ -131,6 +134,19 @@ struct Unit {
 impl Unit {
     fn reset() -> Self {
         Self { htr: 0xFFF, ..Self::default() }
+    }
+
+    /// The timer trigger output that starts the regular group (EXTEN, EXTSEL).
+    fn trigger_source(&self) -> Option<usize> {
+        if (self.cr2 >> 28) & 3 == 0 || self.cr2 & CR2_ADON == 0 {
+            return None;
+        }
+        match (self.cr2 >> 24) & 0xF {
+            6 => Some(TRGO_TIM2),
+            8 => Some(TRGO_TIM3),
+            14 => Some(TRGO_TIM8),
+            _ => None,
+        }
     }
 
     fn regular_len(&self) -> usize {
@@ -199,13 +215,26 @@ pub struct Adc {
     gpio: SharedGpio,
     analog: SharedAnalog,
     dma: SharedDma,
+    triggers: SharedTriggers,
     warned: bool,
 }
 
 impl Adc {
-    pub fn new(clocks: SharedClocks, gpio: SharedGpio, analog: SharedAnalog, dma: SharedDma) -> Self {
+    pub fn new(
+        clocks: SharedClocks,
+        gpio: SharedGpio,
+        analog: SharedAnalog,
+        dma: SharedDma,
+        triggers: SharedTriggers,
+    ) -> Self {
         let units = [Unit::reset(), Unit::reset(), Unit::reset()];
-        Self { units, ccr: 0, clocks, gpio, analog, dma, warned: false }
+        Self { units, ccr: 0, clocks, gpio, analog, dma, triggers, warned: false }
+    }
+
+    /// A trigger that the regular group of `unit` has not seen yet.
+    fn new_trigger(&self, unit: &Unit) -> Option<u64> {
+        let t = self.triggers.get()[unit.trigger_source()?];
+        (t > unit.trigger_seen).then_some(t)
     }
 
     fn clock_enabled(&self, unit: usize) -> bool {
@@ -260,6 +289,21 @@ impl Adc {
 
     /// Completes the conversions that end by `now`.
     fn advance(&mut self, ctx: &mut DeviceCtx) {
+        // timer triggers start the regular group (ignored while it converts)
+        let (per_clock, latency) = (self.cycles_per_adc_clock(ctx), self.start_latency(ctx));
+        for u in 0..3 {
+            if let Some(t) = self.new_trigger(&self.units[u])
+                && t <= ctx.now()
+            {
+                let unit = &mut self.units[u];
+                unit.trigger_seen = t;
+                if unit.regular.is_none() {
+                    let ch = unit.regular_channel(0);
+                    unit.sr |= SR_STRT;
+                    unit.regular = Some((0, t + latency + unit.conversion_adc_clocks(ch) * per_clock));
+                }
+            }
+        }
         for (u, unit) in self.units.iter_mut().enumerate() {
             if DMA_LINES[u].take_end(&self.dma) && unit.cr2 & CR2_DDS == 0 {
                 unit.dma_stopped = true;
@@ -451,10 +495,13 @@ impl Peripheral for Adc {
                     unit.regular = None;
                     unit.injected = None;
                 } else {
-                    if v & 0x3030_0000 != 0 && !self.warned {
+                    let unsupported = v & 0x0030_0000 != 0 || v & 0x3000_0000 != 0 && unit.trigger_source().is_none();
+                    if unsupported && !self.warned {
                         self.warned = true;
-                        log::warn!("ADC: external triggers are not emulated");
+                        log::warn!("ADC: only TIM2/TIM3/TIM8 TRGO are emulated as external triggers");
                     }
+                    // triggers before the trigger was enabled do not count
+                    unit.trigger_seen = unit.trigger_seen.max(ctx.now());
                     if v & CR2_SWSTART != 0 && unit.regular.is_none() {
                         self.start_regular(u, ctx);
                     }
@@ -483,7 +530,9 @@ impl Peripheral for Adc {
     }
 
     fn next_event(&self) -> Option<u64> {
-        self.units.iter().flat_map(|u| [u.regular, u.injected]).flatten().map(|(_, end)| end).min()
+        let conversions = self.units.iter().flat_map(|u| [u.regular, u.injected]).flatten().map(|(_, end)| end);
+        let triggers = self.units.iter().filter_map(|u| self.new_trigger(u));
+        conversions.chain(triggers).min()
     }
 
     fn reset(&mut self) {
@@ -634,7 +683,7 @@ mod tests {
         let hz = 180_000_000;
         clocks.set(Clocks { hclk: hz, pclk2: hz / 2, apb2enr: 1 << 8, ..Clocks::default() });
         let analog = SharedAnalog::default();
-        (Adc::new(clocks, SharedGpio::default(), analog.clone(), SharedDma::default()), analog)
+        (Adc::new(clocks, SharedGpio::default(), analog.clone(), SharedDma::default(), Default::default()), analog)
     }
 
     #[test]
