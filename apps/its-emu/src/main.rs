@@ -11,8 +11,10 @@ use emu_core::{CoreReg, ElfImage, Machine, StopReason};
 #[derive(Parser, Debug)]
 #[command(version, about = "ITS-Board emulator (STM32F429ZI)")]
 struct Args {
-    /// Firmware image (.axf / .elf)
-    firmware: PathBuf,
+    /// Firmware image (.axf / .elf). Without one (only with --gdb) the flash is
+    /// empty and the debugger loads the program
+    #[arg(required_unless_present = "gdb")]
+    firmware: Option<PathBuf>,
 
     /// Font table to flash at 0x0810_0000 instead of the built-in fonts.bin of ITS_BRD_LIB
     #[arg(long)]
@@ -134,13 +136,19 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let args = Args::parse();
 
-    let data = std::fs::read(&args.firmware).with_context(|| format!("reading {}", args.firmware.display()))?;
     let fonts = match &args.fonts {
         Some(path) => Some(std::fs::read(path).with_context(|| format!("reading {}", path.display()))?),
         None if args.no_fonts => None,
         None => Some(itsboard::sim::DEFAULT_FONTS.to_vec()),
     };
-    let itsboard::Simulator { mut machine, board, image } = itsboard::Simulator::new(&data, fonts.as_deref())?;
+    let sim = match &args.firmware {
+        Some(path) => {
+            let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            itsboard::Simulator::new(&data, fonts.as_deref())?
+        }
+        None => itsboard::Simulator::blank(fonts.as_deref())?,
+    };
+    let itsboard::Simulator { mut machine, board, mut image } = sim;
     let mcu = board.mcu().clone();
     machine.system_mut().idle_skipping = !args.no_idle_skip;
 
@@ -172,6 +180,10 @@ fn main() -> Result<()> {
         let execution = match &mut gdb {
             Some(server) => {
                 let e = server.poll(&mut machine);
+                if let Some((path, loaded)) = machine.take_gdb_loaded() {
+                    println!("debugger loaded {}", path.display());
+                    image = loaded;
+                }
                 waiting_for_debugger &= !server.has_controller();
                 if waiting_for_debugger { Execution::Halted } else { e }
             }

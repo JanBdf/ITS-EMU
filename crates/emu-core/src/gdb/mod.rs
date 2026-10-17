@@ -23,6 +23,9 @@ use gdbstub::target::ext::breakpoints::{
 use gdbstub::target::ext::monitor_cmd::{ConsoleOutput, MonitorCmd, MonitorCmdOps};
 use gdbstub::target::{Target, TargetError, TargetResult};
 
+use std::path::{Path, PathBuf};
+
+use crate::ElfImage;
 use crate::exception::CoreReg;
 use crate::machine::{Machine, StopReason, WatchKind};
 use arch::CortexMRegId;
@@ -62,6 +65,25 @@ const CORE_REGS: [CoreReg; 23] = [
 ];
 
 impl Machine {
+    /// `monitor load`: flashes the segments of an ELF file like a programmer
+    /// does (GDB's own `load` writes sections at their run addresses, which
+    /// loses the RAM initialisation data in Arm Compiler images) and resets.
+    fn load_file(&mut self, path: &Path) -> Result<usize, String> {
+        let data = std::fs::read(path).map_err(|e| e.to_string())?;
+        let image = ElfImage::parse(&data).map_err(|e| e.to_string())?;
+        self.load_elf(&image).map_err(|e| e.to_string())?;
+        self.reset();
+        let bytes = image.segments.iter().map(|s| s.data.len()).sum();
+        self.gdb_loaded = Some((path.to_path_buf(), image));
+        Ok(bytes)
+    }
+
+    /// The file most recently flashed with `monitor load`, for the host to
+    /// show its name and symbols.
+    pub fn take_gdb_loaded(&mut self) -> Option<(PathBuf, ElfImage)> {
+        self.gdb_loaded.take()
+    }
+
     fn gdb_regs(&self) -> CortexMRegs {
         let mut regs = CortexMRegs::default();
         for (v, r) in regs.core.iter_mut().zip(CORE_REGS) {
@@ -293,9 +315,18 @@ impl MonitorCmd for Machine {
                 outputln!(out, "Resetting target");
             }
             ["halt"] => outputln!(out, "Target is halted"),
+            ["load", ..] => {
+                // The rest of the line, so that paths may contain spaces.
+                let path = cmd.trim_start()["load".len()..].trim();
+                match self.load_file(Path::new(path)) {
+                    Ok(bytes) => outputln!(out, "Loaded {path} ({bytes} bytes), target reset and halted"),
+                    Err(e) => outputln!(out, "cannot load '{path}': {e}"),
+                }
+            }
             ["help"] | [] => {
                 outputln!(out, "monitor reset [halt]  reset the MCU, stay halted");
                 outputln!(out, "monitor halt          (target is already halted)");
+                outputln!(out, "monitor load FILE     flash an .axf/.elf file of this computer, reset, stay halted");
             }
             _ => outputln!(out, "unknown monitor command '{cmd}' (try 'monitor help')"),
         }

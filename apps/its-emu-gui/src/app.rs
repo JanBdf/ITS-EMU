@@ -219,9 +219,10 @@ impl eframe::App for App {
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (text, color) = match &state {
-                    RunState::NoFirmware => {
-                        ("no firmware loaded — open an .axf file".to_owned(), ui.visuals().weak_text_color())
-                    }
+                    RunState::NoFirmware => (
+                        "flash empty — open an .axf file or load one with the debugger".to_owned(),
+                        ui.visuals().weak_text_color(),
+                    ),
                     RunState::Running => ("running".to_owned(), OK_GREEN),
                     RunState::Paused => ("paused".to_owned(), Color32::YELLOW),
                     RunState::Halted => ("halted by debugger".to_owned(), Color32::YELLOW),

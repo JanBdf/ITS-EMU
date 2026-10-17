@@ -44,19 +44,30 @@ The font table that ITS_BRD_LIB expects in flash at `0x0810_0000` is built in.
 The GUI starts a GDB server on `127.0.0.1:3333` (`--gdb ADDR` to change,
 `--no-gdb` to switch it off). The command line version waits for a debugger
 with `--gdb [ADDR]`. Connecting halts the core; detaching lets it run on.
+Started without a firmware file, both come up like a board with empty flash,
+and the debugger loads the program:
 
 ```sh
 arm-none-eabi-gdb Program.axf -ex "target remote :3333"
-(gdb) monitor reset halt
+(gdb) monitor load Program.axf
 (gdb) tbreak main
 (gdb) continue
 ```
 
-In VS Code (course setup, CDT GDB adapter) the existing
-**STLink@pyOCD (attach)** configuration only needs port 3333 and should work
-against the running emulator, as long as the GUI has the same `.axf` loaded
-(not yet tried in VS Code itself). A dedicated configuration that resets and
-stops at `main`:
+`monitor load FILE` flashes an `.axf` from the computer the emulator runs on
+(relative paths are relative to the emulator's working directory) by its
+segments, as pyOCD does, then resets and stays halted; the GUI then shows the
+file name and its symbols. GDB's own `load` also writes flash, but it writes
+sections at their run addresses: in Arm Compiler 6 images the initial values
+of `.data` (`RW_IRAM1`) then end up in RAM instead of flash, where the startup
+code copies them from, and the program misbehaves. Use `monitor load` for
+course programs.
+
+The course's VS Code launch configurations always start pyOCD with
+`--probe stlink:`, which only finds a USB ST-LINK, so the emulator needs its
+own configuration (`.vscode/launch.json` of the course project, CDT GDB
+adapter). It loads the program that was just built, resets and stops at
+`main`, like **STLink@pyOCD (launch)** on the board:
 
 ```json
 {
@@ -67,7 +78,11 @@ stops at `main`:
     "program": "out/StoppuhrASM/ITSboard_Assembly/Debug/StoppuhrASM.axf",
     "gdb": "arm-none-eabi-gdb",
     "auxiliaryGdb": true,
-    "initCommands": ["monitor reset halt", "maintenance flush register-cache", "tbreak main"],
+    "initCommands": [
+        "monitor load ${workspaceFolder}/Programs/StoppuhrASM/out/StoppuhrASM/ITSboard_Assembly/Debug/StoppuhrASM.axf",
+        "maintenance flush register-cache",
+        "tbreak main"
+    ],
     "customResetCommands": ["monitor reset halt", "maintenance flush register-cache", "tbreak main", "continue"],
     "target": { "port": "3333" }
 }

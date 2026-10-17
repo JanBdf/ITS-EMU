@@ -25,7 +25,16 @@ pub struct Simulator {
 impl Simulator {
     /// Creates a board, flashes `firmware` (+ `fonts`) and resets the MCU.
     pub fn new(firmware: &[u8], fonts: Option<&[u8]>) -> Result<Self, LoadError> {
-        let image = ElfImage::parse(firmware)?;
+        Self::with_image(ElfImage::parse(firmware)?, fonts)
+    }
+
+    /// A board with erased flash (+ `fonts`), waiting for a debugger to load
+    /// a program. Like the real board, it locks up if run without one.
+    pub fn blank(fonts: Option<&[u8]>) -> Result<Self, LoadError> {
+        Self::with_image(ElfImage { entry: 0, segments: Vec::new(), symbols: Vec::new() }, fonts)
+    }
+
+    fn with_image(image: ElfImage, fonts: Option<&[u8]>) -> Result<Self, LoadError> {
         let (bus, mcu) = stm32f429::build();
         let board = ItsBoard::attach(&mcu);
         let mut machine = Machine::new(stm32f429::machine_config(), bus)?;
