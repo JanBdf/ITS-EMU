@@ -244,4 +244,25 @@ fn fetch_from_peripheral_space_faults() {
     let scs = &m.system().scs;
     assert_ne!(scs.cfsr & (1 << 9), 0, "CFSR.PRECISERR {:#x}", scs.cfsr);
     assert_ne!(scs.hfsr & (1 << 30), 0, "escalated to HardFault {:#x}", scs.hfsr);
+    let sp = m.reg(CoreReg::Sp);
+    assert_eq!(m.read_u32(sp + 24), Some(0x4000_0000), "stacked return address");
+}
+
+#[test]
+fn single_step_into_code_in_ram() {
+    let mut m = boot_thumb(
+        &[
+            0x4801, // ldr r0, =0x2000_0101
+            0x4700, // bx r0
+            0xBF00, 0xBF00,
+        ],
+        &[0x2000_0101],
+    );
+    // in RAM: movs r1, #42; bkpt #1
+    assert!(m.write_mem(0x2000_0100, &[0x2A, 0x21, 0x01, 0xBE]));
+    assert_eq!(m.step(), StopReason::Step);
+    assert_eq!(m.step(), StopReason::Step);
+    assert_eq!(m.pc(), 0x2000_0100);
+    assert_eq!(m.step(), StopReason::Step);
+    assert_eq!((m.pc(), m.reg(CoreReg::R(1))), (0x2000_0102, 42), "the first step in RAM executes an instruction");
 }
