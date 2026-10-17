@@ -12,6 +12,7 @@
 //! | TFT (ILI9486)       | SPI1, CS PD14, DC PF13, RST PF12, BL PD15 (TIM4_CH4) |
 //! | Touch (XPT2046)     | SPI1, CS PF14, PENIRQ PE13, BUSY PB10  |
 
+pub mod devices;
 pub mod ili9486;
 pub mod sim;
 pub mod xpt2046;
@@ -21,6 +22,8 @@ pub use sim::Simulator;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use devices::{DeviceHub, RotaryEncoder, SharedDevices};
+use emu_core::Bus;
 use stm32f429::Stm32f429;
 use stm32f429::gpio::{PinMode, SharedGpio, port};
 use stm32f429::spi::SpiDevice;
@@ -141,11 +144,16 @@ pub struct ItsBoard {
     mcu: Stm32f429,
     lcd: Rc<RefCell<Ili9486>>,
     touch: Rc<RefCell<Xpt2046>>,
+    devices: SharedDevices,
+    encoders: RefCell<Vec<Rc<RefCell<RotaryEncoder>>>>,
 }
 
 impl ItsBoard {
-    /// Connects the board to an MCU instance.
-    pub fn attach(mcu: &Stm32f429) -> Self {
+    /// Connects the board to an MCU instance (and external devices, added
+    /// later, to its bus).
+    pub fn attach(mcu: &Stm32f429, bus: &mut Bus) -> Self {
+        let devices = SharedDevices::default();
+        bus.attach_device(Box::new(DeviceHub(devices.clone())));
         let lcd = Rc::new(RefCell::new(Ili9486::new()));
         let touch = Rc::new(RefCell::new(Xpt2046::new()));
         *mcu.spi1.borrow_mut() = Some(Box::new(Spi1Router {
@@ -156,7 +164,7 @@ impl ItsBoard {
             tp_cs_rises: 0,
             rst_rises: 0,
         }));
-        let board = Self { mcu: mcu.clone(), lcd, touch };
+        let board = Self { mcu: mcu.clone(), lcd, touch, devices, encoders: RefCell::default() };
         {
             let mut g = board.mcu.gpio.borrow_mut();
             for &(p, pin, level) in EXTERNAL_LEVELS {
@@ -175,6 +183,25 @@ impl ItsBoard {
 
     pub fn mcu(&self) -> &Stm32f429 {
         &self.mcu
+    }
+
+    /// Connects a rotary encoder (contacts A, B to GND, pull-ups on the
+    /// module) to two pins; returns its number for [`Self::rotate_encoder`].
+    pub fn add_encoder(&self, a: (char, u32), b: (char, u32)) -> usize {
+        let enc = Rc::new(RefCell::new(RotaryEncoder::new(self.mcu.gpio.clone(), a, b)));
+        self.devices.borrow_mut().push(enc.clone());
+        let mut encoders = self.encoders.borrow_mut();
+        encoders.push(enc);
+        encoders.len() - 1
+    }
+
+    /// Turns encoder `n` by `detents` (negative: counter-clockwise), one
+    /// detent every few milliseconds of virtual time.
+    pub fn rotate_encoder(&self, n: usize, detents: i32) -> Result<(), String> {
+        let encoders = self.encoders.borrow();
+        let enc = encoders.get(n).ok_or_else(|| format!("there is no encoder {n}"))?;
+        enc.borrow_mut().rotate(detents);
+        Ok(())
     }
 
     /// Presses (`true`) or releases button S0–S7.
