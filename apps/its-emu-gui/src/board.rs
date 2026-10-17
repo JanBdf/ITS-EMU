@@ -178,22 +178,17 @@ impl Pcb<'_> {
         self.painter.add(Shape::mesh(mesh));
     }
 
-    /// SMD LED (vertical package, about 11 × 20 units) lit with `brightness`.
+    /// SMD LED lit with `brightness`: a round glow like the power LEDs D24/D25.
     fn led(&self, x: f32, y: f32, color: Color32, brightness: f32) {
         let b = brightness.clamp(0.0, 1.0).powf(1.0 / 2.2); // perceived brightness
         if b < 0.01 {
             return;
         }
-        let hot = lerp(color, Color32::WHITE, 0.6);
-        // the beige package takes the colour of the light (additive light alone would only whiten it)
-        self.painter.rect_filled(
-            self.r(x - 5.0, y - 7.0, x + 5.0, y + 7.0),
-            egui::CornerRadius::same(self.len(1.5) as u8),
-            color.gamma_multiply(0.6 * b),
-        );
-        self.glow(x, y, 24.0, 24.0, color, 0.45 * b); // light on the solder mask
-        self.glow(x, y, 9.0, 12.0, color, 0.75 * b); // the package lights up
-        self.glow(x, y, 4.5, 4.5, hot, b); // the die
+        // the lens takes the colour of the light (additive light alone would only whiten it)
+        self.painter.circle_filled(self.p(x, y), self.len(4.6), color.gamma_multiply(0.7 * b));
+        self.glow(x, y, 22.0, 22.0, color, 0.5 * b);
+        self.glow(x, y, 9.0, 9.0, color, 0.8 * b);
+        self.glow(x, y, 4.5, 4.5, lerp(color, Color32::WHITE, 0.6), b);
     }
 
     /// Shading of a pressed tact switch / latch marker.
@@ -233,15 +228,19 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState) -> BoardI
     let avail = ui.available_size();
     let s = (avail.x / BOARD_W).min(avail.y / BOARD_H).max(0.4);
     let (outer, _) = ui.allocate_exact_size(Vec2::new(BOARD_W, BOARD_H) * s, Sense::hover());
+    // the drawing is rendered in physical pixels: place it on whole pixels, so
+    // that it is not resampled
+    let ppp = ui.ctx().pixels_per_point();
+    let max = ui.ctx().input(|i| i.max_texture_side) as f32;
+    let px = (outer.size() * ppp).round();
+    let fit = (max / px.x.max(px.y)).min(1.0);
+    let size = [(px.x * fit).max(1.0) as u32, (px.y * fit).max(1.0) as u32];
+    let outer = Rect::from_min_size((outer.min.to_vec2() * ppp).round().to_pos2() / ppp, px / ppp);
+    let s = outer.width() / BOARD_W;
     let painter = ui.painter_at(outer);
     let pcb = Pcb { painter: &painter, origin: outer.min, s };
     let mut input = BoardInput::default();
 
-    // ---- the drawing, rendered in physical pixels
-    let max = ui.ctx().input(|i| i.max_texture_side) as f32;
-    let px = (outer.size() * ui.ctx().pixels_per_point()).round();
-    let fit = (max / px.x.max(px.y)).min(1.0);
-    let size = [(px.x * fit).max(1.0) as u32, (px.y * fit).max(1.0) as u32];
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
     painter.image(tex.board(ui.ctx(), size).id(), outer, uv, Color32::WHITE);
 
