@@ -32,6 +32,7 @@
  *   dmaspi          SPI3 transfer by DMA1 (nothing connected)
  *   adctrig         ADC1 triggered by TIM3 TRGO at 1 kHz
  *   irqlat          interrupt latency: NVIC STIR, EXTI SWIER
+ *   dacwave         DAC wave generation, TIM6 trigger with DMA
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1495,6 +1496,93 @@ static void cmd_irqlat(void) {
     EXTI->IMR &= ~(1u << 1);
 }
 
+/* ---- DAC: wave generation with the software trigger, TIM6 TRGO trigger
+ * with DMA1 stream 5 feeding DHR12R1, DMA underrun. */
+static void dac_swtrig(const char *name, int n) {
+    for (int i = 0; i < n; i++) {
+        DAC->SWTRIGR = DAC_SWTRIGR_SWTRIG1;
+        __DSB();
+        printf("W %s %03lx\n", name, (unsigned long)DAC->DOR1);
+    }
+}
+
+static void cmd_dacwave(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_DACEN | RCC_APB1ENR_TIM6EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_DMA1EN;
+    __DSB();
+    const uint32_t sw = DAC_CR_EN1 | DAC_CR_TEN1 | (7u << 3);
+    // noise, all bits
+    DAC->CR = 0;
+    DAC->DHR12R1 = 0;
+    DAC->CR = sw | (1u << 6) | (11u << 8);
+    printf("W noise_start %03lx\n", (unsigned long)DAC->DOR1);
+    dac_swtrig("noise11", 24);
+    // re-enabled: does the LFSR restart?
+    DAC->CR = 0;
+    DAC->CR = sw | (1u << 6) | (11u << 8);
+    dac_swtrig("noise11_again", 3);
+    // noise, 4 bits, on top of DHR; DHR near the top (wrap)
+    DAC->CR = 0;
+    DAC->DHR12R1 = 0x100;
+    DAC->CR = sw | (1u << 6) | (3u << 8);
+    dac_swtrig("noise3", 8);
+    DAC->DHR12R1 = 0xFFC;
+    dac_swtrig("noise3_top", 4);
+    // triangle, amplitude 7, on top of DHR
+    DAC->CR = 0;
+    DAC->DHR12R1 = 0x200;
+    DAC->CR = sw | (2u << 6) | (2u << 8);
+    dac_swtrig("tri2", 20);
+    // a DHR write changes the base immediately? (waits for the trigger)
+    DAC->DHR12R1 = 0x300;
+    printf("W tri2_dhr_write %03lx\n", (unsigned long)DAC->DOR1);
+    dac_swtrig("tri2_new_base", 2);
+    // switching the wave off
+    DAC->CR = sw;
+    dac_swtrig("wave_off", 2);
+
+    // TIM6 TRGO at 1 kHz, DMA writes 8 table values into DHR12R1
+    static uint32_t table[8] = {0x100, 0x200, 0x300, 0x400, 0x500, 0x600, 0x700, 0x800};
+    DAC->CR = 0;
+    DAC->DHR12R1 = 0x050;
+    DAC->SR = DAC_SR_DMAUDR1;
+    DMA1_Stream5->CR = 0;
+    DMA1->HIFCR = 0x3Du << 6;
+    DMA1_Stream5->PAR = (uint32_t)&DAC->DHR12R1;
+    DMA1_Stream5->M0AR = (uint32_t)table;
+    DMA1_Stream5->NDTR = 8;
+    DMA1_Stream5->CR = (7u << 25) | (2u << 13) | (2u << 11) | DMA_SxCR_MINC | DMA_SxCR_DIR_0;
+    DMA1_Stream5->CR |= DMA_SxCR_EN;
+    DAC->CR = DAC_CR_EN1 | DAC_CR_TEN1 | DAC_CR_DMAEN1; // TSEL 000: TIM6 TRGO
+    printf("W hw_dor_before %03lx\n", (unsigned long)DAC->DOR1);
+    TIM6->CR1 = 0;
+    TIM6->PSC = 89; // 1 MHz
+    TIM6->ARR = 999;
+    TIM6->EGR = TIM_EGR_UG; // loads PSC; MMS is still 000: no trigger
+    TIM6->CR2 = 2u << 4;    // MMS = update
+    TIM6->SR = 0;
+    uint32_t t0 = DWT->CYCCNT;
+    TIM6->CR1 = TIM_CR1_CEN;
+    while (!(DMA1->HISR & (1u << 11)) && DWT->CYCCNT - t0 < 20 * 180000u) {
+    }
+    uint32_t t1 = DWT->CYCCNT;
+    uint32_t dor_tc = DAC->DOR1, sr_tc = DAC->SR, ndtr = DMA1_Stream5->NDTR;
+    while (DWT->CYCCNT - t1 < 2 * 180000u) {
+    }
+    uint32_t dor_after = DAC->DOR1, sr_after = DAC->SR;
+    TIM6->CR1 = 0;
+    printf("W hw_tc_us %lu\n", (unsigned long)((t1 - t0) / 180));
+    printf("W hw_tc_dor %03lx sr %08lx ndtr %lu\n", (unsigned long)dor_tc, (unsigned long)sr_tc, (unsigned long)ndtr);
+    printf("W hw_after_dor %03lx sr %08lx\n", (unsigned long)dor_after, (unsigned long)sr_after);
+    printf("W hw_dmaen_after %08lx\n", (unsigned long)DAC->CR);
+    DMA1_Stream5->CR = 0;
+    DAC->CR = 0;
+    DAC->SR = DAC_SR_DMAUDR1;
+    TIM6->CR2 = 0;
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -1546,6 +1634,8 @@ static void execute(char *line) {
         cmd_adctrig();
     } else if (!strcmp(line, "irqlat")) {
         cmd_irqlat();
+    } else if (!strcmp(line, "dacwave")) {
+        cmd_dacwave();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {

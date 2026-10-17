@@ -187,11 +187,8 @@ pub fn build() -> (Bus, Stm32f429) {
     ];
     for (name, base, irq, wide, en_bit, pins) in timers {
         let t = GpTimer::new(name, irq, wide, ApbBus::Apb1, en_bit, clocks.clone()).with_inputs(pins, gpio.clone());
-        let t = match name {
-            "TIM2" => t.with_trgo(triggers.clone(), timer::TRGO_TIM2),
-            "TIM3" => t.with_trgo(triggers.clone(), timer::TRGO_TIM3),
-            _ => t,
-        };
+        let trgo = [timer::TRGO_TIM2, timer::TRGO_TIM3, timer::TRGO_TIM4, timer::TRGO_TIM5][en_bit as usize];
+        let t = t.with_trgo(triggers.clone(), trgo);
         tim_pwm.push(t.pwm());
         bus.attach(base, 0x400, Box::new(t));
     }
@@ -208,8 +205,8 @@ pub fn build() -> (Bus, Stm32f429) {
                 .with_inputs(&TIM8_PINS, g())
                 .with_trgo(triggers.clone(), timer::TRGO_TIM8),
         ),
-        (0x4000_1000, timer("TIM6", 54, Apb1, 4).with_channels(0)),
-        (0x4000_1400, timer("TIM7", 55, Apb1, 5).with_channels(0)),
+        (0x4000_1000, timer("TIM6", 54, Apb1, 4).with_channels(0).with_trgo(triggers.clone(), timer::TRGO_TIM6)),
+        (0x4000_1400, timer("TIM7", 55, Apb1, 5).with_channels(0).with_trgo(triggers.clone(), timer::TRGO_TIM7)),
         (0x4001_4000, timer("TIM9", 24, Apb2, 16).with_channels(2).shared_irq(1).with_inputs(&TIM9_PINS, g())),
         (0x4001_4400, timer("TIM10", 25, Apb2, 17).with_channels(1).shared_irq(1).with_inputs(&TIM10_PINS, g())),
         (0x4001_4800, timer("TIM11", 26, Apb2, 18).with_channels(1).shared_irq(1).with_inputs(&TIM11_PINS, g())),
@@ -254,7 +251,11 @@ pub fn build() -> (Bus, Stm32f429) {
         );
     }
     let analog = adc::SharedAnalog::default();
-    bus.attach(0x4000_7400, 0x400, Box::new(adc::Dac::new(clocks.clone(), analog.clone())));
+    bus.attach(
+        0x4000_7400,
+        0x400,
+        Box::new(adc::Dac::new(clocks.clone(), analog.clone(), dma.clone(), triggers.clone())),
+    );
     bus.attach(
         0x4001_2000,
         0x400,
