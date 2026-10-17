@@ -1,0 +1,60 @@
+A reset_sr 0
+A reset_cr2 0
+A reset_htr 4095
+A reset_ccr 0
+A reset_dac_cr 0
+A sr_without_adon 0
+A cr2_swstart_without_adon 0
+A conv_pre0_smp0 103
+A conv_pre0_smp3 311
+A conv_pre0_smp7 2007
+A conv_pre3_smp0 295
+A conv_pre3_smp3 1143
+A conv_pre3_smp7 7927
+A conv_8bit 135
+A vrefint_off 0 1 20
+A vrefint 1493 1495 1499
+A temp 952 952 954
+A vbat 1020 1021 1023
+A pc3_in13 1134 1149 1165
+A pc2_in12 875 1026 1104
+A pc0_in10 1035 1080 1140
+A pb1_in9 1132 1158 1191
+A pf10_in8 1115 1357 1737
+A pf9_in7 1043 1099 1216
+A pf8_in6 1034 1156 1376
+A pa0_input_pullup 72 263 791
+A dac0_dor 0 0
+A dac0 28 39 49
+A dac100_dor 100 100
+A dac100 49 59 74
+A dac1024_dor 1024 1024
+A dac1024 983 1002 1021
+A dac2048_dor 2048 2048
+A dac2048 2023 2043 2062
+A dac3072_dor 3072 3072
+A dac3072 3065 3084 3101
+A dac4000_dor 4000 4000
+A dac4000 4013 4027 4041
+A dac4095_dor 4095 4095
+A dac4095 4048 4065 4074
+A dac_dhr12l_dor 2048
+A dac_dhr8_dor 2048
+A dac2048_unbuffered 2025 2046 2067
+A dac_ten_before_trigger 2048
+A dac_ten_after_trigger 1000
+A dac_swtrigr_after 0
+A sr_after_conv 18
+A cr2_after_conv 1
+A sr_after_dr_read 16
+A sr_ovr_eocs1 50
+A sr_ovr_eocs0 18
+A scan3_cycles 410
+A scan3_first_eoc_cycles 162
+A scan3_eocs_sr 50
+A cont_conversions_1ms 1499
+A inj_sr 12
+A inj_jdr1 1407
+A inj_cr2 1
+A left_aligned_low_bits 0
+A eoc_irqs 5

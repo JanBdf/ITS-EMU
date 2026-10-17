@@ -124,9 +124,10 @@ pub struct System {
     /// a branch. A conditional branch was taken (pipeline refill) when the
     /// next block does not start at the fall-through address.
     branch_from: Option<(u64, bool)>,
-    /// End address of the previous block and the destination register of its
-    /// final load, if it ended without a branch (see `continuation_saving`).
-    fell_through: Option<(u64, Option<u8>)>,
+    /// End address of the previous block, if it ended without a branch, and
+    /// its last instruction's result for the next block (see
+    /// `continuation_saving` and `continuation_stall`).
+    fell_through: Option<(u64, BlockTiming)>,
     /// Division instructions found in new blocks, waiting for their timing hook.
     new_divs: Vec<DivSite>,
     /// Division instructions that have a timing hook.
@@ -760,13 +761,15 @@ impl Machine {
             }
             let sys = uc.get_data_mut();
             let refill = if entered_by_branch { info.entry_penalty } else { 0 };
-            let saving = match sys.fell_through.take() {
-                Some((end, rt)) if end == addr => info.continuation_saving(rt),
-                _ => 0,
+            let (saving, stall) = match sys.fell_through.take() {
+                Some((end, prev)) if end == addr => {
+                    (info.continuation_saving(prev.last_load_rt), info.continuation_stall(prev.last_fp_dst))
+                }
+                _ => (0, 0),
             };
-            sys.clock.advance(u64::from(info.cycles + refill - saving));
+            sys.clock.advance(u64::from(info.cycles + refill + stall - saving));
             if !info.ends_with_branch && !info.ends_with_jump {
-                sys.fell_through = Some((addr + u64::from(size), info.last_load_rt));
+                sys.fell_through = Some((addr + u64::from(size), info));
             }
             sys.branch_from = if info.ends_with_branch {
                 Some((addr + u64::from(size), true))
