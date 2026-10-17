@@ -679,12 +679,12 @@ TRACES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'boardtraces.j
 
 
 def traces():
-    """Copper traces under the mask (edges vectorised by boardtraces.py)."""
+    """Copper traces under the mask (fine dark lines, vectorised by boardtraces.py)."""
     import json
     if not os.path.exists(TRACES):
         return ''
     d = ''.join(f'M{f(x0)},{f(y0)}L{f(x1)},{f(y1)}' for x0, y0, x1, y1 in json.load(open(TRACES)))
-    return path(d, extra=' stroke="#4372a6" stroke-width="0.6" stroke-linecap="round" opacity="0.8"')
+    return path(d, extra=' stroke="#1c3c64" stroke-width="0.45" stroke-linecap="round"')
 
 
 def logo():
