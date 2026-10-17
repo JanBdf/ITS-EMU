@@ -24,6 +24,7 @@
  *   tim             timers: compare flags and interrupts, TIM1 repetition
  *                   counter, basic timers, shared interrupt lines
  *   adc             ADC/DAC: conversion times, internal channels, Analog pins, DAC1
+ *   i2c             I2C1 (PB8/PB9, nothing connected): START, address NACK, STOP
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1040,6 +1041,96 @@ static void cmd_adc(void) {
     GPIOF->MODER &= ~((3u << 16) | (3u << 18) | (3u << 20));
 }
 
+/* ---- I2C1 on PB8 (SCL) / PB9 (SDA), pulled up on the carrier board,
+ * nothing connected: START, address without acknowledge, STOP. */
+#define I(name, expr) printf("I %s %lu\n", name, (unsigned long)(expr))
+
+/* Waits until (reg & mask) != 0 or about 1 ms; returns the cycles waited
+ * (0xFFFFFFFF on timeout). */
+static uint32_t wait_flag(volatile uint32_t *reg, uint32_t mask, uint32_t want) {
+    uint32_t t0 = DWT->CYCCNT;
+    while (((*reg & mask) != 0) != want) {
+        if (DWT->CYCCNT - t0 > 180000) {
+            return 0xFFFFFFFFu;
+        }
+    }
+    return DWT->CYCCNT - t0;
+}
+
+static void i2c_address(const char *tag, uint8_t addr) {
+    char name[32];
+    I2C1->CR1 |= I2C_CR1_START;
+    snprintf(name, sizeof(name), "%s_start_cycles", tag);
+    I(name, wait_flag(&I2C1->SR1, I2C_SR1_SB, 1));
+    snprintf(name, sizeof(name), "%s_sr1_after_start", tag);
+    I(name, I2C1->SR1);
+    snprintf(name, sizeof(name), "%s_sr2_after_start", tag);
+    I(name, I2C1->SR2);
+    I2C1->DR = addr;
+    snprintf(name, sizeof(name), "%s_addr_cycles", tag);
+    I(name, wait_flag(&I2C1->SR1, I2C_SR1_ADDR | I2C_SR1_AF, 1));
+    snprintf(name, sizeof(name), "%s_sr1_after_addr", tag);
+    I(name, I2C1->SR1);
+    snprintf(name, sizeof(name), "%s_sr2_after_addr", tag);
+    I(name, I2C1->SR2);
+    I2C1->CR1 |= I2C_CR1_STOP;
+    snprintf(name, sizeof(name), "%s_stop_cycles", tag);
+    I(name, wait_flag(&I2C1->SR2, I2C_SR2_BUSY, 0));
+    snprintf(name, sizeof(name), "%s_cr1_after_stop", tag);
+    I(name, I2C1->CR1);
+    snprintf(name, sizeof(name), "%s_sr1_after_stop", tag);
+    I(name, I2C1->SR1);
+    I2C1->SR1 = 0;
+    snprintf(name, sizeof(name), "%s_sr1_cleared", tag);
+    I(name, I2C1->SR1);
+}
+
+static void cmd_i2c(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
+    RCC->APB1ENR |= RCC_APB1ENR_I2C1EN;
+    __DSB();
+    I("reset_cr1", I2C1->CR1);
+    I("reset_cr2", I2C1->CR2);
+    I("reset_ccr", I2C1->CCR);
+    I("reset_trise", I2C1->TRISE);
+    I("reset_sr2", I2C1->SR2);
+    // PB8/PB9: AF4, open drain
+    GPIOB->AFR[1] = (GPIOB->AFR[1] & ~0xFFu) | 0x44u;
+    GPIOB->OTYPER |= (1u << 8) | (1u << 9);
+    GPIOB->MODER = (GPIOB->MODER & ~(0xFu << 16)) | (0xAu << 16);
+    I("idr_pb8_pb9", (GPIOB->IDR >> 8) & 3);
+
+    I2C1->CR2 = 45;     // PCLK1 = 45 MHz
+    I2C1->CCR = 225;    // 100 kHz standard mode
+    I2C1->TRISE = 46;
+    I2C1->CR1 = I2C_CR1_PE;
+    I("sr2_idle", I2C1->SR2);
+    i2c_address("sm_write", 0xA0);
+    i2c_address("sm_read", 0x91);
+
+    // fast mode, 400 kHz, duty 2
+    I2C1->CR1 = 0;
+    I2C1->CCR = I2C_CCR_FS | 38;
+    I2C1->TRISE = 14;
+    I2C1->CR1 = I2C_CR1_PE;
+    i2c_address("fm_write", 0xA0);
+
+    // ACK with nothing to acknowledge, START while busy
+    I2C1->CR1 = I2C_CR1_PE | I2C_CR1_ACK;
+    I("cr1_ack", I2C1->CR1);
+    // software reset
+    I2C1->CR1 = I2C_CR1_SWRST;
+    I("cr1_swrst", I2C1->CR1);
+    I("ccr_after_swrst", I2C1->CCR);
+    I2C1->CR1 = 0;
+    I("ccr_after_swrst_release", I2C1->CCR);
+    RCC->APB1ENR &= ~RCC_APB1ENR_I2C1EN;
+    GPIOB->MODER &= ~(0xFu << 16);
+    GPIOB->OTYPER &= ~((1u << 8) | (1u << 9));
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -1077,6 +1168,8 @@ static void execute(char *line) {
         cmd_div();
     } else if (!strcmp(line, "adc")) {
         cmd_adc();
+    } else if (!strcmp(line, "i2c")) {
+        cmd_i2c();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "rd")) {
