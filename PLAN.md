@@ -11,7 +11,8 @@ apps/its-emu (CLI)        apps/its-emu-gui (egui)
         \                     /
          itsboard   — wiring, ILI9486, XPT2046, LEDs/buttons, fonts.bin
               |
-         stm32f429  — memory map, RCC, PWR, FLASH, GPIO, EXTI/SYSCFG, TIM1–14, SPI1, USART3
+         stm32f429  — memory map, RCC, PWR, FLASH, GPIO, EXTI/SYSCFG, TIM1–14, ADC/DAC,
+                      I2C1–3, SPI1–6, U(S)ART1–8
               |
          emu-core   — Unicorn CPU, NVIC/SCB/SysTick, exceptions, cycle model,
                       virtual clock, idle skipping, ELF loader, GDB server
@@ -26,9 +27,11 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
 
 ## Next steps
 
-- ADC1–3 and DAC (Analog header), with analog inputs in the GUI
-- I2C1 (I2C header; NACK with nothing connected), SPI2–6, further U(S)ARTs
-- Timer input capture and down/center-aligned counting
+- Timer input capture, down/center-aligned counting, timer outputs on pins
 - DMA, then Ethernet (`Programs/Stack`)
-- External devices on the headers (e.g. 1-Wire sensor, rotary encoder)
+- External devices on the headers (I2C sensor via `I2cDevice`, 1-Wire
+  sensor, rotary encoder) and in the GUI
+- ADC/DAC hardware triggers (timer TRGO)
+- Speed: most time goes to Unicorn's per-block hook and MMIO callbacks
+  (measured; the models themselves are cheap)
 - Release builds for students (cargo-dist)
