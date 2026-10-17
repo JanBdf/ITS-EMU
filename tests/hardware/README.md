@@ -2,7 +2,7 @@
 
 Output of the `HwCheck` test program (`tests/fixtures/ac6-src/HwCheck`) on an
 ITS-Board (Rev 02, NUCLEO-F429ZI, 180 MHz, ART accelerator on), taken
-2026-10-16 with `tools/hw/cmd.py`:
+2026-10-16/17 with `tools/hw/cmd.py`:
 
 | file | command | content |
 |---|---|---|
@@ -10,6 +10,11 @@ ITS-Board (Rev 02, NUCLEO-F429ZI, 180 MHz, ART accelerator on), taken
 | `HwCheck-cyc.txt` | `cyc` | `C`: DWT->CYCCNT cycles of 1000 iterations of instruction kernels (10 copies of the body + `subs`/`bne`); `F`: 1000 calls of library functions |
 | `HwCheck-div.txt` | `div` | `D dividend divisor udiv sdiv`: cycles of 100 iterations of 10 divisions |
 | `HwCheck-pins.txt` | `pins` | per port: MODER, PUPDR, ODR, input pins, IDR as configured, with pull-down and with pull-up on the input pins |
+| `HwCheck-exti.txt` | `exti` | EXTI/SYSCFG register semantics, interrupt latency from a GPIO edge or SWIER |
+| `HwCheck-tim.txt` | `tim` | timer compare flags, CC/update interrupt counts, TIM1 repetition counter, basic timers, shared interrupt lines, register masks |
+| `HwCheck-adc.txt` | `adc` | ADC conversion times, internal channels, open pins, DAC1 measured by ADC1, flag semantics |
+| `HwCheck-i2c.txt` | `i2c` | I2C1 with nothing on the header: START, address NACK, STOP, flags and durations |
+| `HwCheck-regs.txt` | `wr`/`dump` (first line) | reset values of the registers of timers, SPIs, U(S)ARTs, I2Cs, ADC, DAC, SYSCFG, EXTI |
 
 `crates/itsboard/tests/hardware.rs` runs the same commands in the emulator
 and compares. Re-measure with:
