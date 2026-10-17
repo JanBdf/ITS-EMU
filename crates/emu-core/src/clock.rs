@@ -60,6 +60,12 @@ impl Clock {
         self.seg_cycles.saturating_add(u64::try_from(delta).unwrap_or(u64::MAX))
     }
 
+    /// Virtual time (ps) at `cycle` (not before the last frequency change).
+    pub fn ps_at_cycle(&self, cycle: u64) -> u64 {
+        let delta = u128::from(cycle.saturating_sub(self.seg_cycles));
+        self.seg_ps + (delta * PS_PER_S / u128::from(self.cpu_hz)) as u64
+    }
+
     pub fn time_ns(&self) -> u64 {
         self.time_ps() / 1000
     }

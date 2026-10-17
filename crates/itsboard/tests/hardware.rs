@@ -275,6 +275,31 @@ fn timer_outputs_match_the_board() {
 }
 
 #[test]
+fn slave_modes_match_the_board() {
+    // TIM3 external clock 1, reset, gated and trigger mode with TI1/TI2 on
+    // PC6/PC7 (edges from switching the pulls). The open pin needs about 1 µs
+    // to rise on the board: counts after an edge may be 1 lower there.
+    let Some(out) = run("timslave", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timslave.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("S ")).collect();
+    let board: Vec<&str> = board.lines().collect();
+    assert_eq!(emu.len(), board.len(), "{out}");
+    for (e, b) in emu.iter().zip(&board) {
+        let (et, bt): (Vec<&str>, Vec<&str>) = (e.split(' ').collect(), b.split(' ').collect());
+        assert_eq!(et.len(), bt.len(), "{e} / {b}");
+        for k in 0..et.len() {
+            let after_edge = k > 0 && (bt[k - 1] == "after" || (bt[1] == "trigger" && bt[k - 1] == "cnt"));
+            if after_edge {
+                let (x, y): (i64, i64) = (et[k].parse().unwrap(), bt[k].parse().unwrap());
+                assert!((x - y).abs() <= 1, "{e} / {b}");
+            } else {
+                assert_eq!(et[k], bt[k], "{e} / {b}");
+            }
+        }
+    }
+}
+
+#[test]
 fn counting_directions_match_the_board() {
     // TIM3 up, down and center-aligned 1/2/3: PWM levels per direction, flags
     let Some(out) = run("timdir", 500) else { return };
