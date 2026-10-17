@@ -2,6 +2,7 @@
 
 pub mod adc;
 pub mod crc;
+pub mod dma;
 pub mod exti;
 pub mod gpio;
 pub mod i2c;
@@ -11,7 +12,7 @@ pub mod spi;
 pub mod timer;
 pub mod usart;
 
-use emu_core::{Bus, MachineConfig, MemoryMap};
+use emu_core::{Bus, Machine, MachineConfig, MachineError, MemoryMap};
 
 use gpio::{GPIOA_BASE, GpioPort, NUM_PORTS, PORT_STRIDE, SharedGpio};
 use rcc::{FlashInterface, Pwr, Rcc, SharedClocks};
@@ -88,6 +89,8 @@ pub struct Stm32f429 {
     pub analog: adc::SharedAnalog,
     /// Devices on I2C1 (the I2C header of the ITS-Board).
     pub i2c1: i2c::I2cBus,
+    /// DMA controllers; the machine runs them as its second bus master.
+    pub dma: dma::SharedDma,
 }
 
 /// Ethernet MAC/DMA registers: reads as idle, writes ignored. The LCD driver
@@ -137,6 +140,14 @@ fn bus_wait_states(clocks: SharedClocks) -> impl Fn(u32, bool, u64) -> u64 {
     }
 }
 
+/// The emulated MCU: core and memory with `bus` (from [`build`]), the DMA
+/// controllers of `mcu` as second bus master.
+pub fn machine(bus: Bus, mcu: &Stm32f429) -> Result<Machine, MachineError> {
+    let mut m = Machine::new(machine_config(), bus)?;
+    m.set_bus_master(Box::new(dma::DmaMaster(mcu.dma.clone())));
+    Ok(m)
+}
+
 /// Builds the peripheral bus with all modelled STM32F429 peripherals.
 pub fn build() -> (Bus, Stm32f429) {
     let gpio = SharedGpio::default();
@@ -184,6 +195,7 @@ pub fn build() -> (Bus, Stm32f429) {
     bus.attach(0x4000_7000, 0x400, Box::new(Pwr::new()));
     bus.attach(0x4000_3000, 0x400, Box::new(iwdg::Iwdg::new()));
     let i2c1 = i2c::I2cBus::default();
+    let dma = dma::SharedDma::default();
     let i2c = [
         ("I2C1", 0x4000_5400, 31, 21, &[('B', 6), ('B', 8)][..], &[('B', 7), ('B', 9)][..], i2c1.clone()),
         (
@@ -206,7 +218,7 @@ pub fn build() -> (Bus, Stm32f429) {
     }
     let analog = adc::SharedAnalog::default();
     bus.attach(0x4000_7400, 0x400, Box::new(adc::Dac::new(clocks.clone(), analog.clone())));
-    bus.attach(0x4001_2000, 0x400, Box::new(adc::Adc::new(clocks.clone(), gpio.clone(), analog.clone())));
+    bus.attach(0x4001_2000, 0x400, Box::new(adc::Adc::new(clocks.clone(), gpio.clone(), analog.clone(), dma.clone())));
     let exti = exti::SharedExti::default();
     bus.attach(0x4001_3800, 0x400, Box::new(exti::Syscfg::new(exti.clone(), gpio.clone(), clocks.clone())));
     bus.attach(0x4001_3C00, 0x400, Box::new(exti::Exti::new(exti, gpio.clone())));
@@ -245,6 +257,8 @@ pub fn build() -> (Bus, Stm32f429) {
         );
     }
     bus.attach(0x4002_3000, 0x400, Box::new(crc::Crc::new(clocks.clone())));
+    bus.attach(0x4002_6000, 0x400, Box::new(dma::DmaRegs::new(0, dma.clone(), clocks.clone())));
+    bus.attach(0x4002_6400, 0x400, Box::new(dma::DmaRegs::new(1, dma.clone(), clocks.clone())));
     bus.attach(0x4002_3800, 0x400, Box::new(Rcc::new(clocks.clone())));
     bus.attach(0x5006_0800, 0x400, Box::new(crc::Rng::new(clocks.clone())));
     bus.attach(0x4002_3C00, 0x400, Box::new(FlashInterface::new()));
@@ -252,5 +266,5 @@ pub fn build() -> (Bus, Stm32f429) {
     bus.set_wait_states(Box::new(bus_wait_states(clocks.clone())));
 
     let tim_pwm: [SharedPwm; 4] = tim_pwm.try_into().unwrap_or_else(|_| unreachable!());
-    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3, analog, i2c1 })
+    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3, analog, i2c1, dma })
 }

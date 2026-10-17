@@ -29,7 +29,7 @@ macro_rules! boot {
 fn boot(data: &[u8], idle_skipping: bool) -> (Machine, stm32f429::Stm32f429) {
     let image = ElfImage::parse(data).unwrap();
     let (bus, mcu) = stm32f429::build();
-    let mut m = Machine::new(stm32f429::machine_config(), bus).unwrap();
+    let mut m = stm32f429::machine(bus, &mcu).unwrap();
     m.load_elf(&image).unwrap();
     m.load_bin(0x0810_0000, &fixture("fonts.bin").expect("fonts.bin")).unwrap();
     m.system_mut().idle_skipping = idle_skipping;

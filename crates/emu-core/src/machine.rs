@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use unicorn_engine::{Arch, ArmCpuModel, HookType, MemType, Mode, Prot, RegisterARM, UcHookId, Unicorn, uc_error};
 
-use crate::bus::{Bus, DeviceCtx, ResetKind};
+use crate::bus::{Bus, BusMaster, DeviceCtx, Ram, ResetKind};
 use crate::clock::Clock;
 use crate::elf::ElfImage;
 use crate::exception::{self, AccessError, CoreAccess, CoreReg, ExceptionError};
@@ -101,6 +101,9 @@ pub struct System {
     pub nvic: Nvic,
     pub scs: Scs,
     pub bus: Bus,
+    /// DMA controllers, if the MCU has any, and the memory they access.
+    master: Option<Box<dyn BusMaster>>,
+    ram: Ram,
     config: MachineConfig,
     /// The block hook looks at devices once the cycle counter reaches this
     /// value: the next timed event or `slice_limit`, whichever is earlier.
@@ -156,7 +159,21 @@ impl System {
         }
         let (mut ctx, bus) = self.ctx();
         bus.update(&mut ctx);
+        self.service_master();
         self.take_reset_request();
+    }
+
+    /// Lets the DMA make the transfers that peripherals request.
+    fn service_master(&mut self) {
+        // a transfer may make the next one due (e.g. reading an ADC result)
+        for _ in 0..64 {
+            let Some(master) = self.master.as_mut() else { return };
+            if !master.wants_service() {
+                return;
+            }
+            let mut ctx = DeviceCtx { clock: &mut self.clock, nvic: &mut self.nvic };
+            master.service(&mut ctx, &mut self.bus, &mut self.ram);
+        }
     }
 
     /// A peripheral (watchdog) asked for a reset: done before the next instruction.
@@ -215,6 +232,8 @@ pub struct Machine {
     /// Backing store for flash; mapped into Unicorn with `mem_map_ptr`.
     /// Declared after `uc` so it is dropped after the emulator.
     flash: Box<[u8]>,
+    /// Backing store for RAM (also accessed by the DMA).
+    _ram: Vec<Box<[u8]>>,
     /// Debugger breakpoints, implemented as Unicorn exits: execution stops
     /// before an instruction at one of these addresses.
     breakpoints: BTreeSet<u32>,
@@ -580,6 +599,8 @@ impl Machine {
             nvic: Nvic::new(),
             scs: Scs::new(),
             bus,
+            master: None,
+            ram: Ram::default(),
             config: config.clone(),
             slice_end: 0,
             slice_limit: 0,
@@ -612,9 +633,20 @@ impl Machine {
                 uc.mem_map_ptr(0, u64::from(mem.flash_size), Prot::READ | Prot::EXEC, flash_ptr)?;
             }
         }
+        let mut ram = Vec::new();
         for &(base, size) in &mem.ram {
-            uc.mem_map(u64::from(base), u64::from(size), Prot::ALL)?;
+            let mut buf = vec![0u8; size as usize].into_boxed_slice();
+            let ptr = buf.as_mut_ptr();
+            // SAFETY: the buffers are owned by the machine, never reallocated and outlive `uc`;
+            // the DMA accesses them only between Unicorn's accesses (from its callbacks).
+            unsafe {
+                uc.mem_map_ptr(u64::from(base), u64::from(size), Prot::ALL, ptr.cast())?;
+                uc.get_data_mut().ram.add(base, ptr, size, true);
+            }
+            ram.push(buf);
         }
+        // SAFETY: as above
+        unsafe { uc.get_data_mut().ram.add(mem.flash_base, flash.as_mut_ptr(), mem.flash_size, false) };
         for &(base, size) in &mem.rom_zero {
             uc.mem_map(u64::from(base), u64::from(size), Prot::READ)?;
         }
@@ -629,6 +661,7 @@ impl Machine {
                 sys.clock.advance(ws);
                 let (mut ctx, bus) = sys.ctx();
                 let value = bus.read(&mut ctx, addr, size as u32);
+                sys.service_master();
                 let now = sys.clock.cycles();
                 let until = sys.bus.read_stable_until(addr, &sys.clock);
                 sys.idle.note_read(until, now);
@@ -643,6 +676,7 @@ impl Machine {
                 sys.clock.advance(ws);
                 let (mut ctx, bus) = sys.ctx();
                 bus.write(&mut ctx, addr, size as u32, value as u32);
+                sys.service_master();
                 // A device may have raised an interrupt: let the run loop look at it.
                 if sys.nvic.any_pending() {
                     sys.request_stop();
@@ -809,6 +843,7 @@ impl Machine {
         Ok(Self {
             uc,
             flash,
+            _ram: ram,
             breakpoints: BTreeSet::new(),
             watchpoints: Vec::new(),
             watch_stopper: None,
@@ -932,6 +967,11 @@ impl Machine {
     /// Loads a raw binary at `addr` (e.g. the font table at 0x0810_0000).
     pub fn load_bin(&mut self, addr: u32, data: &[u8]) -> Result<(), MachineError> {
         if self.write_mem(addr, data) { Ok(()) } else { Err(MachineError::SegmentOutOfRange { addr, len: data.len() }) }
+    }
+
+    /// Adds a second bus master (DMA controllers) that peripherals' requests wake.
+    pub fn set_bus_master(&mut self, master: Box<dyn BusMaster>) {
+        self.uc.get_data_mut().master = Some(master);
     }
 
     /// Resets the core and the system peripherals (memory contents are kept),

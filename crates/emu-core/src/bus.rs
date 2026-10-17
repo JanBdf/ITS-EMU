@@ -10,6 +10,60 @@ use crate::clock::Clock;
 use crate::nvic::Nvic;
 
 /// Context handed to peripherals on every access and update.
+/// Memory as a bus master (DMA) sees it: RAM and flash, without Unicorn.
+#[derive(Default)]
+pub struct Ram {
+    /// Base address, backing store, writable.
+    regions: Vec<(u32, *mut u8, u32, bool)>,
+}
+
+impl Ram {
+    /// Adds `size` bytes at `ptr` as the memory at `base`.
+    ///
+    /// # Safety
+    /// `ptr` must stay valid (and not be accessed concurrently) while the
+    /// `Ram` is used.
+    pub unsafe fn add(&mut self, base: u32, ptr: *mut u8, size: u32, writable: bool) {
+        self.regions.push((base, ptr, size, writable));
+    }
+
+    fn locate(&self, addr: u32, size: u32) -> Option<(*mut u8, bool)> {
+        self.regions.iter().find_map(|&(base, ptr, len, w)| {
+            let off = addr.checked_sub(base)?;
+            // SAFETY: in bounds of the region
+            (off.checked_add(size)? <= len).then(|| (unsafe { ptr.add(off as usize) }, w))
+        })
+    }
+
+    /// Reads `size` bytes (1, 2, 4), little endian.
+    pub fn read(&self, addr: u32, size: u32) -> Option<u32> {
+        let (p, _) = self.locate(addr, size)?;
+        let mut b = [0u8; 4];
+        // SAFETY: `locate` checked the bounds
+        unsafe { std::ptr::copy_nonoverlapping(p, b.as_mut_ptr(), size as usize) };
+        Some(u32::from_le_bytes(b))
+    }
+
+    pub fn write(&mut self, addr: u32, size: u32, value: u32) -> bool {
+        match self.locate(addr, size) {
+            Some((p, true)) => {
+                // SAFETY: `locate` checked the bounds
+                unsafe { std::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), p, size as usize) };
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A second bus master besides the core (DMA): moves data between
+/// peripherals (through the bus) and memory.
+pub trait BusMaster {
+    /// Whether there is a transfer to make now.
+    fn wants_service(&self) -> bool;
+    fn service(&mut self, ctx: &mut DeviceCtx, bus: &mut Bus, ram: &mut Ram);
+}
+
 /// What reset the MCU (reset flags in RCC_CSR).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResetKind {

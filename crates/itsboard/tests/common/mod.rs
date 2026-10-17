@@ -23,7 +23,7 @@ impl Sim {
         let image = ElfImage::parse(&data).unwrap();
         let (bus, mcu) = stm32f429::build();
         let board = ItsBoard::attach(&mcu);
-        let mut machine = Machine::new(stm32f429::machine_config(), bus).unwrap();
+        let mut machine = stm32f429::machine(bus, &mcu).unwrap();
         machine.load_elf(&image).unwrap();
         machine.load_bin(0x0810_0000, &std::fs::read(format!("{FIXTURES}/fonts.bin")).unwrap()).unwrap();
         machine.reset();
