@@ -194,6 +194,23 @@ fn register_reset_values_match_the_board() {
 }
 
 #[test]
+fn watchdog_resets_like_the_board() {
+    // HwCheck `iwdg 2 fff`: refreshed once, then the board resets after
+    // 1.92 s (last line "W t 1920000"); the reset flags read IWDG + PIN.
+    let Some(mut sim) = Sim::boot("HwCheck.axf") else { return };
+    sim.run_until_ms(2_500);
+    assert!(sim.take_serial().ends_with("ready\n"));
+    sim.send_serial("iwdg 2 fff\n");
+    sim.run_until_ms(7_000);
+    let out = sim.take_serial();
+    assert!(out.contains("W t 1920000\n") && !out.contains("W t 1930000"), "{out}");
+    assert!(out.ends_with("ready\n"), "{out}");
+    sim.send_serial("iwdg 2 fff\n");
+    sim.run_until_ms(7_100);
+    assert!(sim.take_serial().starts_with("W csr 24000000\n"));
+}
+
+#[test]
 fn i2c_matches_the_board() {
     // I2C1 with nothing on the header: flags exact, durations within 2 %
     // (the shortest ones are one iteration of the polling loop)
