@@ -34,6 +34,7 @@ pub struct App {
     console_input: String,
     /// Levels set on the AUX0–5 pads (`None` = open).
     ints: [Option<bool>; 6],
+    analog: [Option<f32>; 8],
     self_screenshot: Option<SelfScreenshot>,
 }
 
@@ -118,6 +119,7 @@ impl App {
             console: String::new(),
             console_input: String::new(),
             ints: [None; 6],
+            analog: [None; 8],
             self_screenshot: SelfScreenshot::from_env(),
         }
     }
@@ -136,7 +138,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
 
         // ---- take the latest snapshot
-        let (state, firmware, led_duty, inputs, nucleo_duty, virtual_ns, core_mhz, speed, gdb) = {
+        let (state, firmware, led_duty, inputs, nucleo_duty, virtual_ns, core_mhz, speed, gdb, dac1) = {
             let mut snap = self.emu.snapshot.lock().unwrap();
             if snap.display_generation != self.display_generation {
                 self.display_generation = snap.display_generation;
@@ -165,6 +167,7 @@ impl eframe::App for App {
                 snap.core_mhz,
                 snap.speed,
                 (snap.gdb.clone(), snap.gdb_attached),
+                snap.dac1,
             )
         };
 
@@ -296,6 +299,8 @@ impl eframe::App for App {
                             display: self.display.as_ref(),
                             ints: &self.ints,
                             latched: &self.latched,
+                            analog: &self.analog,
+                            dac1,
                         },
                     )
                 })
@@ -332,6 +337,10 @@ impl eframe::App for App {
                 Some(true) => None,
             };
             self.emu.send(Command::Int(n as u32, self.ints[n]));
+        }
+        if let Some((n, volts)) = input.analog {
+            self.analog[n] = volts;
+            self.emu.send(Command::Analog(n, volts));
         }
 
         if let Some(shot) = &mut self.self_screenshot {

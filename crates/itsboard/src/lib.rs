@@ -8,6 +8,7 @@
 //! | INT0–5 / AUX0–5     | PG0–5                                  |
 //! | Nucleo LD1/LD2/LD3  | PB0 / PB7 / PB14                       |
 //! | Nucleo user button  | PC13 (pressed = high)                  |
+//! | Analog header       | DAC1 = PA4, PC3, PC2, PC0, PB1, PF10, PF9, PF8 |
 //! | TFT (ILI9486)       | SPI1, CS PD14, DC PF13, RST PF12, BL PD15 (TIM4_CH4) |
 //! | Touch (XPT2046)     | SPI1, CS PF14, PENIRQ PE13, BUSY PB10  |
 
@@ -69,6 +70,18 @@ const FLOATING_LEVELS: [u16; 11] = [
     0, 0, 0, 0,
 ];
 const USER_BUTTON: (char, u32) = ('C', 13);
+
+/// Signal pads of the Analog header (left to right; GNDA pads omitted).
+pub const ANALOG_PADS: [(&str, char, u32); 8] = [
+    ("DAC1", 'A', 4),
+    ("ADC123_13", 'C', 3),
+    ("ADC123_12", 'C', 2),
+    ("ADC123_10", 'C', 0),
+    ("ADC12_9", 'B', 1),
+    ("ADC3_8", 'F', 10),
+    ("ADC3_7", 'F', 9),
+    ("ADC3_6", 'F', 8),
+];
 
 /// Routes SPI1 frames to the chip whose chip select is low.
 struct Spi1Router {
@@ -176,6 +189,18 @@ impl ItsBoard {
     pub fn set_int(&self, n: u32, level: Option<bool>) {
         assert!(n < 6, "the ITS-Board has inputs INT0..INT5");
         self.mcu.gpio.borrow_mut().drive(port('G'), n, level);
+    }
+
+    /// Applies a voltage to pad `n` of the Analog header ([`ANALOG_PADS`]);
+    /// `None` leaves it open.
+    pub fn set_analog(&self, n: usize, volts: Option<f32>) {
+        let (_, p, pin) = ANALOG_PADS[n];
+        self.mcu.analog.borrow_mut().set_pin(port(p), pin, volts);
+    }
+
+    /// Output voltage of DAC1 (on the DAC1 pad) while it is enabled.
+    pub fn dac1(&self) -> Option<f32> {
+        self.mcu.analog.borrow().dac_output(0)
     }
 
     pub fn set_user_button(&self, pressed: bool) {

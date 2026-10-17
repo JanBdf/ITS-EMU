@@ -13,13 +13,13 @@ Status: work in progress — see [PLAN.md](PLAN.md).
 |---|---|
 | CPU | Cortex-M4F (Thumb-2, FPU) via [Unicorn](https://www.unicorn-engine.org/); NVIC, SysTick, exceptions, faults in Rust |
 | Clock | RCC clock tree, virtual time in CPU cycles (16 MHz HSI → 180 MHz PLL); cycle model of the Cortex-M4 (loads, branches, divisions, exceptions, APB wait states) measured on the board |
-| Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (output compare, PWM duty, TIM1/8 repetition counter), SPI1, USART3, PWR, flash interface, bit-banding |
-| Board | LEDs OUT0–15, buttons S0–S7, INT0–5, Nucleo LEDs and USER button |
+| Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (output compare, PWM duty, TIM1/8 repetition counter), ADC1–3, DAC, SPI1, USART3, PWR, flash interface, bit-banding |
+| Board | LEDs OUT0–15, buttons S0–S7, INT0–5, Analog header (voltages on the ADC pins, DAC1), Nucleo LEDs and USER button |
 | Display | ILI9486 480×320 TFT with SPI timing, XPT2046 touch, backlight PWM, tone response of the real panel (GUI; `--ideal-colors` to switch off) |
 | Serial | Virtual COM port (USART3, `printf` / `stdin_getchar`) |
 | Debugging | GDB remote server: breakpoints, single step, watchpoints, registers incl. FPU, memory, `monitor reset halt` |
 
-Not yet: Ethernet, DMA, ADC/DAC, I²C, input capture, further SPIs and UARTs.
+Not yet: Ethernet, DMA, I²C, timer input capture, ADC/DAC hardware triggers, further SPIs and UARTs.
 
 ## Usage
 
@@ -34,7 +34,10 @@ cargo run --release -p its-emu -- path/to/Program.axf --seconds 10 \
 ```
 
 GUI: keys `0`–`7` press S0–S7, right click latches a button, clicking the
-display is a touch, firmware files can be dropped onto the window.
+display is a touch, clicking an AUX pad connects it to GND/3V3, the mouse
+wheel or a right click on a pad of the Analog header applies a voltage,
+firmware files can be dropped onto the window. On the command line,
+`--input 2:PC3=1.65` applies 1.65 V to PC3 (`open` disconnects it).
 
 The font table that ITS_BRD_LIB expects in flash at `0x0810_0000` is built in.
 
