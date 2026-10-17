@@ -65,20 +65,21 @@ course programs.
 The course's VS Code launch configurations always start pyOCD with
 `--probe stlink:`, which only finds a USB ST-LINK, so the emulator needs its
 own configuration (`.vscode/launch.json` of the course project, CDT GDB
-adapter). It loads the program that was just built, resets and stops at
-`main`, like **STLink@pyOCD (launch)** on the board:
+adapter). It loads the last build of the project that is active in the CMSIS
+extension, resets and stops at `main`, like **STLink@pyOCD (launch)** on the
+board:
 
 ```json
 {
     "name": "ITS-Board Emulator",
     "type": "gdbtarget",
     "request": "attach",
-    "cwd": "${workspaceFolder}/Programs/StoppuhrASM",
-    "program": "out/StoppuhrASM/ITSboard_Assembly/Debug/StoppuhrASM.axf",
+    "cwd": "${command:cmsis-csolution.getSolutionDir}",
+    "program": "${command:cmsis-csolution.getBinaryFile}",
     "gdb": "arm-none-eabi-gdb",
     "auxiliaryGdb": true,
     "initCommands": [
-        "monitor load ${workspaceFolder}/Programs/StoppuhrASM/out/StoppuhrASM/ITSboard_Assembly/Debug/StoppuhrASM.axf",
+        "monitor load ${command:cmsis-csolution.getSolutionDir}/${command:cmsis-csolution.getBinaryFile}",
         "maintenance flush register-cache",
         "tbreak main"
     ],
