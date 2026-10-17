@@ -13,6 +13,7 @@ use std::rc::Rc;
 use emu_core::bus::{extract_read, merge_write};
 use emu_core::{Clock, DeviceCtx, Peripheral};
 
+use crate::dma::{DmaLine, SharedDma};
 use crate::rcc::SharedClocks;
 use crate::timer::ApbBus;
 
@@ -58,6 +59,8 @@ const CR1_M: u32 = 1 << 12;
 const CR1_UE: u32 = 1 << 13;
 const CR1_OVER8: u32 = 1 << 15;
 const CR3_EIE: u32 = 1 << 0;
+const CR3_DMAR: u32 = 1 << 6;
+const CR3_DMAT: u32 = 1 << 7;
 
 pub struct Usart {
     name: &'static str,
@@ -84,6 +87,8 @@ pub struct Usart {
     /// Status flags that are cleared by "SR read, then DR read/write".
     sr_read_mask: u32,
     warned: bool,
+    /// DMA controllers and the request lines for reception and transmission.
+    dma: Option<(SharedDma, DmaLine, DmaLine)>,
 }
 
 impl Usart {
@@ -115,7 +120,13 @@ impl Usart {
             idle_at: None,
             sr_read_mask: 0,
             warned: false,
+            dma: None,
         }
+    }
+
+    pub fn with_dma(mut self, dma: SharedDma, rx: DmaLine, tx: DmaLine) -> Self {
+        self.dma = Some((dma, rx, tx));
+        self
     }
 
     fn clocks_enabled(&self) -> bool {
@@ -231,6 +242,11 @@ impl Usart {
             || (cr1 & CR1_IDLEIE != 0 && self.sr & SR_IDLE != 0)
             || (self.cr3 & CR3_EIE != 0 && self.sr & (SR_FE | SR_NF | SR_ORE) != 0);
         ctx.set_irq(self.irq, pending && cr1 & CR1_UE != 0);
+        if let Some((dma, rx, tx)) = &self.dma {
+            let on = cr1 & CR1_UE != 0;
+            rx.set(dma, on && self.cr3 & CR3_DMAR != 0 && self.sr & SR_RXNE != 0);
+            tx.set(dma, on && self.cr3 & CR3_DMAT != 0 && self.sr & SR_TXE != 0);
+        }
     }
 
     fn write_dr(&mut self, ctx: &mut DeviceCtx, value: u32) {
@@ -346,8 +362,9 @@ impl Peripheral for Usart {
     }
 
     fn reset(&mut self) {
-        let port = self.port.clone();
+        let (port, dma) = (self.port.clone(), self.dma.take());
         *self = Self::new(self.name, self.irq, self.bus, self.enable_bit, self.clocks.clone(), port);
+        self.dma = dma;
     }
 }
 

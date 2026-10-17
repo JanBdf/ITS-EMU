@@ -28,6 +28,7 @@
  *   i2c             I2C1 (PB8/PB9, nothing connected): START, address NACK, STOP
  *   iwdg PR RLR     starts the watchdog, prints the time (us) until it resets
  *   dma             DMA2: memory-to-memory copy, ADC1 scan into memory
+ *   dmatx           USART3 transmission by DMA1
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1267,6 +1268,38 @@ static void cmd_dma(void) {
     DMA2->LIFCR = 0x3D;
 }
 
+/* ---- USART3 transmission by DMA1 stream 3 (channel 4). */
+static const char dma_msg[] = "dma says hello\n";
+
+static void cmd_dmatx(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->AHB1ENR |= RCC_AHB1ENR_DMA1EN;
+    HAL_Delay(20); // let earlier output drain
+    DMA_Stream_TypeDef *s = DMA1_Stream3;
+    s->CR = 0;
+    DMA1->LIFCR = 0x3Du << 22;
+    s->PAR = (uint32_t)&USART3->DR;
+    s->M0AR = (uint32_t)dma_msg;
+    s->NDTR = sizeof(dma_msg) - 1;
+    s->FCR = 0;
+    s->CR = (4u << 25) | DMA_SxCR_DIR_0 | DMA_SxCR_MINC;
+    USART3->CR3 |= USART_CR3_DMAT;
+    uint32_t t0 = DWT->CYCCNT;
+    s->CR |= DMA_SxCR_EN;
+    while (!(DMA1->LISR & DMA_LISR_TCIF3)) {
+    }
+    uint32_t t1 = DWT->CYCCNT;
+    while (!(USART3->SR & USART_SR_TC)) {
+    }
+    uint32_t t2 = DWT->CYCCNT;
+    USART3->CR3 &= ~USART_CR3_DMAT;
+    printf("X lisr %08lx ndtr %lu cr %08lx\n", (unsigned long)DMA1->LISR, (unsigned long)s->NDTR,
+           (unsigned long)s->CR);
+    printf("X tc_us %lu sent_us %lu\n", (unsigned long)((t1 - t0) / 180), (unsigned long)((t2 - t0) / 180));
+    DMA1->LIFCR = 0x3Du << 22;
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -1310,6 +1343,8 @@ static void execute(char *line) {
         cmd_iwdg(arg);
     } else if (!strcmp(line, "dma")) {
         cmd_dma();
+    } else if (!strcmp(line, "dmatx")) {
+        cmd_dmatx();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {

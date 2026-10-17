@@ -101,6 +101,9 @@ pub struct System {
     pub nvic: Nvic,
     pub scs: Scs,
     pub bus: Bus,
+    /// Cycles of the blocks since the start of a chain of blocks that the
+    /// translator split (see `wait_states`).
+    mmio_shift: u64,
     /// DMA controllers, if the MCU has any, and the memory they access.
     master: Option<Box<dyn BusMaster>>,
     ram: Ram,
@@ -599,6 +602,7 @@ impl Machine {
             nvic: Nvic::new(),
             scs: Scs::new(),
             bus,
+            mmio_shift: 0,
             master: None,
             ram: Ram::default(),
             config: config.clone(),
@@ -657,7 +661,7 @@ impl Machine {
             Some(move |uc: &mut Unicorn<System>, off: u64, size: usize| {
                 let sys = uc.get_data_mut();
                 let addr = sys.config.memory.periph_base + off as u32;
-                let ws = sys.bus.wait_states(addr, false, sys.clock.cycles());
+                let ws = sys.bus.wait_states(addr, false, sys.clock.cycles() - sys.mmio_shift);
                 sys.clock.advance(ws);
                 let (mut ctx, bus) = sys.ctx();
                 let value = bus.read(&mut ctx, addr, size as u32);
@@ -672,7 +676,7 @@ impl Machine {
                 let sys = uc.get_data_mut();
                 sys.idle.dirty();
                 let addr = sys.config.memory.periph_base + off as u32;
-                let ws = sys.bus.wait_states(addr, true, sys.clock.cycles());
+                let ws = sys.bus.wait_states(addr, true, sys.clock.cycles() - sys.mmio_shift);
                 sys.clock.advance(ws);
                 let (mut ctx, bus) = sys.ctx();
                 bus.write(&mut ctx, addr, size as u32, value as u32);
@@ -805,13 +809,17 @@ impl Machine {
             }
             let sys = uc.get_data_mut();
             let refill = if entered_by_branch { info.entry_penalty } else { 0 };
-            let (saving, stall) = match sys.fell_through.take() {
+            let (saving, stall, continues) = match sys.fell_through.take() {
                 Some((end, prev)) if end == addr => {
-                    (info.continuation_saving(prev.last_load_rt), info.continuation_stall(prev.last_fp_dst))
+                    (info.continuation_saving(prev.last_load_rt), info.continuation_stall(prev.last_fp_dst), true)
                 }
-                _ => (0, 0),
+                _ => (0, 0, false),
             };
-            sys.clock.advance(u64::from(info.cycles + refill + stall - saving));
+            let cycles = u64::from(info.cycles + refill + stall - saving);
+            sys.clock.advance(cycles);
+            // Peripheral accesses see the time of their block; a block that
+            // continues a split one counts as part of it.
+            sys.mmio_shift = if continues { sys.mmio_shift + cycles } else { 0 };
             if !info.ends_with_branch && !info.ends_with_jump {
                 sys.fell_through = Some((addr + u64::from(size), info));
             }
