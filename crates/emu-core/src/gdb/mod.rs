@@ -74,6 +74,7 @@ impl Machine {
         self.load_elf(&image).map_err(|e| e.to_string())?;
         self.reset();
         let bytes = image.segments.iter().map(|s| s.data.len()).sum();
+        log::info!("monitor load {}: {bytes} bytes", path.display());
         self.gdb_loaded = Some((path.to_path_buf(), image));
         Ok(bytes)
     }
