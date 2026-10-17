@@ -74,6 +74,14 @@ pub struct Dma {
     requests: Cell<[[u8; 8]; 2]>,
     /// Streams that finished a (non-circular) transfer for channel n.
     ended: Cell<[[u8; 8]; 2]>,
+    /// Some stream is enabled (checked after every peripheral access).
+    active: Cell<bool>,
+}
+
+impl Dma {
+    fn update_active(&self, d: &DmaState) {
+        self.active.set(d.streams.iter().flatten().any(|st| st.cr & CR_EN != 0));
+    }
 }
 
 pub type SharedDma = Rc<Dma>;
@@ -201,6 +209,9 @@ pub struct DmaMaster(pub SharedDma);
 
 impl BusMaster for DmaMaster {
     fn wants_service(&self) -> bool {
+        if !self.0.active.get() {
+            return false;
+        }
         let d = self.0.state.borrow();
         let r = self.0.requests.get();
         (0..2).any(|c| d.enables[c] && (0..8).any(|s| d.due(c, s, &r)))
@@ -222,6 +233,7 @@ impl BusMaster for DmaMaster {
             }
         }
         d.sync_irqs(ctx);
+        self.0.update_active(&d);
     }
 }
 
@@ -287,6 +299,7 @@ impl Peripheral for DmaRegs {
             return;
         }
         let reg = off & !3;
+        let requests = self.state.requests.get()[self.index];
         let mut d = self.state.state.borrow_mut();
         d.enables[self.index] = true;
         match reg {
@@ -309,8 +322,9 @@ impl Peripheral for DmaRegs {
                             // latch the transfer
                             (st.total, st.p, st.m) = (st.ndtr, st.par, st.m0ar);
                             // memory to peripheral in direct mode reports a FIFO
-                            // error when it starts (on the board, too)
-                            if (v >> 6) & 3 == 1 && st.fcr & 4 == 0 {
+                            // error when the peripheral requests already (as on the board)
+                            let requesting = requests[s] & (1 << ((v >> 25) & 7)) != 0;
+                            if (v >> 6) & 3 == 1 && st.fcr & 4 == 0 && requesting {
                                 st.flags |= 1;
                             }
                             if st.ndtr == 0 {
@@ -333,6 +347,7 @@ impl Peripheral for DmaRegs {
             _ => {}
         }
         d.sync_irqs(ctx);
+        self.state.update_active(&d);
     }
 
     fn reset(&mut self) {

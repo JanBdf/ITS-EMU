@@ -235,6 +235,18 @@ fn usart_transmission_by_dma_matches_the_board() {
 }
 
 #[test]
+fn spi_transfer_by_dma_matches_the_board() {
+    // SPI3 with nothing on the header: the open MISO reads 0
+    let Some(out) = run("dmaspi", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-dmaspi.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("S ")).collect();
+    let board: Vec<&str> = board.lines().collect();
+    assert_eq!(emu[..2], board[..2]);
+    let cycles = |l: &str| -> f64 { l.rsplit(' ').next().unwrap().parse().unwrap() };
+    assert!((cycles(emu[2]) - cycles(board[2])).abs() <= 40.0, "{} / board {}", emu[2], board[2]);
+}
+
+#[test]
 fn watchdog_resets_like_the_board() {
     // HwCheck `iwdg 2 fff`: refreshed once, then the board resets after
     // 1.92 s (last line "W t 1920000"); the reset flags read IWDG + PIN.

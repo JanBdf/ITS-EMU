@@ -16,6 +16,7 @@ use std::rc::Rc;
 use emu_core::bus::{extract_read, merge_write};
 use emu_core::{Clock, DeviceCtx, Peripheral};
 
+use crate::dma::{DmaLine, SharedDma};
 use crate::rcc::SharedClocks;
 use crate::timer::ApbBus;
 
@@ -59,6 +60,8 @@ pub struct Spi {
     crcpr: u32,
     /// SPI2/SPI3 also have an I2S mode (registers only); the others read 0 there.
     i2s: bool,
+    /// DMA controllers and the request lines for reception and transmission.
+    dma: Option<(SharedDma, DmaLine, DmaLine)>,
     i2scfgr: u32,
     i2spr: u32,
 }
@@ -88,9 +91,15 @@ impl Spi {
             ovr_dr_read: false,
             crcpr: 7,
             i2s: false,
+            dma: None,
             i2scfgr: 0,
             i2spr: 0,
         }
+    }
+
+    pub fn with_dma(mut self, dma: SharedDma, rx: DmaLine, tx: DmaLine) -> Self {
+        self.dma = Some((dma, rx, tx));
+        self
     }
 
     pub fn with_i2s(mut self) -> Self {
@@ -129,6 +138,11 @@ impl Spi {
             || (self.cr2 & CR2_TXEIE != 0 && self.sr & SR_TXE != 0)
             || (self.cr2 & CR2_ERRIE != 0 && self.sr & SR_OVR != 0);
         ctx.set_irq(self.irq, pending);
+        if let Some((dma, rx, tx)) = &self.dma {
+            let on = self.cr1 & CR1_SPE != 0;
+            rx.set(dma, on && self.cr2 & 1 != 0 && self.sr & SR_RXNE != 0);
+            tx.set(dma, on && self.cr2 & 2 != 0 && self.sr & SR_TXE != 0);
+        }
     }
 
     fn transmit(&mut self, ctx: &DeviceCtx, value: u16) {
