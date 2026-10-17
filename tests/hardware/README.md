@@ -15,6 +15,7 @@ ITS-Board (Rev 02, NUCLEO-F429ZI, 180 MHz, ART accelerator on), taken
 | `HwCheck-adc.txt` | `adc` | ADC conversion times, internal channels, open pins, DAC1 measured by ADC1, flag semantics |
 | `HwCheck-i2c.txt` | `i2c` | I2C1 with nothing on the header: START, address NACK, STOP, flags and durations |
 | `HwCheck-dma.txt` | `dma` | DMA2 memory-to-memory copy, ADC1 scan into memory (single, after the end of the transfer, continuous + circular) |
+| `HwCheck-dmatx.txt` | `dmatx` | USART3 transmission by DMA1 stream 3: output, flags, durations |
 | `HwCheck-regs.txt` | `wr`/`dump` (first line) | reset values of the registers of timers, SPIs, U(S)ARTs, I2Cs, ADC, DAC, SYSCFG, EXTI |
 
 `crates/itsboard/tests/hardware.rs` runs the same commands in the emulator

@@ -14,6 +14,7 @@ pub mod usart;
 
 use emu_core::{Bus, Machine, MachineConfig, MachineError, MemoryMap};
 
+use dma::DmaLine;
 use gpio::{GPIOA_BASE, GpioPort, NUM_PORTS, PORT_STRIDE, SharedGpio};
 use rcc::{FlashInterface, Pwr, Rcc, SharedClocks};
 use spi::{Spi, SpiSlot};
@@ -153,6 +154,7 @@ pub fn build() -> (Bus, Stm32f429) {
     let gpio = SharedGpio::default();
     let clocks = SharedClocks::default();
     let mut bus = Bus::new();
+    let dma = dma::SharedDma::default();
 
     let spi1 = SpiSlot::default();
     let usart3 = SharedSerial::default();
@@ -187,15 +189,19 @@ pub fn build() -> (Bus, Stm32f429) {
     for (base, t) in more {
         bus.attach(base, 0x400, Box::new(t));
     }
+    let usart3_dma = (DmaLine(&[(0, 1, 4)]), DmaLine(&[(0, 3, 4), (0, 4, 7)]));
     bus.attach(
         0x4000_4800,
         0x400,
-        Box::new(Usart::new("USART3", 39, ApbBus::Apb1, 18, clocks.clone(), usart3.clone())),
+        Box::new(Usart::new("USART3", 39, ApbBus::Apb1, 18, clocks.clone(), usart3.clone()).with_dma(
+            dma.clone(),
+            usart3_dma.0,
+            usart3_dma.1,
+        )),
     );
     bus.attach(0x4000_7000, 0x400, Box::new(Pwr::new()));
     bus.attach(0x4000_3000, 0x400, Box::new(iwdg::Iwdg::new()));
     let i2c1 = i2c::I2cBus::default();
-    let dma = dma::SharedDma::default();
     let i2c = [
         ("I2C1", 0x4000_5400, 31, 21, &[('B', 6), ('B', 8)][..], &[('B', 7), ('B', 9)][..], i2c1.clone()),
         (
@@ -236,18 +242,21 @@ pub fn build() -> (Bus, Stm32f429) {
         let spi = if matches!(name, "SPI2" | "SPI3") { spi.with_i2s() } else { spi };
         bus.attach(base, 0x400, Box::new(spi));
     }
-    let uarts = [
-        ("USART1", 0x4001_1000, 37, Apb2, 4),
-        ("USART2", 0x4000_4400, 38, Apb1, 17),
-        ("UART4", 0x4000_4C00, 52, Apb1, 19),
-        ("UART5", 0x4000_5000, 53, Apb1, 20),
-        ("USART6", 0x4001_1400, 71, Apb2, 5),
-        ("UART7", 0x4000_7800, 82, Apb1, 30),
-        ("UART8", 0x4000_7C00, 83, Apb1, 31),
+    // DMA request lines (controller, stream, channel) for reception / transmission
+    let uarts: [(_, _, _, _, _, &'static [_], &'static [_]); 7] = [
+        ("USART1", 0x4001_1000, 37, Apb2, 4, &[(1, 2, 4), (1, 5, 4)], &[(1, 7, 4)]),
+        ("USART2", 0x4000_4400, 38, Apb1, 17, &[(0, 5, 4)], &[(0, 6, 4)]),
+        ("UART4", 0x4000_4C00, 52, Apb1, 19, &[(0, 2, 4)], &[(0, 4, 4)]),
+        ("UART5", 0x4000_5000, 53, Apb1, 20, &[(0, 0, 4)], &[(0, 7, 4)]),
+        ("USART6", 0x4001_1400, 71, Apb2, 5, &[(1, 1, 5), (1, 2, 5)], &[(1, 6, 5), (1, 7, 5)]),
+        ("UART7", 0x4000_7800, 82, Apb1, 30, &[(0, 3, 5)], &[(0, 1, 5)]),
+        ("UART8", 0x4000_7C00, 83, Apb1, 31, &[(0, 6, 5)], &[(0, 0, 5)]),
     ];
-    for (name, base, irq, apb, en_bit) in uarts {
+    for (name, base, irq, apb, en_bit, rx, tx) in uarts {
         let port = SharedSerial::default();
-        bus.attach(base, 0x400, Box::new(Usart::new(name, irq, apb, en_bit, clocks.clone(), port)));
+        let u =
+            Usart::new(name, irq, apb, en_bit, clocks.clone(), port).with_dma(dma.clone(), DmaLine(rx), DmaLine(tx));
+        bus.attach(base, 0x400, Box::new(u));
     }
     for i in 0..NUM_PORTS {
         bus.attach(

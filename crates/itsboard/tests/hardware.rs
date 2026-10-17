@@ -215,6 +215,26 @@ fn dma_matches_the_board() {
 }
 
 #[test]
+fn usart_transmission_by_dma_matches_the_board() {
+    let Some(out) = run("dmatx", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-dmatx.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| !l.starts_with("ok ")).collect();
+    let board: Vec<&str> = board.lines().collect();
+    assert_eq!(emu.len(), board.len(), "{out}");
+    for (e, b) in emu.iter().zip(&board) {
+        if b.starts_with("X tc_us") {
+            // durations in µs: until the last byte was handed over, until it was sent
+            let us = |l: &str| -> Vec<f64> { [2, 4].map(|i| l.split(' ').nth(i).unwrap().parse().unwrap()).to_vec() };
+            for (x, y) in us(e).iter().zip(us(b)) {
+                assert!((x - y).abs() <= 5.0, "{e} / board {b}");
+            }
+        } else {
+            assert_eq!(e, b);
+        }
+    }
+}
+
+#[test]
 fn watchdog_resets_like_the_board() {
     // HwCheck `iwdg 2 fff`: refreshed once, then the board resets after
     // 1.92 s (last line "W t 1920000"); the reset flags read IWDG + PIN.

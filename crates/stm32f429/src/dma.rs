@@ -308,6 +308,11 @@ impl Peripheral for DmaRegs {
                         if !enabled && v & CR_EN != 0 {
                             // latch the transfer
                             (st.total, st.p, st.m) = (st.ndtr, st.par, st.m0ar);
+                            // memory to peripheral in direct mode reports a FIFO
+                            // error when it starts (on the board, too)
+                            if (v >> 6) & 3 == 1 && st.fcr & 4 == 0 {
+                                st.flags |= 1;
+                            }
                             if st.ndtr == 0 {
                                 st.flags |= TEIF;
                                 st.cr = v & !CR_EN;

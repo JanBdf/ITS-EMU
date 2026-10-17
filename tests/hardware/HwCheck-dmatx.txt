@@ -1,0 +1,3 @@
+dma says hello
+X lisr 0c400000 ndtr 0 cr 08000440
+X tc_us 1130 sent_us 1304
