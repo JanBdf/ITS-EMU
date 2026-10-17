@@ -68,26 +68,36 @@ course programs.
 The course's VS Code launch configurations always start pyOCD with
 `--probe stlink:`, which only finds a USB ST-LINK, so the emulator needs its
 own configuration (`.vscode/launch.json` of the course project, CDT GDB
-adapter). It loads the program that was just built, resets and stops at
-`main`, like **STLink@pyOCD (launch)** on the board:
+adapter). It loads the last build of the project that is active in the CMSIS
+extension, resets and stops at `main`, like **STLink@pyOCD (launch)** on the
+board:
 
 ```json
 {
     "name": "ITS-Board Emulator",
     "type": "gdbtarget",
     "request": "attach",
-    "cwd": "${workspaceFolder}/Programs/StoppuhrASM",
-    "program": "out/StoppuhrASM/ITSboard_Assembly/Debug/StoppuhrASM.axf",
+    "cwd": "${command:cmsis-csolution.getSolutionDir}",
+    "program": "${command:cmsis-csolution.getBinaryFile}",
     "gdb": "arm-none-eabi-gdb",
     "auxiliaryGdb": true,
     "initCommands": [
-        "monitor load ${workspaceFolder}/Programs/StoppuhrASM/out/StoppuhrASM/ITSboard_Assembly/Debug/StoppuhrASM.axf",
+        "monitor load ${command:cmsis-csolution.getSolutionDir}/${command:cmsis-csolution.getBinaryFile}",
         "maintenance flush register-cache",
         "tbreak main"
     ],
     "customResetCommands": ["monitor reset halt", "maintenance flush register-cache", "tbreak main", "continue"],
     "target": { "port": "3333" }
 }
+```
+
+The CDT adapter ignores *Run Without Debugging* (Ctrl+F5) and stops at `main`
+as with F5. The small extension in `tools/vscode-nodebug` removes the `tbreak`
+commands in that case, so the same configuration then just runs the program:
+
+```sh
+tools/vscode-nodebug/package.sh
+code --install-extension tools/vscode-nodebug/gdbtarget-nodebug.vsix
 ```
 
 Several debuggers may connect at once: the first one controls the core, the

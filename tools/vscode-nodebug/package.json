@@ -1,0 +1,12 @@
+{
+    "name": "gdbtarget-nodebug",
+    "displayName": "gdbtarget: Run Without Debugging",
+    "description": "Run Without Debugging (Ctrl+F5) for gdbtarget launch configurations: drops the tbreak commands so the program does not stop at main.",
+    "version": "0.1.0",
+    "publisher": "its-emu",
+    "license": "MIT",
+    "engines": { "vscode": "^1.80.0" },
+    "categories": ["Debuggers"],
+    "activationEvents": ["onDebugResolve:gdbtarget"],
+    "main": "./extension.js"
+}
