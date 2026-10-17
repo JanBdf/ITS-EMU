@@ -20,6 +20,7 @@
  *   div             prints UDIV/SDIV cycles for a range of operands
  *   rd ADDR         prints the 32-bit word at ADDR
  *   wr ADDR VAL     writes the 32-bit word VAL to ADDR
+ *   dump ADDR N     prints N words from ADDR (hex)
  *   exti            EXTI/SYSCFG behaviour and interrupt latency (PG0, PG5)
  *   tim             timers: compare flags and interrupts, TIM1 repetition
  *                   counter, basic timers, shared interrupt lines
@@ -1172,6 +1173,12 @@ static void execute(char *line) {
         cmd_i2c();
     } else if (!strcmp(line, "time")) {
         cmd_time();
+    } else if (!strcmp(line, "dump")) {
+        char *cnt = arg ? strchr(arg, ' ') : NULL;
+        unsigned long words = cnt ? strtoul(cnt, NULL, 16) : 1;
+        for (unsigned long i = 0; i < words; i++) {
+            printf("R %08lx %08lx\n", n + 4 * i, (unsigned long)((volatile uint32_t *)n)[i]);
+        }
     } else if (!strcmp(line, "rd")) {
         printf("R %08lx %08lx\n", n, (unsigned long)*(volatile uint32_t *)n);
     } else if (!strcmp(line, "wr")) {

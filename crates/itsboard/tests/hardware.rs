@@ -171,6 +171,29 @@ fn timers_match_the_board() {
 }
 
 #[test]
+fn register_reset_values_match_the_board() {
+    // all peripheral clocks on, then the registers of timers, SPIs, U(S)ARTs,
+    // I2Cs, ADC, DAC, SYSCFG and EXTI (first line of the file: the commands)
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-regs.txt")).unwrap();
+    let (cmds, expected) = board.split_once('\n').unwrap();
+    let Some(mut sim) = Sim::boot("HwCheck.axf") else { return };
+    sim.run_until_ms(2_500);
+    assert!(sim.take_serial().ends_with("ready\n"));
+    let mut out = String::new();
+    for (i, cmd) in cmds.trim_start_matches("# ").split(" | ").enumerate() {
+        sim.send_serial(&format!("{cmd}\n"));
+        sim.run_until_ms(2_600 + 100 * i as u64);
+        out += &sim.take_serial();
+    }
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("R ")).collect();
+    let expected: Vec<&str> = expected.lines().collect();
+    assert_eq!(emu.len(), expected.len(), "{out}");
+    let differ: Vec<String> =
+        emu.iter().zip(&expected).filter(|(e, b)| e != b).map(|(e, b)| format!("{e} (board {b})")).collect();
+    assert!(differ.is_empty(), "{differ:#?}");
+}
+
+#[test]
 fn i2c_matches_the_board() {
     // I2C1 with nothing on the header: flags exact, durations within 2 %
     // (the shortest ones are one iteration of the polling loop)

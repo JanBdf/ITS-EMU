@@ -184,6 +184,32 @@ pub fn build() -> (Bus, Stm32f429) {
     bus.attach(0x4001_3800, 0x400, Box::new(exti::Syscfg::new(exti.clone(), gpio.clone(), clocks.clone())));
     bus.attach(0x4001_3C00, 0x400, Box::new(exti::Exti::new(exti, gpio.clone())));
     bus.attach(0x4001_3000, 0x400, Box::new(Spi::new("SPI1", 35, ApbBus::Apb2, 12, clocks.clone(), spi1.clone())));
+    // further SPIs and U(S)ARTs: nothing connected (SPI3 is on the SPI header)
+    let spis = [
+        ("SPI2", 0x4000_3800, 36, Apb1, 14),
+        ("SPI3", 0x4000_3C00, 51, Apb1, 15),
+        ("SPI4", 0x4001_3400, 84, Apb2, 13),
+        ("SPI5", 0x4001_5000, 85, Apb2, 20),
+        ("SPI6", 0x4001_5400, 86, Apb2, 21),
+    ];
+    for (name, base, irq, apb, en_bit) in spis {
+        let spi = Spi::new(name, irq, apb, en_bit, clocks.clone(), SpiSlot::default());
+        let spi = if matches!(name, "SPI2" | "SPI3") { spi.with_i2s() } else { spi };
+        bus.attach(base, 0x400, Box::new(spi));
+    }
+    let uarts = [
+        ("USART1", 0x4001_1000, 37, Apb2, 4),
+        ("USART2", 0x4000_4400, 38, Apb1, 17),
+        ("UART4", 0x4000_4C00, 52, Apb1, 19),
+        ("UART5", 0x4000_5000, 53, Apb1, 20),
+        ("USART6", 0x4001_1400, 71, Apb2, 5),
+        ("UART7", 0x4000_7800, 82, Apb1, 30),
+        ("UART8", 0x4000_7C00, 83, Apb1, 31),
+    ];
+    for (name, base, irq, apb, en_bit) in uarts {
+        let port = SharedSerial::default();
+        bus.attach(base, 0x400, Box::new(Usart::new(name, irq, apb, en_bit, clocks.clone(), port)));
+    }
     for i in 0..NUM_PORTS {
         bus.attach(
             GPIOA_BASE + PORT_STRIDE * i as u32,

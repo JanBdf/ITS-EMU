@@ -57,6 +57,8 @@ pub struct Spi {
     /// OVR is cleared by a DR read followed by an SR read.
     ovr_dr_read: bool,
     crcpr: u32,
+    /// SPI2/SPI3 also have an I2S mode (registers only); the others read 0 there.
+    i2s: bool,
     i2scfgr: u32,
     i2spr: u32,
 }
@@ -85,9 +87,16 @@ impl Spi {
             tx_buf: None,
             ovr_dr_read: false,
             crcpr: 7,
+            i2s: false,
             i2scfgr: 0,
-            i2spr: 2,
+            i2spr: 0,
         }
+    }
+
+    pub fn with_i2s(mut self) -> Self {
+        self.i2s = true;
+        self.i2spr = 2;
+        self
     }
 
     fn pclk(&self) -> u32 {
@@ -202,8 +211,8 @@ impl Peripheral for Spi {
                 u32::from(self.rx)
             }
             0x10 => self.crcpr,
-            0x1C => self.i2scfgr,
-            0x20 => self.i2spr,
+            0x1C if self.i2s => self.i2scfgr,
+            0x20 if self.i2s => self.i2spr,
             _ => 0,
         };
         self.sync_irq(ctx);
@@ -221,13 +230,13 @@ impl Peripheral for Spi {
             0x08 => {} // CRCERR (rc_w0) only, CRC is not emulated
             0x0C => self.transmit(ctx, value as u16),
             0x10 => self.crcpr = value & 0xFFFF,
-            0x1C => {
+            0x1C if self.i2s => {
                 self.i2scfgr = merge_write(self.i2scfgr, off, size, value) & 0x0FBF;
                 if self.i2scfgr & (1 << 11) != 0 {
                     log::warn!("{}: I2S mode is not emulated", self.name);
                 }
             }
-            0x20 => self.i2spr = value & 0x3FF,
+            0x20 if self.i2s => self.i2spr = value & 0x3FF,
             _ => {}
         }
         self.sync_irq(ctx);
@@ -251,7 +260,7 @@ impl Peripheral for Spi {
         self.ovr_dr_read = false;
         self.crcpr = 7;
         self.i2scfgr = 0;
-        self.i2spr = 2;
+        self.i2spr = if self.i2s { 2 } else { 0 };
     }
 }
 
