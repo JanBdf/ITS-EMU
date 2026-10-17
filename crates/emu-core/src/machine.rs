@@ -1189,7 +1189,13 @@ impl Machine {
         sys.stepping = true;
         sys.slice_end = u64::MAX;
         sys.slice_limit = u64::MAX;
-        let result = self.uc.emu_start(u64::from(pc | 1), u64::MAX, 0, 1);
+        let mut result = self.uc.emu_start(u64::from(pc | 1), u64::MAX, 0, 1);
+        if let Err(err) = result
+            && self.fetch_from_new_ram_code(err)
+        {
+            // nothing executed yet: step the instruction in now-executable RAM
+            result = self.uc.emu_start(u64::from(pc | 1), u64::MAX, 0, 1);
+        }
         let sys = self.uc.get_data_mut();
         sys.stepping = false;
         sys.clock.advance(1);
@@ -1432,18 +1438,25 @@ impl Machine {
         ok && self.uc.ctl_flush_tlb().is_ok()
     }
 
+    /// `err` is the refused fetch of code in RAM that has not been executable
+    /// so far; it is now (retry the instruction).
+    fn fetch_from_new_ram_code(&mut self, err: uc_error) -> bool {
+        err == uc_error::EXCEPTION && self.uc.get_data().last_invalid.is_none() && self.make_ram_executable(self.pc())
+    }
+
     /// Unicorn aborted because of an invalid memory access or instruction.
     fn on_emu_error(&mut self, err: uc_error) {
+        if self.fetch_from_new_ram_code(err) {
+            return;
+        }
         let pc = self.pc();
         let invalid = self.uc.get_data_mut().last_invalid.take();
-        // An instruction fetch the TLB hook (`page_perms`) refused.
+        // An instruction fetch the TLB hook (`page_perms`) refused outside
+        // RAM: an execute-never region of the default memory map, which the
+        // CPU's own TLB reported as a prefetch abort.
         if err == uc_error::EXCEPTION && invalid.is_none() {
-            if !self.make_ram_executable(pc) {
-                // execute-never region of the default memory map: what the
-                // CPU's own TLB reported as a prefetch abort
-                self.uc.get_data_mut().scs.cfsr |= scs::CFSR_PRECISERR;
-                Self::raise_fault(&mut self.uc, nvic::BUS_FAULT, pc);
-            }
+            self.uc.get_data_mut().scs.cfsr |= scs::CFSR_PRECISERR;
+            Self::raise_fault(&mut self.uc, nvic::BUS_FAULT, pc);
             return;
         }
         match (err, invalid) {
