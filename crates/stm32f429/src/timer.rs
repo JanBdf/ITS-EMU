@@ -285,7 +285,7 @@ impl GpTimer {
                     let ps = &g.ports[p];
                     ps.mode(pin) == PinMode::Alternate && ps.af(pin) == pins.af
                 };
-                for (_, level, cycle) in g.take_edges(p, 1 << pin) {
+                for (_, level, cycle, _) in g.take_edges(p, 1 << pin) {
                     if routed {
                         let i = usize::from(!pins.pins[0].iter().any(|&(pp, pn)| port(pp) == p && pn == pin));
                         edges.push((cycle, i, level));

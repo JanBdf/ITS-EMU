@@ -22,7 +22,7 @@ pub use sim::Simulator;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use devices::{DeviceHub, RotaryEncoder, SharedDevices};
+use devices::{DeviceHub, Ds18b20, OneWireBus, RotaryEncoder, SharedDevices};
 use emu_core::Bus;
 use stm32f429::Stm32f429;
 use stm32f429::gpio::{PinMode, SharedGpio, port};
@@ -146,6 +146,8 @@ pub struct ItsBoard {
     touch: Rc<RefCell<Xpt2046>>,
     devices: SharedDevices,
     encoders: RefCell<Vec<Rc<RefCell<RotaryEncoder>>>>,
+    /// DS18B20 sensors: their 1-Wire line and their place on it.
+    sensors: RefCell<Vec<(Rc<RefCell<OneWireBus>>, usize)>>,
 }
 
 impl ItsBoard {
@@ -164,7 +166,8 @@ impl ItsBoard {
             tp_cs_rises: 0,
             rst_rises: 0,
         }));
-        let board = Self { mcu: mcu.clone(), lcd, touch, devices, encoders: RefCell::default() };
+        let board =
+            Self { mcu: mcu.clone(), lcd, touch, devices, encoders: RefCell::default(), sensors: RefCell::default() };
         {
             let mut g = board.mcu.gpio.borrow_mut();
             for &(p, pin, level) in EXTERNAL_LEVELS {
@@ -193,6 +196,43 @@ impl ItsBoard {
         let mut encoders = self.encoders.borrow_mut();
         encoders.push(enc);
         encoders.len() - 1
+    }
+
+    /// Connects a DS18B20 temperature sensor (1-Wire, external power, pull-up
+    /// on the module) to a pin; returns its number for [`Self::set_temperature`].
+    /// Several sensors on one pin share the line (Search ROM finds them).
+    pub fn add_ds18b20(&self, pin: (char, u32)) -> usize {
+        let mut sensors = self.sensors.borrow_mut();
+        let serial = 0x0000_0B1A_D5A1 + 0x1_0000 * sensors.len() as u64; // distinct ROM codes
+        let at = (port(pin.0), pin.1);
+        let bus = match sensors.iter().find(|(b, _)| b.borrow().pin() == at) {
+            Some((b, _)) => b.clone(),
+            None => {
+                let b = Rc::new(RefCell::new(OneWireBus::new(self.mcu.gpio.clone(), pin)));
+                self.devices.borrow_mut().push(b.clone());
+                b
+            }
+        };
+        let index = {
+            let mut b = bus.borrow_mut();
+            b.sensors.push(Ds18b20::new(serial));
+            b.sensors.len() - 1
+        };
+        sensors.push((bus, index));
+        sensors.len() - 1
+    }
+
+    /// Temperature at DS18B20 `n` (°C, -55..125); the next conversion measures it.
+    pub fn set_temperature(&self, n: usize, celsius: f32) -> Result<(), String> {
+        let sensors = self.sensors.borrow();
+        let (bus, i) = sensors.get(n).ok_or_else(|| format!("there is no DS18B20 {n}"))?;
+        bus.borrow_mut().sensors[*i].set_celsius(celsius);
+        Ok(())
+    }
+
+    /// ROM code (family, serial, CRC) of DS18B20 `n`.
+    pub fn ds18b20_rom(&self, n: usize) -> Option<[u8; 8]> {
+        self.sensors.borrow().get(n).map(|(bus, i)| bus.borrow().sensors[*i].rom())
     }
 
     /// Turns encoder `n` by `detents` (negative: counter-clockwise), one
