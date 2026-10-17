@@ -275,6 +275,15 @@ fn timer_outputs_match_the_board() {
 }
 
 #[test]
+fn counting_directions_match_the_board() {
+    // TIM3 up, down and center-aligned 1/2/3: PWM levels per direction, flags
+    let Some(out) = run("timdir", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timdir.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("O ")).collect();
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
 fn ccr_preload_matches_the_board() {
     // TIM3_CH1 PWM on PC6: CCR written mid-period with and without OC1PE
     let Some(out) = run("timpre", 500) else { return };

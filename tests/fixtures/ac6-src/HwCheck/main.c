@@ -37,6 +37,7 @@
  *   enc             TIM8 encoder mode on PC6/PC7 (pull switching)
  *   onewire         1-Wire master on PG2 (AUX2): reset, ROM, DS18B20 conversion
  *   timpre          CCR preload (OCxPE) on TIM3_CH1/PC6
+ *   timdir          TIM3 counting directions: PWM levels, flags
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -2025,6 +2026,81 @@ static void cmd_timpre(void) {
     GPIOC->MODER &= ~(3u << 12);
 }
 
+/* ---- Counting directions of TIM3 (PWM1, CCR1 = 300, ARR = 999, 1 MHz) on
+ * PC6: where the output is high per direction, update and CC1 flags. */
+static void timdir_run(const char *name, uint32_t cr1) {
+    TIM3->CR1 = 0;
+    TIM3->PSC = 89;
+    TIM3->ARR = 999;
+    TIM3->CCR1 = 300;
+    TIM3->CCMR1 = 6u << 4;
+    TIM3->CCER = TIM_CCER_CC1E;
+    TIM3->CR1 = cr1;
+    TIM3->CNT = 0;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->SR = 0;
+    TIM3->CR1 = cr1 | TIM_CR1_CEN;
+    // flags during 10 ms from the start: count, and CNT:DIR when the first two were seen
+    uint32_t nu = 0, nc = 0, eu[2][2] = {{0}}, ec[2][2] = {{0}};
+    uint32_t t0 = DWT->CYCCNT;
+    while (DWT->CYCCNT - t0 < 10 * 180000u) {
+        uint32_t sr = TIM3->SR;
+        if (sr & (TIM_SR_UIF | TIM_SR_CC1IF)) {
+            uint32_t c = TIM3->CNT, d = (TIM3->CR1 >> 4) & 1;
+            TIM3->SR = ~(sr & (TIM_SR_UIF | TIM_SR_CC1IF));
+            if (sr & TIM_SR_UIF) {
+                if (nu < 2) {
+                    eu[nu][0] = c, eu[nu][1] = d;
+                }
+                nu++;
+            }
+            if (sr & TIM_SR_CC1IF) {
+                if (nc < 2) {
+                    ec[nc][0] = c, ec[nc][1] = d;
+                }
+                nc++;
+            }
+        }
+    }
+    // levels per direction
+    uint32_t lo[2] = {0xFFFF, 0xFFFF}, hi[2] = {0, 0};
+    for (int i = 0; i < 40000; i++) {
+        uint32_t c = TIM3->CNT;
+        uint32_t d = (TIM3->CR1 >> 4) & 1;
+        uint32_t l = (GPIOC->IDR >> 6) & 1;
+        if (TIM3->CNT != c || l == 0) {
+            continue;
+        }
+        lo[d] = c < lo[d] ? c : lo[d];
+        hi[d] = c > hi[d] ? c : hi[d];
+    }
+    TIM3->CR1 = 0;
+    printf("O %s high_up %lu %lu high_down %lu %lu\n", name, (unsigned long)lo[0], (unsigned long)hi[0],
+           (unsigned long)lo[1], (unsigned long)hi[1]);
+    printf("O %s uif %lu %lu:%lu %lu:%lu cc1if %lu %lu:%lu %lu:%lu\n", name, (unsigned long)nu,
+           (unsigned long)eu[0][0], (unsigned long)eu[0][1], (unsigned long)eu[1][0], (unsigned long)eu[1][1],
+           (unsigned long)nc, (unsigned long)ec[0][0], (unsigned long)ec[0][1], (unsigned long)ec[1][0],
+           (unsigned long)ec[1][1]);
+}
+
+static void cmd_timdir(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+    __DSB();
+    GPIOC->PUPDR &= ~(3u << 12);
+    timout_pc6(2);
+    timdir_run("up", 0);
+    timdir_run("down", TIM_CR1_DIR);
+    timdir_run("center1", 1u << 5);
+    timdir_run("center2", 2u << 5);
+    timdir_run("center3", 3u << 5);
+    TIM3->CCER = 0;
+    TIM3->CCMR1 = 0;
+    GPIOC->MODER &= ~(3u << 12);
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -2086,6 +2162,8 @@ static void execute(char *line) {
         cmd_onewire();
     } else if (!strcmp(line, "timpre")) {
         cmd_timpre();
+    } else if (!strcmp(line, "timdir")) {
+        cmd_timdir();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {

@@ -1,0 +1,10 @@
+O up high_up 0 299 high_down 65535 0
+O up uif 10 0:0 0:0 cc1if 10 300:0 300:0
+O down high_up 65535 0 high_down 0 300
+O down uif 10 999:1 999:1 cc1if 10 300:1 300:1
+O center1 high_up 0 299 high_down 1 300
+O center1 uif 10 999:1 0:0 cc1if 5 300:1 300:1
+O center2 high_up 0 299 high_down 1 300
+O center2 uif 10 999:1 0:0 cc1if 5 300:0 300:0
+O center3 high_up 0 299 high_down 1 300
+O center3 uif 10 999:1 0:0 cc1if 10 300:0 300:1
