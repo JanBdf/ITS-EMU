@@ -87,8 +87,10 @@ pub struct Usart {
     /// Status flags that are cleared by "SR read, then DR read/write".
     sr_read_mask: u32,
     warned: bool,
-    /// DMA controllers and the request lines for reception and transmission.
+    /// DMA controllers and the request lines for reception and transmission,
+    /// and the requests last signalled.
     dma: Option<(SharedDma, DmaLine, DmaLine)>,
+    dma_req: std::cell::Cell<(bool, bool)>,
 }
 
 impl Usart {
@@ -121,6 +123,7 @@ impl Usart {
             sr_read_mask: 0,
             warned: false,
             dma: None,
+            dma_req: Default::default(),
         }
     }
 
@@ -244,8 +247,14 @@ impl Usart {
         ctx.set_irq(self.irq, pending && cr1 & CR1_UE != 0);
         if let Some((dma, rx, tx)) = &self.dma {
             let on = cr1 & CR1_UE != 0;
-            rx.set(dma, on && self.cr3 & CR3_DMAR != 0 && self.sr & SR_RXNE != 0);
-            tx.set(dma, on && self.cr3 & CR3_DMAT != 0 && self.sr & SR_TXE != 0);
+            let req = (
+                on && self.cr3 & CR3_DMAR != 0 && self.sr & SR_RXNE != 0,
+                on && self.cr3 & CR3_DMAT != 0 && self.sr & SR_TXE != 0,
+            );
+            if req != self.dma_req.replace(req) {
+                rx.set(dma, req.0);
+                tx.set(dma, req.1);
+            }
         }
     }
 
@@ -363,6 +372,10 @@ impl Peripheral for Usart {
 
     fn reset(&mut self) {
         let (port, dma) = (self.port.clone(), self.dma.take());
+        if let Some((d, rx, tx)) = &dma {
+            rx.set(d, false);
+            tx.set(d, false);
+        }
         *self = Self::new(self.name, self.irq, self.bus, self.enable_bit, self.clocks.clone(), port);
         self.dma = dma;
     }

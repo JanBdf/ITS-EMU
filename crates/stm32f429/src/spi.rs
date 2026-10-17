@@ -60,8 +60,10 @@ pub struct Spi {
     crcpr: u32,
     /// SPI2/SPI3 also have an I2S mode (registers only); the others read 0 there.
     i2s: bool,
-    /// DMA controllers and the request lines for reception and transmission.
+    /// DMA controllers and the request lines for reception and transmission,
+    /// and the requests last signalled.
     dma: Option<(SharedDma, DmaLine, DmaLine)>,
+    dma_req: std::cell::Cell<(bool, bool)>,
     i2scfgr: u32,
     i2spr: u32,
 }
@@ -92,6 +94,7 @@ impl Spi {
             crcpr: 7,
             i2s: false,
             dma: None,
+            dma_req: Default::default(),
             i2scfgr: 0,
             i2spr: 0,
         }
@@ -140,8 +143,12 @@ impl Spi {
         ctx.set_irq(self.irq, pending);
         if let Some((dma, rx, tx)) = &self.dma {
             let on = self.cr1 & CR1_SPE != 0;
-            rx.set(dma, on && self.cr2 & 1 != 0 && self.sr & SR_RXNE != 0);
-            tx.set(dma, on && self.cr2 & 2 != 0 && self.sr & SR_TXE != 0);
+            let req =
+                (on && self.cr2 & 1 != 0 && self.sr & SR_RXNE != 0, on && self.cr2 & 2 != 0 && self.sr & SR_TXE != 0);
+            if req != self.dma_req.replace(req) {
+                rx.set(dma, req.0);
+                tx.set(dma, req.1);
+            }
         }
     }
 
@@ -275,6 +282,11 @@ impl Peripheral for Spi {
         self.crcpr = 7;
         self.i2scfgr = 0;
         self.i2spr = if self.i2s { 2 } else { 0 };
+        if let Some((d, rx, tx)) = &self.dma {
+            rx.set(d, false);
+            tx.set(d, false);
+        }
+        self.dma_req.set((false, false));
     }
 }
 
