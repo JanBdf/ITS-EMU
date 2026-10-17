@@ -18,7 +18,7 @@ done
 # Own test programs (tests/fixtures/ac6-src/<Name>/main.c).
 "$here/tools/build-own.sh" -b "$brd"
 
-cp "$brd/ITS_BRD_LIB/Utilities/AddFonts/fonts.bin" "$dest/"
+cp "$brd/ITS_BRD_LIB/Utilities/AddFonts/fonts.bin" "$here/crates/itsboard/assets/"
 
 # __FILE__ strings (asserts) still contain the build directory. Overwrite its
 # parent prefix with the same number of '/' so no offsets change.

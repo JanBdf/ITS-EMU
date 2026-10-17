@@ -3,8 +3,8 @@
 Firmware images of the [ITS-BRD-VSC](https://github.com/Transport-Protocol/ITS-BRD-VSC)
 programs, built with Arm Compiler 6 (Debug) by `tools/build-fixtures.sh`.
 
-Only the course demo programs and `fonts.bin` are checked in. They are
-built from code that is
+Only the course demo programs are checked in (the font table is
+`crates/itsboard/assets/fonts.bin`). They are built from code that is
 
     Copyright (c) 2022, HAW Hamburg, Labor fuer technische Informatik
     BSD 2-Clause License

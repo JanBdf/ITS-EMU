@@ -25,7 +25,7 @@ impl Sim {
         let board = ItsBoard::attach(&mcu);
         let mut machine = stm32f429::machine(bus, &mcu).unwrap();
         machine.load_elf(&image).unwrap();
-        machine.load_bin(0x0810_0000, &std::fs::read(format!("{FIXTURES}/fonts.bin")).unwrap()).unwrap();
+        machine.load_bin(0x0810_0000, itsboard::sim::DEFAULT_FONTS).unwrap();
         machine.reset();
         Some(Sim { machine, board, image })
     }
