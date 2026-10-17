@@ -27,6 +27,15 @@ impl Ram {
         self.regions.push((base, ptr, size, writable));
     }
 
+    /// The writable regions' contents, in the order they were added.
+    pub fn writable(&self) -> impl Iterator<Item = &[u8]> {
+        // SAFETY: valid while the `Ram` is used (see `add`)
+        self.regions
+            .iter()
+            .filter(|r| r.3)
+            .map(|&(_, ptr, len, _)| unsafe { std::slice::from_raw_parts(ptr, len as usize) })
+    }
+
     fn locate(&self, addr: u32, size: u32) -> Option<(*mut u8, bool)> {
         self.regions.iter().find_map(|&(base, ptr, len, w)| {
             let off = addr.checked_sub(base)?;
