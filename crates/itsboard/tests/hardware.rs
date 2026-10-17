@@ -275,6 +275,15 @@ fn timer_outputs_match_the_board() {
 }
 
 #[test]
+fn encoder_mode_matches_the_board() {
+    // TIM8 encoder modes on PC6/PC7, quadrature made by switching the pulls
+    let Some(out) = run("enc", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-enc.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("Q ")).collect();
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
 fn interrupt_latency_matches_the_board() {
     // Cycles from the pending write to the handler's first instruction. Only
     // with interrupts masked until CPSIE: the emulator takes interrupts at the

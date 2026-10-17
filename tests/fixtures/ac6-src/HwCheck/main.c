@@ -34,6 +34,7 @@
  *   irqlat          interrupt latency: NVIC STIR, EXTI SWIER
  *   dacwave         DAC wave generation, TIM6 trigger with DMA
  *   timout          timer outputs on PC6 (TIM3/TIM8 CH1)
+ *   enc             TIM8 encoder mode on PC6/PC7 (pull switching)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1712,6 +1713,85 @@ static void cmd_timout(void) {
     GPIOC->PUPDR &= ~(3u << 12);
 }
 
+/* ---- TIM8 encoder mode on PC6/PC7 (TIM8_1/TIM8_2 header, open): quadrature
+ * edges made by switching the pins' pull-up/pull-down in AF mode. */
+static void enc_wait(void) {
+    uint32_t t0 = DWT->CYCCNT;
+    while (DWT->CYCCNT - t0 < 3600) { // 20 us: the open pin follows its pull
+    }
+}
+
+/* Quadrature state 0..3 -> (A, B) = 00, 10, 11, 01 (A leads B when counting up). */
+static void enc_set(int state) {
+    static const uint8_t ab[4] = {0, 1, 3, 2};
+    uint32_t pupdr = GPIOC->PUPDR & ~(0xFu << 12);
+    pupdr |= (ab[state & 3] & 1 ? 1u : 2u) << 12; // PC6 = A
+    pupdr |= (ab[state & 3] & 2 ? 1u : 2u) << 14; // PC7 = B
+    GPIOC->PUPDR = pupdr;
+    enc_wait();
+}
+
+static void enc_run(const char *name, uint32_t sms, uint32_t ccer) {
+    TIM8->CR1 = 0;
+    TIM8->SMCR = 0;
+    TIM8->CCMR1 = (1u << 0) | (1u << 8); // IC1 <- TI1, IC2 <- TI2
+    TIM8->CCER = ccer;
+    TIM8->ARR = 0xFFFF;
+    TIM8->SMCR = sms;
+    int s = 0;
+    enc_set(s);
+    TIM8->CNT = 100;
+    TIM8->CR1 = TIM_CR1_CEN;
+    for (int i = 0; i < 8; i++) {
+        enc_set(++s);
+    }
+    uint32_t up = TIM8->CNT, dir_up = (TIM8->CR1 >> 4) & 1;
+    for (int i = 0; i < 3; i++) {
+        enc_set(--s);
+    }
+    uint32_t down = TIM8->CNT, dir_down = (TIM8->CR1 >> 4) & 1;
+    // a glitch on A only (back and forth)
+    enc_set(s + 1);
+    enc_set(s);
+    uint32_t glitch = TIM8->CNT;
+    TIM8->CR1 = 0;
+    printf("Q %s up8 %lu dir %lu down3 %lu dir %lu glitch %lu\n", name, (unsigned long)up, (unsigned long)dir_up,
+           (unsigned long)down, (unsigned long)dir_down, (unsigned long)glitch);
+}
+
+static void cmd_enc(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB2ENR |= RCC_APB2ENR_TIM8EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+    __DSB();
+    GPIOC->AFR[0] = (GPIOC->AFR[0] & ~(0xFFu << 24)) | (0x33u << 24);
+    GPIOC->MODER = (GPIOC->MODER & ~(0xFu << 12)) | (0xAu << 12);
+    enc_run("sms3", 3, 0);
+    enc_run("sms1", 1, 0);
+    enc_run("sms2", 2, 0);
+    enc_run("sms3_inv1", 3, TIM_CCER_CC1P);
+    // ARR wrap: count down below 0
+    TIM8->CR1 = 0;
+    TIM8->SMCR = 3;
+    TIM8->CCER = 0;
+    TIM8->ARR = 19;
+    int s = 0;
+    enc_set(s);
+    TIM8->CNT = 1;
+    TIM8->SR = 0;
+    TIM8->CR1 = TIM_CR1_CEN;
+    for (int i = 0; i < 3; i++) {
+        enc_set(--s);
+    }
+    printf("Q wrap_down cnt %lu uif %lu\n", (unsigned long)TIM8->CNT, (unsigned long)(TIM8->SR & 1));
+    TIM8->CR1 = 0;
+    TIM8->SMCR = 0;
+    TIM8->CCMR1 = 0;
+    GPIOC->MODER &= ~(0xFu << 12);
+    GPIOC->PUPDR &= ~(0xFu << 12);
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -1767,6 +1847,8 @@ static void execute(char *line) {
         cmd_dacwave();
     } else if (!strcmp(line, "timout")) {
         cmd_timout();
+    } else if (!strcmp(line, "enc")) {
+        cmd_enc();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {
