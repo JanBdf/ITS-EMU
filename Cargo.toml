@@ -11,7 +11,8 @@ license = "MIT"
 emu-core = { path = "crates/emu-core" }
 stm32f429 = { path = "crates/stm32f429" }
 itsboard = { path = "crates/itsboard" }
-unicorn-engine = "2.1.5"
+# only the Arm guest (the default builds all ten architectures)
+unicorn-engine = { version = "2.1.5", default-features = false, features = ["arch_arm"] }
 object = { version = "0.40", default-features = false, features = ["read_core", "elf", "std"] }
 anyhow = "1"
 thiserror = "2"
@@ -23,3 +24,9 @@ gdbstub = "0.7"
 
 [profile.release]
 debug = 1
+
+# Debug info only for the own crates: that of the dependencies (Unicorn's C
+# code, the GUI stack) made up most of the binaries and the build directory;
+# without it Unicorn is also built as Release (-O3) instead of RelWithDebInfo.
+[profile.release.package."*"]
+debug = false
