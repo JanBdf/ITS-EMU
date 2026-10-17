@@ -1,5 +1,6 @@
 //! STM32F429ZI: memory map and peripherals.
 
+pub mod exti;
 pub mod gpio;
 pub mod rcc;
 pub mod spi;
@@ -137,6 +138,9 @@ pub fn build() -> (Bus, Stm32f429) {
         Box::new(Usart::new("USART3", 39, ApbBus::Apb1, 18, clocks.clone(), usart3.clone())),
     );
     bus.attach(0x4000_7000, 0x400, Box::new(Pwr::new()));
+    let exti = exti::SharedExti::default();
+    bus.attach(0x4001_3800, 0x400, Box::new(exti::Syscfg::new(exti.clone(), gpio.clone(), clocks.clone())));
+    bus.attach(0x4001_3C00, 0x400, Box::new(exti::Exti::new(exti, gpio.clone())));
     bus.attach(0x4001_3000, 0x400, Box::new(Spi::new("SPI1", 35, ApbBus::Apb2, 12, clocks.clone(), spi1.clone())));
     for i in 0..NUM_PORTS {
         bus.attach(

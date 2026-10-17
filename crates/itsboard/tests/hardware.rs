@@ -159,3 +159,32 @@ fn division_timing_matches_the_board() {
         assert!((e - b).abs() <= 60.0, "UDIV {name}: emulator {e}, board {b}");
     }
 }
+
+#[test]
+fn exti_matches_the_board() {
+    let Some(out) = run("exti", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-exti.txt")).unwrap();
+    let lines = |text: &str| -> Vec<Vec<String>> {
+        text.lines()
+            .filter(|l| l.starts_with("E "))
+            .map(|l| l.split_whitespace().map(str::to_owned).collect())
+            .collect()
+    };
+    let (emu, board) = (lines(&out), lines(&board));
+    assert_eq!(emu.len(), board.len(), "{out}");
+    for (e, b) in emu.iter().zip(&board) {
+        if b[1] == "poll0" {
+            // the emulator resolves time per translated block, not per access
+            continue;
+        }
+        if b.contains(&"latency".to_owned()) {
+            // interrupt latency in cycles (the board's first one is 13 faster)
+            let n = b.len() - 1;
+            let (x, y): (f64, f64) = (e[n].parse().unwrap(), b[n].parse().unwrap());
+            assert!((x - y).abs() <= 13.0, "{e:?}\n{b:?}");
+            assert_eq!(e[..n], b[..n]);
+        } else {
+            assert_eq!(e, b);
+        }
+    }
+}

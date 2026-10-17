@@ -1,0 +1,41 @@
+E reset_imr 00000000
+E reset_rtsr 00000000
+E reset_pr 00000000
+E reset_exticr1 00000000
+E apb2enr 00001000
+E exticr_noclk 00000000
+E exticr_clk_after_noclk_write 00000000
+E exticr1_ones 0000ffff
+E exticr1 00000006
+E imr_ones 007fffff
+E rtsr_ones 007fffff
+E pr_after_clear 00000000
+E pr_rise_masked 00000000
+E pr_fall_rtsr_only 00000000
+E pr_rise_unmasked 00000001
+E pr_clear_other 00000001
+E pr_clear 00000000
+E pr_fall_ftsr 00000001
+E pr_unmask_after_edge 00000000
+E swier_masked 00000008
+E pr_swier_masked 00000000
+E swier_unmasked 00000008
+E pr_swier_unmasked 00000000
+E swier_after_pr_clear 00000000
+E pr_mode_change 00000001
+E pr_other_port 00000000
+E irq0 count 1 pr 00000001 latency 44
+E irq0 count 1 pr 00000001 latency 57
+E irq0 count 1 pr 00000001 latency 57
+E irq5 count 1 pr 00000020 latency 59
+E irq5 count 1 pr 00000020 latency 59
+E irq5 count 1 pr 00000020 latency 59
+E swi0 count 1 latency 52
+E swi0 count 1 latency 52
+E swi0 count 1 latency 52
+E poll0 26
+E poll0 26
+E poll0 26
+E count_nvic_off 00000000
+E pr_nvic_off 00000001
+E count_nvic_on 00000001
