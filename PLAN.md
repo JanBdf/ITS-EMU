@@ -27,8 +27,9 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
 
 ## Next steps
 
-- Timers: down/center-aligned counting, slave modes other than the encoder
-  modes, complementary outputs and dead time of TIM1/TIM8
+- Timers: slave modes other than the encoder modes, complementary outputs and
+  dead time of TIM1/TIM8. On the board, UG while the counter is stopped does
+  not change CNT until it runs again (the emulator clears it at once)
 - DMA requests of I2C and timers (the controllers and the ADC, U(S)ART, SPI
   and DAC requests exist), DMA FIFO/bursts; then Ethernet (`Programs/Stack`)
 - External devices: an I2C sensor via `I2cDevice`; the devices in the GUI
