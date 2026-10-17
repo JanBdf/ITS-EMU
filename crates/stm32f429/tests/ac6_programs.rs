@@ -5,6 +5,9 @@
 use emu_core::{ElfImage, Machine, StopReason};
 use stm32f429::gpio::port;
 
+/// The font table of ITS_BRD_LIB (built into the board crate).
+const FONTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../itsboard/assets/fonts.bin");
+
 fn fixture(name: &str) -> Option<Vec<u8>> {
     let path = format!("{}/../../tests/fixtures/ac6/{name}", env!("CARGO_MANIFEST_DIR"));
     match std::fs::read(&path) {
@@ -31,7 +34,7 @@ fn boot(data: &[u8], idle_skipping: bool) -> (Machine, stm32f429::Stm32f429) {
     let (bus, mcu) = stm32f429::build();
     let mut m = stm32f429::machine(bus, &mcu).unwrap();
     m.load_elf(&image).unwrap();
-    m.load_bin(0x0810_0000, &fixture("fonts.bin").expect("fonts.bin")).unwrap();
+    m.load_bin(0x0810_0000, &std::fs::read(FONTS).expect("fonts.bin")).unwrap();
     m.system_mut().idle_skipping = idle_skipping;
     m.reset();
     (m, mcu)
