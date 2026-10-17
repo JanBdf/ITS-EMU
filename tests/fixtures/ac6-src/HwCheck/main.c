@@ -38,6 +38,7 @@
  *   onewire         1-Wire master on PG2 (AUX2): reset, ROM, DS18B20 conversion
  *   timpre          CCR preload (OCxPE) on TIM3_CH1/PC6
  *   timdir          TIM3 counting directions: PWM levels, flags
+ *   timslave        TIM3 slave modes with TI1/TI2 on PC6/PC7 (pull switching)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -2101,6 +2102,103 @@ static void cmd_timdir(void) {
     GPIOC->MODER &= ~(3u << 12);
 }
 
+/* ---- TIM3 slave modes with TI1 = PC6, TI2 = PC7 (open pins): edges made by
+ * switching the pulls. */
+static void slave_pin(int pin, int high) {
+    uint32_t sh = 2u * (uint32_t)pin;
+    GPIOC->PUPDR = (GPIOC->PUPDR & ~(3u << sh)) | ((high ? 1u : 2u) << sh);
+    enc_wait();
+}
+
+static void slave_setup(uint32_t smcr, uint32_t ccer, uint32_t psc, uint32_t arr) {
+    TIM3->CR1 = 0;
+    TIM3->SMCR = 0;
+    TIM3->CCMR1 = (1u << 0) | (1u << 8); // IC1 <- TI1, IC2 <- TI2
+    TIM3->CCER = ccer;
+    TIM3->PSC = psc;
+    TIM3->ARR = arr;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->CNT = 0;
+    TIM3->SMCR = smcr;
+    TIM3->SR = 0;
+}
+
+static void slave_wait_us(uint32_t us) {
+    uint32_t t0 = DWT->CYCCNT;
+    while (DWT->CYCCNT - t0 < us * 180u) {
+    }
+}
+
+static void slave_extclk(const char *name, uint32_t ts, uint32_t ccer, int pin, uint32_t arr) {
+    slave_pin(6, 0);
+    slave_pin(7, 0);
+    slave_setup((ts << 4) | 7u, ccer, 0, arr);
+    TIM3->CR1 = TIM_CR1_CEN;
+    for (int i = 0; i < 6; i++) {
+        slave_pin(pin, !(i & 1)); // 3 rising, 3 falling edges
+    }
+    printf("S %s cnt %lu sr %02lx\n", name, (unsigned long)TIM3->CNT, (unsigned long)(TIM3->SR & 0x41));
+    TIM3->CR1 = 0;
+}
+
+static void cmd_timslave(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+    __DSB();
+    GPIOC->AFR[0] = (GPIOC->AFR[0] & ~(0xFFu << 24)) | (0x22u << 24);
+    GPIOC->MODER = (GPIOC->MODER & ~(0xFu << 12)) | (0xAu << 12);
+    slave_extclk("ext_ti1fp1", 5, 0, 6, 0xFFFF);
+    slave_extclk("ext_ti1fp1_falling", 5, TIM_CCER_CC1P, 6, 0xFFFF);
+    slave_extclk("ext_ti1f_ed", 4, 0, 6, 0xFFFF);
+    slave_extclk("ext_ti2fp2", 6, 0, 7, 0xFFFF);
+    slave_extclk("ext_ti1f_ed_arr4", 4, 0, 6, 4);
+    // reset mode: a rising edge on TI1 re-initialises the counter
+    for (int urs = 0; urs < 2; urs++) {
+        slave_pin(6, 0);
+        slave_setup((5u << 4) | 4u, 0, 89, 0xFFFF); // 1 MHz
+        TIM3->CR1 = TIM_CR1_CEN | (urs ? TIM_CR1_URS : 0);
+        slave_wait_us(500);
+        uint32_t before = TIM3->CNT;
+        slave_pin(6, 1); // 20 us
+        slave_wait_us(30);
+        uint32_t after = TIM3->CNT, sr = TIM3->SR & 0x41;
+        TIM3->CR1 = 0;
+        printf("S reset_urs%d before %lu after %lu sr %02lx\n", urs, (unsigned long)(before / 100 * 100),
+               (unsigned long)after, (unsigned long)sr);
+    }
+    // gated mode: counts while TI1 is high
+    slave_pin(6, 0);
+    slave_setup((5u << 4) | 5u, 0, 89, 0xFFFF);
+    TIM3->CR1 = TIM_CR1_CEN;
+    slave_wait_us(200);
+    uint32_t low = TIM3->CNT;
+    slave_pin(6, 1);
+    slave_wait_us(280); // high for 300 us in all
+    slave_pin(6, 0);
+    slave_wait_us(200);
+    uint32_t gated = TIM3->CNT, sr = TIM3->SR & 0x41;
+    TIM3->CR1 = 0;
+    printf("S gated low %lu high300 %lu sr %02lx\n", (unsigned long)low, (unsigned long)gated, (unsigned long)sr);
+    // trigger mode: a rising edge on TI1 starts the counter
+    slave_pin(6, 0);
+    slave_setup((5u << 4) | 6u, 0, 89, 0xFFFF);
+    uint32_t cen_before = TIM3->CR1 & 1;
+    slave_pin(6, 1);
+    slave_wait_us(30);
+    uint32_t cen = TIM3->CR1 & 1, cnt = TIM3->CNT;
+    sr = TIM3->SR & 0x41;
+    TIM3->CR1 = 0;
+    printf("S trigger cen %lu -> %lu cnt %lu sr %02lx\n", (unsigned long)cen_before, (unsigned long)cen,
+           (unsigned long)cnt, (unsigned long)sr);
+    TIM3->SMCR = 0;
+    TIM3->CCMR1 = 0;
+    TIM3->CCER = 0;
+    GPIOC->MODER &= ~(0xFu << 12);
+    GPIOC->PUPDR &= ~(0xFu << 12);
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -2164,6 +2262,8 @@ static void execute(char *line) {
         cmd_timpre();
     } else if (!strcmp(line, "timdir")) {
         cmd_timdir();
+    } else if (!strcmp(line, "timslave")) {
+        cmd_timslave();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {

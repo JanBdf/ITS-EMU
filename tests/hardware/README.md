@@ -20,6 +20,7 @@ ITS-Board (Rev 02, NUCLEO-F429ZI, 180 MHz, ART accelerator on), taken
 | `HwCheck-adctrig.txt` | `adctrig` | ADC1 started by TIM3 TRGO at 1 kHz: conversions, delay after the trigger |
 | `HwCheck-dacwave.txt` | `dacwave` | DAC1 noise and triangle generation (software trigger), TIM6 TRGO trigger with DMA1 stream 5 feeding DHR, DMA underrun |
 | `HwCheck-timout.txt` | `timout` | TIM3/TIM8 CH1 driving PC6: PWM levels against CNT, CCR = 0 / above ARR, polarity, CCxE off, forced levels, mode change, toggle captured by CH2, MOE |
+| `HwCheck-timslave.txt` | `timslave` | TIM3 slave modes with TI1/TI2 on PC6/PC7 (edges from switching the pulls): external clock 1 (TI1FP1, inverted, TI1F_ED, TI2FP2, wrap), reset (URS 0/1), gated, trigger; TIF/UIF |
 | `HwCheck-timdir.txt` | `timdir` | TIM3 PWM1 on PC6 counting up, down and center-aligned (CMS 1/2/3): output levels per direction, update and CC1 flags with CNT/DIR |
 | `HwCheck-timpre.txt` | `timpre` | TIM3_CH1 PWM on PC6: CCR written in the middle of a period with and without preload (OC1PE), levels later in that period and in the next, UG |
 | `HwCheck-enc.txt` | `enc` | TIM8 encoder modes (SMS 1/2/3, inverted TI1, wrap below 0) on PC6/PC7, quadrature edges made by switching the pins' pull-up/pull-down |

@@ -11,7 +11,9 @@
 //! polarity and overcapture), and the output compare channels driving their
 //! pins (frozen, active/inactive/toggle on match, forced, PWM 1/2; MOE of
 //! TIM1/TIM8), encoder mode (SMS 1–3: TI1 and/or TI2 edges count up/down by the
-//! other input's level, as measured with HwCheck `enc`). OCxREF changes only at compare matches, counter wraps and
+//! other input's level, as measured with HwCheck `enc`), the slave modes reset,
+//! gated, trigger and external clock 1 with TI1F_ED/TI1FP1/TI2FP2 as trigger
+//! (HwCheck `timslave`). OCxREF changes only at compare matches, counter wraps and
 //! forced levels, as measured on the board (HwCheck `timout`): a mode change
 //! takes effect at the next of them; PWM compares CNT < CCR counting up and
 //! CNT ≤ CCR counting down (HwCheck `timdir`). The other slave modes and the
@@ -55,6 +57,7 @@ const CR1_OPM: u32 = 1 << 3;
 const CR1_DIR: u32 = 1 << 4;
 const CR1_ARPE: u32 = 1 << 7;
 const SR_UIF: u32 = 1 << 0;
+const SR_TIF: u32 = 1 << 6;
 const DIER_UIE: u32 = 1 << 0;
 const BDTR_MOE: u32 = 1 << 15;
 /// Timer clocks from an output edge until its own channel input captures it
@@ -101,6 +104,8 @@ pub struct GpTimer {
     /// levels (after the polarity CCxP).
     enc_watched: Vec<(usize, u32)>,
     enc_level: [bool; 2],
+    /// Gated slave mode: the trigger input lets the counter count.
+    gate: bool,
 
     cr1: u32,
     cr2: u32,
@@ -156,6 +161,7 @@ impl GpTimer {
             oc_out: [None; 4],
             enc_watched: Vec::new(),
             enc_level: [false; 2],
+            gate: false,
             cr1: 0,
             cr2: 0,
             smcr: 0,
@@ -263,6 +269,27 @@ impl GpTimer {
         self.channels >= 2 && (1..=3).contains(&(self.smcr & 7))
     }
 
+    /// Slave mode reset/gated/trigger/external clock 1 (SMS = 4..7) with a
+    /// trigger input from the channel pins (TS = TI1F_ED, TI1FP1, TI2FP2).
+    fn ti_slave(&self) -> Option<(u32, u32)> {
+        let (sms, ts) = (self.smcr & 7, (self.smcr >> 4) & 7);
+        (self.channels >= 2 && sms >= 4 && (4..=6).contains(&ts)).then_some((sms, ts))
+    }
+
+    /// The counter counts input edges instead of the internal clock
+    /// (encoder mode, external clock mode 1).
+    fn edge_clocked(&self) -> bool {
+        self.encoder() || self.ti_slave().is_some_and(|(sms, _)| sms == 7)
+    }
+
+    /// Level of the trigger input TRGI (after the polarity of TI1FP1/TI2FP2).
+    fn trgi_level(&self) -> bool {
+        match self.ti_slave() {
+            Some((_, 6)) => self.enc_level[1],
+            _ => self.enc_level[0],
+        }
+    }
+
     /// Level of input TI1 (`i` = 0) or TI2 from its routed pin, after CCxP.
     fn ti_level(&self, i: usize) -> bool {
         let Some((pins, gpio)) = &self.inputs else { return false };
@@ -277,8 +304,9 @@ impl GpTimer {
         level ^ (self.ccer & (2 << (4 * i)) != 0)
     }
 
-    /// Counts the logged edges of TI1/TI2 in encoder mode.
-    fn take_encoder_edges(&mut self) {
+    /// Takes the logged edges of TI1/TI2: counts them in encoder mode, acts
+    /// on trigger edges (at their time) in the slave modes.
+    fn take_input_edges(&mut self, ctx: &mut DeviceCtx, now_ps: u64) {
         let Some((pins, gpio)) = &self.inputs else { return };
         if self.enc_watched.is_empty() {
             return;
@@ -300,7 +328,57 @@ impl GpTimer {
             }
         }
         edges.sort_by_key(|&(cycle, _, _)| cycle);
-        let max = self.arr_active;
+        if let Some((sms, ts)) = self.ti_slave() {
+            for (cycle, i, raw) in edges {
+                let level = raw ^ (self.ccer & (2 << (4 * i)) != 0);
+                if level == self.enc_level[i] {
+                    continue;
+                }
+                self.enc_level[i] = level;
+                // TI1F_ED: every edge of TI1; TI1FP1/TI2FP2: rising after the polarity
+                let input = if ts == 6 { 1 } else { 0 };
+                if i != input {
+                    continue;
+                }
+                let trigger = ts == 4 || level;
+                let t = if cycle == 0 { now_ps } else { ctx.clock.ps_at_cycle(cycle).min(now_ps) };
+                match sms {
+                    7 => {
+                        if trigger {
+                            self.sr |= SR_TIF;
+                            if self.running() {
+                                self.count_edge(true);
+                            }
+                        }
+                    }
+                    4 if trigger => {
+                        self.sr |= SR_TIF;
+                        self.advance_to(ctx, t);
+                        let flag = self.cr1 & CR1_URS == 0;
+                        self.reinit(ctx, t, flag);
+                    }
+                    5 => {
+                        // gated: counts while TRGI is high; TIF on both edges
+                        self.sr |= SR_TIF;
+                        self.advance_to(ctx, t);
+                        let phase = self.phase_now(t).min(u128::from(u32::MAX)) as u32;
+                        self.gate = self.trgi_level();
+                        self.rebase(t, phase);
+                    }
+                    6 if trigger => {
+                        self.sr |= SR_TIF;
+                        self.advance_to(ctx, t);
+                        if !self.running() {
+                            self.cr1 |= CR1_CEN;
+                            self.base_ps = t;
+                            self.checked = 0;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return;
+        }
         for (_, i, level) in edges {
             let level = level ^ (self.ccer & (2 << (4 * i)) != 0);
             if level == self.enc_level[i] {
@@ -317,23 +395,43 @@ impl GpTimer {
             }
             let [a, b] = self.enc_level;
             let up = if i == 0 { a != b } else { a == b };
-            if up {
-                self.cr1 &= !CR1_DIR;
-                if self.cnt_base >= max {
-                    self.cnt_base = 0;
-                    self.encoder_update();
-                } else {
-                    self.cnt_base += 1;
-                }
+            self.count_edge(up);
+        }
+    }
+
+    /// One count of an edge-clocked counter (encoder, external clock).
+    fn count_edge(&mut self, up: bool) {
+        let max = self.arr_active;
+        if up {
+            self.cr1 &= !CR1_DIR;
+            if self.cnt_base >= max {
+                self.cnt_base = 0;
+                self.encoder_update();
             } else {
-                self.cr1 |= CR1_DIR;
-                if self.cnt_base == 0 {
-                    self.cnt_base = max;
-                    self.encoder_update();
-                } else {
-                    self.cnt_base -= 1;
-                }
+                self.cnt_base += 1;
             }
+        } else {
+            self.cr1 |= CR1_DIR;
+            if self.cnt_base == 0 {
+                self.cnt_base = max;
+                self.encoder_update();
+            } else {
+                self.cnt_base -= 1;
+            }
+        }
+    }
+
+    /// Re-initialises counter and prescaler at `t_ps` (UG, reset mode): an
+    /// update event (`flag`: with UIF).
+    fn reinit(&mut self, ctx: &DeviceCtx, t_ps: u64, flag: bool) {
+        self.update_event(flag);
+        self.rebase(t_ps, 0);
+        self.base_ps = t_ps;
+        for ch in 0..self.channels {
+            self.oc_wrap(ch, 0);
+        }
+        if self.trgo_on_update() {
+            self.emit_trgo(ctx.clock.cycle_at_ps(t_ps)); // an update event for TRGO, too
         }
     }
 
@@ -346,7 +444,7 @@ impl GpTimer {
 
     /// Tells the GPIO bank which pins to report edges of.
     fn update_watch(&mut self) {
-        let encoder = self.encoder();
+        let encoder = self.encoder() || self.ti_slave().is_some();
         let levels = [self.ti_level(0), self.ti_level(1)];
         let Some((pins, gpio)) = &self.inputs else { return };
         let mut g = gpio.borrow_mut();
@@ -361,6 +459,7 @@ impl GpTimer {
                 self.enc_watched.push((port(p), pin));
             }
             self.enc_level = levels;
+            self.gate = self.trgi_level();
         }
         for &(p, pin) in &self.watched {
             let ps = &mut g.ports[p];
@@ -491,7 +590,7 @@ impl GpTimer {
         let mut last = [None; 4];
         let wrap = self.period();
         // the turn at the top (center-aligned) also re-evaluates PWM
-        let top = (self.center() != 0 && !self.encoder()).then(|| u128::from(self.arr_active));
+        let top = (self.center() != 0 && !self.edge_clocked()).then(|| u128::from(self.arr_active));
         for (ch, last) in last.iter_mut().enumerate().take(self.channels) {
             let mut events: Vec<(u128, u8)> = self
                 .match_phases(ch, true)
@@ -632,7 +731,7 @@ impl GpTimer {
     }
 
     fn running(&self) -> bool {
-        self.cr1 & CR1_CEN != 0
+        self.cr1 & CR1_CEN != 0 && (self.gate || !self.ti_slave().is_some_and(|(sms, _)| sms == 5))
     }
 
     /// Duration of one counter tick in picoseconds (as a rational: ps * hz).
@@ -642,7 +741,7 @@ impl GpTimer {
 
     /// Ticks elapsed since `base_ps` and the remainder in "ps * hz" units.
     fn elapsed_ticks(&self, now_ps: u64) -> (u128, u128) {
-        if !self.running() || self.encoder() {
+        if !self.running() || self.edge_clocked() {
             return (0, 0);
         }
         let dt = u128::from(now_ps.saturating_sub(self.base_ps)) * u128::from(self.kernel_hz());
@@ -657,20 +756,20 @@ impl GpTimer {
 
     /// Edge-aligned down-counting (DIR).
     fn counts_down(&self) -> bool {
-        self.center() == 0 && self.cr1 & CR1_DIR != 0 && !self.encoder()
+        self.center() == 0 && self.cr1 & CR1_DIR != 0 && !self.edge_clocked()
     }
 
     /// Ticks of a counting cycle (from one wrap to the next).
     fn period(&self) -> u128 {
         let arr = u128::from(self.arr_active);
-        if self.center() != 0 && !self.encoder() { (2 * arr).max(1) } else { arr + 1 }
+        if self.center() != 0 && !self.edge_clocked() { (2 * arr).max(1) } else { arr + 1 }
     }
 
     /// Counter value and direction (down) at phase `q` (0..=period) of the cycle.
     fn cnt_at(&self, q: u128) -> (u32, bool) {
         let arr = u128::from(self.arr_active);
         let q = q % self.period();
-        if self.center() != 0 && !self.encoder() {
+        if self.center() != 0 && !self.edge_clocked() {
             if q < arr { (q as u32, false) } else { ((2 * arr - q) as u32, true) }
         } else if self.counts_down() {
             ((arr - q.min(arr)) as u32, true)
@@ -682,7 +781,7 @@ impl GpTimer {
     /// Phase of counter value `cnt` counting in direction `down`.
     fn phase_of(&self, cnt: u32, down: bool) -> u128 {
         let (arr, cnt) = (u128::from(self.arr_active), u128::from(cnt));
-        if self.center() != 0 && !self.encoder() {
+        if self.center() != 0 && !self.edge_clocked() {
             let cnt = cnt.min(arr);
             if down && cnt > 0 { 2 * arr - cnt } else { cnt }
         } else if self.counts_down() {
@@ -710,7 +809,7 @@ impl GpTimer {
 
     /// The turn at the top of a center-aligned cycle (an update event).
     fn top_phase(&self) -> Option<u128> {
-        (self.center() != 0 && !self.encoder()).then(|| u128::from(self.arr_active))
+        (self.center() != 0 && !self.edge_clocked()).then(|| u128::from(self.arr_active))
     }
 
     /// Update events per cycle.
@@ -726,7 +825,7 @@ impl GpTimer {
     /// Current counter value without changing state.
     fn cnt(&self, now_ps: u64) -> u32 {
         let (ticks, _) = self.elapsed_ticks(now_ps);
-        if self.arr_active == 0 || self.encoder() {
+        if self.arr_active == 0 || self.edge_clocked() {
             return self.cnt_base;
         }
         if self.center() != 0 || self.counts_down() {
@@ -814,7 +913,7 @@ impl GpTimer {
         }
         let (arr, period) = (u128::from(self.arr_active), self.period());
         let at = |q: u128| if q == 0 { period } else { q };
-        if self.center() != 0 && !self.encoder() {
+        if self.center() != 0 && !self.edge_clocked() {
             let c = u128::from(self.ccr_active[ch]);
             if c > arr {
                 return [None, None];
@@ -845,10 +944,15 @@ impl GpTimer {
         }
     }
 
-    /// Processes overflows and compare matches up to `now_ps`.
+    /// Takes the input edges, then processes overflows and compare matches up to now.
     fn advance(&mut self, ctx: &mut DeviceCtx) {
         let now_ps = ctx.clock.time_ps();
-        self.take_encoder_edges();
+        self.take_input_edges(ctx, now_ps);
+        self.advance_to(ctx, now_ps);
+    }
+
+    /// Processes overflows and compare matches up to `now_ps`.
+    fn advance_to(&mut self, ctx: &mut DeviceCtx, now_ps: u64) {
         self.take_captures(now_ps);
         if !self.running() || self.arr_active == 0 {
             self.next_event = None;
@@ -1095,8 +1199,8 @@ impl Peripheral for GpTimer {
                 let (cnt, down) = (self.cnt(now_ps), self.dir_now(now_ps));
                 self.smcr = v;
                 self.rebase(now_ps, self.phase_of(cnt, down).min(u128::from(u32::MAX)) as u32);
-                if v & 7 > 3 || (v & 7 != 0 && !self.encoder()) {
-                    self.warn_unsupported("slave mode");
+                if v & 7 != 0 && !self.encoder() && self.ti_slave().is_none() {
+                    self.warn_unsupported("slave mode with an internal trigger or ETR");
                 }
                 self.update_watch();
             }
@@ -1106,15 +1210,7 @@ impl Peripheral for GpTimer {
                 if v & 1 != 0 {
                     // UG: re-initialise counter and prescaler, update shadow registers.
                     let flag = self.cr1 & CR1_URS == 0;
-                    self.update_event(flag);
-                    self.rebase(now_ps, 0);
-                    self.base_ps = now_ps;
-                    for ch in 0..self.channels {
-                        self.oc_wrap(ch, 0);
-                    }
-                    if self.trgo_on_update() {
-                        self.emit_trgo(ctx.now()); // UG is an update event for TRGO, too
-                    }
+                    self.reinit(ctx, now_ps, flag);
                 }
                 // CCxG, COMG, TG, BG: set their flags
                 let channels = (0x1Eu32 >> (4 - self.channels)) & 0x1E;
