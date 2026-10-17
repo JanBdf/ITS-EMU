@@ -96,6 +96,9 @@ pub struct GpTimer {
     /// Next update or compare interrupt in CPU cycles.
     next_event: Option<u64>,
     warned: bool,
+    /// Warned about an access while the clock is disabled (once: firmware
+    /// may keep writing, and a log line per access slows emulation down).
+    warned_clock: bool,
 }
 
 impl GpTimer {
@@ -138,6 +141,7 @@ impl GpTimer {
             checked: 0,
             next_event: None,
             warned: false,
+            warned_clock: false,
         };
         t.reset_regs();
         t
@@ -181,6 +185,7 @@ impl GpTimer {
         (self.psc, self.psc_active, self.arr, self.arr_active) = (0, 0, max, max);
         (self.rcr, self.rep_left, self.bdtr, self.dcr, self.or) = (0, 0, 0, 0, 0);
         (self.cnt_base, self.base_ps, self.checked, self.next_event, self.warned) = (0, 0, 0, None, false);
+        self.warned_clock = false;
         self.ic_events = [0; 4];
         self.update_watch();
     }
@@ -601,7 +606,10 @@ impl Peripheral for GpTimer {
 
     fn write(&mut self, ctx: &mut DeviceCtx, off: u32, size: u32, value: u32) {
         if !self.clock_enabled() {
-            log::warn!("{}: write while its clock is disabled (ignored)", self.name);
+            if !self.warned_clock {
+                self.warned_clock = true;
+                log::warn!("{}: write while its clock is disabled (ignored)", self.name);
+            }
             return;
         }
         self.advance(ctx);
