@@ -30,6 +30,8 @@
  *   dma             DMA2: memory-to-memory copy, ADC1 scan into memory
  *   dmatx           USART3 transmission by DMA1
  *   dmaspi          SPI3 transfer by DMA1 (nothing connected)
+ *   adctrig         ADC1 triggered by TIM3 TRGO at 1 kHz
+ *   irqlat          interrupt latency: NVIC STIR, EXTI SWIER
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -777,7 +779,13 @@ static void cmd_tim(void) {
  * Analog header pins, DAC1 (PA4) measured by ADC1, flag semantics. */
 static volatile uint32_t adc_irqs, adc_irq_dr;
 
+static void (*volatile adc_irq_hook)(void);
+
 void ADC_IRQHandler(void) {
+    if (adc_irq_hook) {
+        adc_irq_hook();
+        return;
+    }
     adc_irq_dr = ADC1->DR;
     adc_irqs++;
 }
@@ -1350,6 +1358,143 @@ static void cmd_dmaspi(void) {
     GPIOC->MODER &= ~(0x3Fu << 20);
 }
 
+/* ---- ADC1 started by TIM3 TRGO (update event) at 1 kHz. */
+static volatile uint32_t trig_eocs, trig_cnt;
+
+static void adctrig_isr(void) {
+    trig_cnt = TIM3->CNT;
+    (void)ADC1->DR;
+    trig_eocs++;
+}
+
+static void cmd_adctrig(void) {
+    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
+    __DSB();
+    ADC->CCR = ADC_CCR_TSVREFE | (1u << 16); // PCLK2 / 4
+    ADC1->CR1 = ADC_CR1_EOCIE;
+    ADC1->SMPR1 = 7u << 21;                   // VREFINT: 480 cycles
+    ADC1->SQR1 = 0;
+    ADC1->SQR3 = 17;
+    ADC1->CR2 = ADC_CR2_ADON | (8u << 24) | (1u << 28); // TIM3_TRGO, rising edge
+    TIM3->CR1 = 0;
+    TIM3->PSC = 89;
+    TIM3->ARR = 999;
+    TIM3->CR2 = 2u << 4; // MMS: update
+    TIM3->EGR = 1;
+    TIM3->SR = 0;
+    trig_eocs = 0;
+    adc_irq_hook = adctrig_isr;
+    NVIC_EnableIRQ(ADC_IRQn);
+    uint32_t t0 = getTimeStamp();
+    TIM3->CR1 = 1;
+    while (getTimeStamp() - t0 < 10500 * 90) {
+    }
+    TIM3->CR1 = 0;
+    NVIC_DisableIRQ(ADC_IRQn);
+    adc_irq_hook = 0;
+    printf("G eocs_10_5ms %lu\n", (unsigned long)trig_eocs);
+    printf("G tim3_cnt_at_eoc %lu\n", (unsigned long)trig_cnt);
+    ADC1->CR2 = 0;
+    ADC1->CR1 = 0;
+    ADC->CCR = 0;
+    TIM3->CR2 = 0;
+}
+
+/* ---- Interrupt latency: handlers that read DWT->CYCCNT first thing. EXTI2
+ * is pended through NVIC->STIR (core only), EXTI1 by EXTI->SWIER (through
+ * the APB2 peripheral and its interrupt line). */
+volatile uint32_t lat_isr;
+
+__attribute__((naked)) void EXTI2_IRQHandler(void) {
+    __asm volatile("movw r0, #0x1004\n"
+                   "movt r0, #0xE000\n"
+                   "ldr r0, [r0]\n"
+                   "movw r1, #:lower16:lat_isr\n"
+                   "movt r1, #:upper16:lat_isr\n"
+                   "str r0, [r1]\n"
+                   "bx lr\n");
+}
+
+__attribute__((naked)) void EXTI1_IRQHandler(void) {
+    __asm volatile("movw r0, #0x1004\n"
+                   "movt r0, #0xE000\n"
+                   "ldr r0, [r0]\n"
+                   "movw r1, #:lower16:lat_isr\n"
+                   "movt r1, #:upper16:lat_isr\n"
+                   "str r0, [r1]\n"
+                   "movw r0, #0x3C14\n" // EXTI->PR
+                   "movt r0, #0x4001\n"
+                   "movs r1, #2\n"
+                   "str r1, [r0]\n"
+                   "dsb\n"
+                   "bx lr\n");
+}
+
+/* Writes `val` to `*reg` right after reading DWT->CYCCNT, which it returns. */
+__attribute__((naked, noinline)) static uint32_t lat_trigger(volatile uint32_t *reg, uint32_t val) {
+    __asm volatile("movw r2, #0x1004\n"
+                   "movt r2, #0xE000\n"
+                   "ldr r3, [r2]\n"
+                   "str r1, [r0]\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "mov r0, r3\n"
+                   "bx lr\n");
+}
+
+/* Same with interrupts masked during the write: taken after CPSIE. */
+__attribute__((naked, noinline)) static uint32_t lat_trigger_masked(volatile uint32_t *reg, uint32_t val) {
+    __asm volatile("cpsid i\n"
+                   "movw r2, #0x1004\n"
+                   "movt r2, #0xE000\n"
+                   "ldr r3, [r2]\n"
+                   "str r1, [r0]\n"
+                   "cpsie i\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "mov r0, r3\n"
+                   "bx lr\n");
+}
+
+static void cmd_irqlat(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+    __DSB();
+    NVIC_EnableIRQ(EXTI2_IRQn);
+    for (int k = 0; k < 3; k++) {
+        lat_isr = 0;
+        uint32_t t0 = lat_trigger(&NVIC->STIR, EXTI2_IRQn);
+        printf("L stir %lu\n", (unsigned long)(lat_isr - t0));
+    }
+    for (int k = 0; k < 3; k++) {
+        lat_isr = 0;
+        uint32_t t0 = lat_trigger_masked(&NVIC->STIR, EXTI2_IRQn);
+        printf("L stir_masked %lu\n", (unsigned long)(lat_isr - t0));
+    }
+    NVIC_DisableIRQ(EXTI2_IRQn);
+    EXTI->PR = 1u << 1;
+    EXTI->IMR |= 1u << 1;
+    NVIC_EnableIRQ(EXTI1_IRQn);
+    for (int k = 0; k < 3; k++) {
+        lat_isr = 0;
+        uint32_t t0 = lat_trigger(&EXTI->SWIER, 1u << 1);
+        printf("L swier %lu\n", (unsigned long)(lat_isr - t0));
+    }
+    for (int k = 0; k < 3; k++) {
+        lat_isr = 0;
+        uint32_t t0 = lat_trigger_masked(&EXTI->SWIER, 1u << 1);
+        printf("L swier_masked %lu\n", (unsigned long)(lat_isr - t0));
+    }
+    NVIC_DisableIRQ(EXTI1_IRQn);
+    EXTI->IMR &= ~(1u << 1);
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -1397,6 +1542,10 @@ static void execute(char *line) {
         cmd_dmatx();
     } else if (!strcmp(line, "dmaspi")) {
         cmd_dmaspi();
+    } else if (!strcmp(line, "adctrig")) {
+        cmd_adctrig();
+    } else if (!strcmp(line, "irqlat")) {
+        cmd_irqlat();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {

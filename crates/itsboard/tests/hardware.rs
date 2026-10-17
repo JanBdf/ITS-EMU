@@ -247,6 +247,39 @@ fn spi_transfer_by_dma_matches_the_board() {
 }
 
 #[test]
+fn adc_timer_trigger_matches_the_board() {
+    // ADC1 started by TIM3 TRGO at 1 kHz (and by the UG at the start)
+    let Some(out) = run("adctrig", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-adctrig.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("G ")).collect();
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
+fn interrupt_latency_matches_the_board() {
+    // Cycles from the pending write to the handler's first instruction. Only
+    // with interrupts masked until CPSIE: the emulator takes interrupts at the
+    // end of a translated block, so the unmasked case depends on the layout.
+    let Some(out) = run("irqlat", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-irqlat.txt")).unwrap();
+    let lines = |text: &str| -> Vec<(String, f64)> {
+        text.lines()
+            .filter(|l| l.starts_with("L ") && l.contains("_masked"))
+            .map(|l| {
+                let v: Vec<&str> = l.split_whitespace().collect();
+                (v[1].to_owned(), v[2].parse().unwrap())
+            })
+            .collect()
+    };
+    let (emu, board) = (lines(&out), lines(&board));
+    assert_eq!(emu.len(), 6, "{out}");
+    for ((name, x), (b_name, y)) in emu.iter().zip(&board) {
+        assert_eq!(name, b_name);
+        assert!((x - y).abs() <= 2.0, "{name}: emulator {x}, board {y}");
+    }
+}
+
+#[test]
 fn watchdog_resets_like_the_board() {
     // HwCheck `iwdg 2 fff`: refreshed once, then the board resets after
     // 1.92 s (last line "W t 1920000"); the reset flags read IWDG + PIN.

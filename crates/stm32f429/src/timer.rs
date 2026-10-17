@@ -17,6 +17,13 @@ use emu_core::{Clock, DeviceCtx, Peripheral};
 use crate::gpio::{PinMode, SharedGpio, port};
 use crate::rcc::SharedClocks;
 
+/// Cycle of the last trigger output (TRGO) of TIM2, TIM3 and TIM8 (index
+/// `TRGO_TIM2` ...), for the ADCs' external triggers.
+pub type SharedTriggers = Rc<Cell<[u64; 3]>>;
+pub const TRGO_TIM2: usize = 0;
+pub const TRGO_TIM3: usize = 1;
+pub const TRGO_TIM8: usize = 2;
+
 /// Pins of the four channels of a timer, and their alternate function.
 pub struct ChannelPins {
     pub af: u32,
@@ -68,6 +75,8 @@ pub struct GpTimer {
     watched: Vec<(usize, u32)>,
     /// Edges counted by the input prescalers.
     ic_events: [u32; 4],
+    /// Trigger output to the ADCs.
+    trgo: Option<(SharedTriggers, usize)>,
 
     cr1: u32,
     cr2: u32,
@@ -116,6 +125,7 @@ impl GpTimer {
             inputs: None,
             watched: Vec::new(),
             ic_events: [0; 4],
+            trgo: None,
             cr1: 0,
             cr2: 0,
             smcr: 0,
@@ -160,6 +170,25 @@ impl GpTimer {
             _ => (0x3FF, 0x5F5F),
         };
         self
+    }
+
+    /// Trigger output (master mode "update") for the ADCs.
+    pub fn with_trgo(mut self, triggers: SharedTriggers, index: usize) -> Self {
+        self.trgo = Some((triggers, index));
+        self
+    }
+
+    /// TRGO is the update event (CR2.MMS = 010) and someone may listen.
+    fn trgo_on_update(&self) -> bool {
+        self.trgo.is_some() && (self.cr2 >> 4) & 7 == 2
+    }
+
+    fn emit_trgo(&self, cycle: u64) {
+        if let Some((t, i)) = &self.trgo {
+            let mut v = t.get();
+            v[*i] = cycle;
+            t.set(v);
+        }
     }
 
     /// Channel inputs for input capture.
@@ -438,6 +467,9 @@ impl GpTimer {
             let udis = self.cr1 & CR1_UDIS != 0;
             if !udis && self.overflows(1) {
                 self.update_event(true);
+                if self.trgo_on_update() {
+                    self.emit_trgo(ctx.clock.cycle_at_ps(wrap_ps));
+                }
             }
             self.base_ps = wrap_ps;
             self.cnt_base = 0;
@@ -487,7 +519,8 @@ impl GpTimer {
             return;
         }
         let base = u128::from(self.cnt_base.min(self.arr_active));
-        let overflow = (self.dier & DIER_UIE != 0).then(|| u128::from(self.arr_active) - base + 1);
+        let wake = self.dier & DIER_UIE != 0 || self.trgo_on_update();
+        let overflow = wake.then(|| u128::from(self.arr_active) - base + 1);
         let Some(ticks) = [overflow, self.next_match_ticks()].into_iter().flatten().min() else { return };
         self.next_event = Some(self.cycle_of_tick(ticks, ctx.clock).max(ctx.now() + 1));
     }
@@ -637,6 +670,9 @@ impl Peripheral for GpTimer {
                     self.update_event(flag);
                     self.rebase(now_ps, 0);
                     self.base_ps = now_ps;
+                    if self.trgo_on_update() {
+                        self.emit_trgo(ctx.now()); // UG is an update event for TRGO, too
+                    }
                 }
                 // CCxG, COMG, TG, BG: set their flags
                 let channels = (0x1Eu32 >> (4 - self.channels)) & 0x1E;
