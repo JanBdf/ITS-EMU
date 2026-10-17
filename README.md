@@ -88,6 +88,10 @@ board:
 }
 ```
 
+The CDT adapter ignores *Run Without Debugging* and always attaches. A copy of
+this configuration without the `tbreak main` lines in `initCommands` and
+`customResetCommands` starts the program without stopping.
+
 Several debuggers may connect at once: the first one controls the core, the
 others (such as the CDT adapter's auxiliary GDB for live watch) read and write
 memory and registers while it runs. Breakpoints do not modify memory, so they
