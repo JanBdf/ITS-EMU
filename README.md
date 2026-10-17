@@ -88,9 +88,14 @@ board:
 }
 ```
 
-The CDT adapter ignores *Run Without Debugging* and always attaches. A copy of
-this configuration without the `tbreak main` lines in `initCommands` and
-`customResetCommands` starts the program without stopping.
+The CDT adapter ignores *Run Without Debugging* (Ctrl+F5) and stops at `main`
+as with F5. The small extension in `tools/vscode-nodebug` removes the `tbreak`
+commands in that case, so the same configuration then just runs the program:
+
+```sh
+tools/vscode-nodebug/package.sh
+code --install-extension tools/vscode-nodebug/gdbtarget-nodebug.vsix
+```
 
 Several debuggers may connect at once: the first one controls the core, the
 others (such as the CDT adapter's auxiliary GDB for live watch) read and write
