@@ -5,7 +5,9 @@
 
 use std::collections::BTreeSet;
 
-use unicorn_engine::{Arch, ArmCpuModel, HookType, MemType, Mode, Prot, RegisterARM, UcHookId, Unicorn, uc_error};
+use unicorn_engine::{
+    Arch, ArmCpuModel, HookType, MemType, Mode, Prot, RegisterARM, TlbEntry, TlbType, UcHookId, Unicorn, uc_error,
+};
 
 use crate::bus::{Bus, BusMaster, DeviceCtx, Ram, ResetKind};
 use crate::clock::Clock;
@@ -138,6 +140,8 @@ pub struct System {
     new_divs: Vec<DivSite>,
     /// Division instructions that have a timing hook.
     hooked_divs: std::collections::HashSet<u32>,
+    /// Code has run from the RAM region (index into `config.memory.ram`).
+    ram_exec: Vec<bool>,
 }
 
 impl System {
@@ -227,6 +231,25 @@ impl System {
 
     fn ctx(&mut self) -> (DeviceCtx<'_>, &mut Bus) {
         (DeviceCtx { clock: &mut self.clock, nvic: &mut self.nvic }, &mut self.bus)
+    }
+
+    fn ram_region(&self, addr: u32) -> Option<usize> {
+        self.config.memory.ram.iter().position(|&(base, size)| addr.wrapping_sub(base) < size)
+    }
+
+    /// Access rights of the page at `addr` for the TLB: those of the
+    /// Cortex-M default memory map (execute-never for peripherals, devices
+    /// and the system region), but RAM only executable once code runs from it.
+    /// Unicorn sends every store to a page with execute rights through its
+    /// slow path (check for self-modifying code), which costs more than the
+    /// translated code itself.
+    fn page_perms(&self, addr: u32) -> Prot {
+        let execute_never = matches!(addr, 0x4000_0000..=0x5FFF_FFFF | 0xA000_0000..=0xFFFF_FFFF);
+        match self.ram_region(addr) {
+            Some(i) if !self.ram_exec[i] => Prot::READ | Prot::WRITE,
+            None if execute_never => Prot::READ | Prot::WRITE,
+            _ => Prot::ALL,
+        }
     }
 }
 
@@ -571,6 +594,24 @@ impl IdleDetector {
     }
 }
 
+/// The address ranges `(first, last)` not covered by `regions` (base, size).
+fn gaps(regions: &[(u32, u32)]) -> Vec<(u64, u64)> {
+    let mut sorted = regions.to_vec();
+    sorted.sort_unstable();
+    let mut gaps = Vec::new();
+    let mut next = 0u64;
+    for (base, size) in sorted {
+        if u64::from(base) > next {
+            gaps.push((next, u64::from(base) - 1));
+        }
+        next = next.max(u64::from(base) + u64::from(size));
+    }
+    if next <= u64::from(u32::MAX) {
+        gaps.push((next, u64::from(u32::MAX)));
+    }
+    gaps
+}
+
 const EXC_RETURN_MAGIC: u32 = 0xFFFF_FF00;
 
 /// Unicorn register for core register number `n` (0..15).
@@ -612,6 +653,7 @@ impl Machine {
             fell_through: None,
             new_divs: Vec::new(),
             hooked_divs: std::collections::HashSet::new(),
+            ram_exec: vec![false; config.memory.ram.len()],
             block_insns: BlockCache::new(),
             last_invalid: None,
             stop: None,
@@ -644,7 +686,8 @@ impl Machine {
             // SAFETY: the buffers are owned by the machine, never reallocated and outlive `uc`;
             // the DMA accesses them only between Unicorn's accesses (from its callbacks).
             unsafe {
-                uc.mem_map_ptr(u64::from(base), u64::from(size), Prot::ALL, ptr.cast())?;
+                // executable once code runs from it (`make_ram_executable`)
+                uc.mem_map_ptr(u64::from(base), u64::from(size), Prot::READ | Prot::WRITE, ptr.cast())?;
                 uc.get_data_mut().ram.add(base, ptr, size, true);
             }
             ram.push(buf);
@@ -834,6 +877,13 @@ impl Machine {
 
         uc.add_intr_hook(Self::on_cpu_exception)?;
 
+        // Page rights come from `page_perms` instead of the CPU's MPU model
+        // (the PPB, where the MPU registers are, is modelled here anyway).
+        uc.add_tlb_hook(1, 0, |uc, addr, _ty| {
+            Some(TlbEntry { paddr: addr, perms: uc.get_data().page_perms(addr as u32) })
+        })?;
+        uc.ctl_set_tlb_type(TlbType::VIRTUAL)?;
+
         let invalid = HookType(
             HookType::MEM_READ_UNMAPPED.0
                 | HookType::MEM_WRITE_UNMAPPED.0
@@ -841,12 +891,17 @@ impl Machine {
                 | HookType::MEM_WRITE_PROT.0
                 | HookType::MEM_FETCH_PROT.0,
         );
-        uc.add_mem_hook(invalid, 1, 0, |uc, ty, addr, _size, _value| {
-            let is_write = matches!(ty, MemType::WRITE_UNMAPPED | MemType::WRITE_PROT);
-            let is_fetch = matches!(ty, MemType::FETCH_UNMAPPED | MemType::FETCH_PROT);
-            uc.get_data_mut().last_invalid = Some((addr as u32, is_write, is_fetch));
-            false
-        })?;
+        // Not over RAM: Unicorn keeps stores to pages covered by any memory hook
+        // on its slow path. RAM is fully mapped, so nothing there is invalid
+        // except instruction fetches (`make_ram_executable`).
+        for (begin, end) in gaps(&mem.ram) {
+            uc.add_mem_hook(invalid, begin, end, |uc, ty, addr, _size, _value| {
+                let is_write = matches!(ty, MemType::WRITE_UNMAPPED | MemType::WRITE_PROT);
+                let is_fetch = matches!(ty, MemType::FETCH_UNMAPPED | MemType::FETCH_PROT);
+                uc.get_data_mut().last_invalid = Some((addr as u32, is_write, is_fetch));
+                false
+            })?;
+        }
 
         Ok(Self {
             uc,
@@ -1351,10 +1406,37 @@ impl Machine {
         }
     }
 
+    /// Code is fetched from a RAM region for the first time: makes it executable
+    /// (the fetch is retried). Returns false if `pc` is not in RAM that is
+    /// still non-executable.
+    fn make_ram_executable(&mut self, pc: u32) -> bool {
+        let sys = self.uc.get_data_mut();
+        let Some(i) = sys.ram_region(pc) else { return false };
+        if sys.ram_exec[i] {
+            return false;
+        }
+        sys.ram_exec[i] = true;
+        let (base, size) = sys.config.memory.ram[i];
+        log::debug!("code in RAM at {pc:#010x}: region {base:#010x} made executable");
+        // Executable regions get Unicorn's checks for self-modifying code.
+        let ok = self.uc.mem_protect(u64::from(base), u64::from(size), Prot::ALL).is_ok();
+        ok && self.uc.ctl_flush_tlb().is_ok()
+    }
+
     /// Unicorn aborted because of an invalid memory access or instruction.
     fn on_emu_error(&mut self, err: uc_error) {
         let pc = self.pc();
         let invalid = self.uc.get_data_mut().last_invalid.take();
+        // An instruction fetch the TLB hook (`page_perms`) refused.
+        if err == uc_error::EXCEPTION && invalid.is_none() {
+            if !self.make_ram_executable(pc) {
+                // execute-never region of the default memory map: what the
+                // CPU's own TLB reported as a prefetch abort
+                self.uc.get_data_mut().scs.cfsr |= scs::CFSR_PRECISERR;
+                Self::raise_fault(&mut self.uc, nvic::BUS_FAULT, pc);
+            }
+            return;
+        }
         match (err, invalid) {
             (uc_error::INSN_INVALID, _) => {
                 self.uc.get_data_mut().scs.cfsr |= scs::CFSR_UNDEFINSTR;
