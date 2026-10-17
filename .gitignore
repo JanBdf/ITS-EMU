@@ -16,6 +16,3 @@
 !/tests/fixtures/ac6/SerialEcho.axf
 !/tests/fixtures/ac6/HwCheck.axf
 
-
-# Camera calibration of tools/hw (depends on the phone position)
-/tools/hw/calib.json

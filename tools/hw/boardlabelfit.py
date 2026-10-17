@@ -3,7 +3,7 @@
 
     boardlabelfit.py BOARD.jpg [BOARD2.jpg ...] [--report]
 
-BOARD.jpg is the rectified photo (boardasset.py, 1000 design units wide).
+BOARD.jpg is the rectified photo (hardware_img/board-rect.jpg, 1000 design units wide).
 For every label, position, cap height and width are varied around the
 hand-measured values; the variant whose rendering matches the white
 silkscreen in the photo best (normalised cross-correlation) is written to

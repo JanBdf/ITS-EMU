@@ -110,20 +110,20 @@ stored in `tests/hardware`.
 | filled circle, radius 100 (point by point) | 133.3 M | 124.7 M (−6.5 %) |
 | input levels of ports A–I (no pull / pull-down / pull-up) | | identical |
 
-`tools/hw` drives the board (Nucleo ST-LINK: `flash.sh`, `cmd.py`) and a
-phone camera over adb (`camera-pro.sh`, `snap.sh`, Samsung camera in Pro
-mode with fixed exposure); `boardphoto.py` extracts the display (perspective
-corrected) and the LED states from a photo, `compare.sh` puts photo and
-emulator screenshot side by side. The board in the GUI is a vector drawing
-(`apps/its-emu-gui/assets/board.svg`) made by `boarddraw.py` after the
-stacked board photo (`stack-capture.sh`, `boardstack.py`, `boardasset.py`);
-`boardlabelfit.py` and `boardtraces.py` fit the silkscreen labels and trace
-the copper under the mask in that photo.
+`tools/hw` drives the board through the Nucleo's ST-LINK (`flash.sh`,
+`cmd.py`; HwCheck's `rd`/`wr` read and write any register). The board in the
+GUI is a vector drawing (`apps/its-emu-gui/assets/board.svg`) made by
+`boarddraw.py` after a rectified, focus-stacked photo of the real board
+(`hardware_img/board-rect.jpg`, not published); `boardlabelfit.py` and
+`boardtraces.py` fit the silkscreen labels and trace the copper under the
+mask in that photo, `boardcmp.py` puts a region of drawing and photo side by
+side.
 
 ```sh
 tools/hw/flash.sh tests/fixtures/ac6/HwCheck.axf
-python3 tools/hw/cmd.py --wait-ready time cyc   # on the board
-tools/hw/compare.sh /tmp/cmp bars bars          # photo vs. emulator
+python3 tools/hw/cmd.py --wait-ready time cyc exti   # on the board
+python3 tools/hw/cmd.py "rd 40013c14"                # EXTI->PR
+python3 tools/hw/boardcmp.py 0 0 300 160 /tmp/cmp.png
 ```
 
 ## Building

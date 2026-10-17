@@ -56,11 +56,8 @@ const EXTERNAL_LEVELS: &[(char, u32, bool)] = &[
 ];
 
 /// Levels that floating inputs (no pull, not driven) read on the real board,
-/// per port A..K (HwCheck `pins`, no-pull IDR of the undriven inputs; for
-/// alternate function pins the idle level of the signal). Such
-/// levels are not guaranteed by the hardware (e.g. PG12 and PG15 change from
-/// time to time), but reading a whole port then gives typical values such as
-/// GPIOF->IDR = 0xFCFF with all buttons released.
+/// per port A..K (HwCheck `pins`). Not guaranteed by the hardware, but they
+/// give typical port values such as GPIOF->IDR = 0xFCFF.
 const FLOATING_LEVELS: [u16; 11] = [
     0x05C0, // A: PA6 (SPI1_MISO), PA7 (SPI1_MOSI), PA8, PA10
     0x3C48, // B: PB3 (SWO), PB6, PB10 (touch BUSY, high-Z while not selected), PB11..13
