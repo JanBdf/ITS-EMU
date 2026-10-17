@@ -35,6 +35,7 @@
  *   dacwave         DAC wave generation, TIM6 trigger with DMA
  *   timout          timer outputs on PC6 (TIM3/TIM8 CH1)
  *   enc             TIM8 encoder mode on PC6/PC7 (pull switching)
+ *   onewire         1-Wire master on PG2 (AUX2): reset, ROM, DS18B20 conversion
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1792,6 +1793,179 @@ static void cmd_enc(void) {
     GPIOC->PUPDR &= ~(0xFu << 12);
 }
 
+/* ---- 1-Wire master on PG2 (AUX2): open drain with the MCU's pull-up,
+ * timings of Maxim AN126 (standard speed). `ow_sample_us` moves the read
+ * sampling point (AN126: 9 us after releasing = 15 us after the falling edge). */
+static uint32_t ow_sample_us = 15;
+
+static void ow_delay_us(uint32_t us) {
+    uint32_t t0 = DWT->CYCCNT;
+    while (DWT->CYCCNT - t0 < us * 180u) {
+    }
+}
+
+static void ow_low(void) { GPIOG->BSRR = 1u << (2 + 16); }
+static void ow_release(void) { GPIOG->BSRR = 1u << 2; }
+static uint32_t ow_level(void) { return (GPIOG->IDR >> 2) & 1; }
+
+/* Reset pulse of `low_us`; returns 1 if a device answered with a presence pulse. */
+static uint32_t ow_reset_len(uint32_t low_us) {
+    ow_low();
+    ow_delay_us(low_us);
+    __disable_irq();
+    ow_release();
+    ow_delay_us(70);
+    uint32_t presence = !ow_level();
+    __enable_irq();
+    ow_delay_us(410);
+    return presence;
+}
+
+static uint32_t ow_reset(void) { return ow_reset_len(480); }
+
+static void ow_write_bit(uint32_t bit) {
+    __disable_irq();
+    ow_low();
+    ow_delay_us(bit ? 6 : 60);
+    ow_release();
+    __enable_irq();
+    ow_delay_us(bit ? 64 : 10);
+}
+
+static uint32_t ow_read_bit(void) {
+    __disable_irq();
+    ow_low();
+    ow_delay_us(6);
+    ow_release();
+    ow_delay_us(ow_sample_us - 6);
+    uint32_t bit = ow_level();
+    __enable_irq();
+    ow_delay_us(70 - ow_sample_us);
+    return bit;
+}
+
+static void ow_write(uint8_t byte) {
+    for (int i = 0; i < 8; i++) {
+        ow_write_bit((byte >> i) & 1);
+    }
+}
+
+static uint8_t ow_read(void) {
+    uint8_t byte = 0;
+    for (int i = 0; i < 8; i++) {
+        byte |= (uint8_t)(ow_read_bit() << i);
+    }
+    return byte;
+}
+
+static uint8_t ow_crc8(const uint8_t *data, int n) {
+    uint8_t crc = 0;
+    for (int i = 0; i < n; i++) {
+        uint8_t b = data[i];
+        for (int j = 0; j < 8; j++) {
+            uint8_t mix = (crc ^ b) & 1;
+            crc >>= 1;
+            if (mix) {
+                crc ^= 0x8C;
+            }
+            b >>= 1;
+        }
+    }
+    return crc;
+}
+
+static void ow_print(const char *name, const uint8_t *data, int n) {
+    printf("N %s", name);
+    for (int i = 0; i < n; i++) {
+        printf(" %02x", data[i]);
+    }
+    printf(" crc %s\n", ow_crc8(data, n - 1) == data[n - 1] ? "ok" : "bad");
+}
+
+static void cmd_onewire(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOGEN;
+    __DSB();
+    GPIOG->BSRR = 1u << 2; // released
+    GPIOG->OTYPER |= 1u << 2;
+    GPIOG->PUPDR = (GPIOG->PUPDR & ~(3u << 4)) | (1u << 4);
+    GPIOG->MODER = (GPIOG->MODER & ~(3u << 4)) | (1u << 4);
+    ow_delay_us(100);
+    printf("N idle %lu\n", (unsigned long)ow_level());
+    uint32_t presence = ow_reset();
+    printf("N presence %lu\n", (unsigned long)presence);
+    uint8_t rom[8], pad[9];
+    ow_write(0x33); // Read ROM
+    for (int i = 0; i < 8; i++) {
+        rom[i] = ow_read();
+    }
+    ow_print("rom", rom, 8);
+    // power-on scratchpad
+    printf("N presence2 %lu\n", (unsigned long)ow_reset());
+    ow_write(0xCC);
+    ow_write(0xBE);
+    for (int i = 0; i < 9; i++) {
+        pad[i] = ow_read();
+    }
+    ow_print("pad_poweron", pad, 9);
+    // conversion: read slots return 0 while converting
+    ow_reset();
+    ow_write(0xCC);
+    ow_write(0x44);
+    uint32_t t0 = DWT->CYCCNT, busy = 0;
+    while (!ow_read_bit() && busy < 20000) {
+        busy++;
+    }
+    uint32_t conv_ms = (DWT->CYCCNT - t0) / 180000u;
+    printf("N convert_ms %lu\n", (unsigned long)(busy ? conv_ms / 10 * 10 : 0));
+    ow_reset();
+    ow_write(0xCC);
+    ow_write(0xBE);
+    for (int i = 0; i < 9; i++) {
+        pad[i] = ow_read();
+    }
+    ow_print("pad", pad, 9);
+    // 9-bit resolution, then convert again with late sampling (14 us)
+    ow_reset();
+    ow_write(0xCC);
+    ow_write(0x4E);
+    ow_write(0x55); // TH
+    ow_write(0xAA); // TL
+    ow_write(0x1F); // config: 9 bit
+    ow_sample_us = 14;
+    ow_reset_len(960); // long reset
+    ow_write(0x55); // Match ROM
+    for (int i = 0; i < 8; i++) {
+        ow_write(rom[i]);
+    }
+    ow_write(0x44);
+    t0 = DWT->CYCCNT;
+    busy = 0;
+    while (!ow_read_bit() && busy < 20000) {
+        busy++;
+    }
+    conv_ms = (DWT->CYCCNT - t0) / 180000u;
+    printf("N convert9_ms %lu\n", (unsigned long)(busy ? conv_ms / 10 * 10 : 0));
+    ow_reset();
+    ow_write(0xCC);
+    ow_write(0xBE);
+    for (int i = 0; i < 9; i++) {
+        pad[i] = ow_read();
+    }
+    ow_print("pad9", pad, 9);
+    ow_sample_us = 15;
+    // power supply
+    ow_reset();
+    ow_write(0xCC);
+    ow_write(0xB4);
+    printf("N powered %lu\n", (unsigned long)ow_read_bit());
+    // back to an input
+    GPIOG->MODER &= ~(3u << 4);
+    GPIOG->PUPDR &= ~(3u << 4);
+    GPIOG->OTYPER &= ~(1u << 2);
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -1849,6 +2023,8 @@ static void execute(char *line) {
         cmd_timout();
     } else if (!strcmp(line, "enc")) {
         cmd_enc();
+    } else if (!strcmp(line, "onewire")) {
+        cmd_onewire();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {

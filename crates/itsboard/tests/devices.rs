@@ -94,3 +94,52 @@ fn rotary_encoder_on_plain_inputs() {
     p.wait_ms(10);
     assert_eq!(p.rd(gpiog_idr) & 3, 3, "back at rest after a detent");
 }
+
+/// The `N` lines of HwCheck `onewire` (1-Wire master on PG2, AN126 timings).
+fn onewire(p: &mut Probe) -> Vec<String> {
+    p.sim.send_serial("onewire\n");
+    p.wait_ms(1_500);
+    let out = p.sim.take_serial();
+    assert!(out.ends_with("ok onewire\n"), "{out}");
+    out.lines().filter(|l| l.starts_with("N ")).map(str::to_owned).collect()
+}
+
+#[test]
+fn onewire_without_a_device_matches_the_board() {
+    let Some(mut p) = Probe::boot() else { return };
+    let board =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/hardware/HwCheck-onewire.txt"))
+            .unwrap();
+    assert_eq!(onewire(&mut p), board.lines().collect::<Vec<_>>());
+}
+
+#[test]
+fn ds18b20_answers_a_standard_master() {
+    let Some(mut p) = Probe::boot() else { return };
+    let n = p.sim.board.add_ds18b20(('G', 2));
+    p.sim.board.set_temperature(n, 25.0625).unwrap();
+    let rom: String = p.sim.board.ds18b20_rom(n).unwrap().iter().map(|b| format!(" {b:02x}")).collect();
+    assert!(rom.starts_with(" 28"), "family code");
+    let expected = [
+        "N idle 1".to_owned(),
+        "N presence 1".to_owned(),
+        format!("N rom{rom} crc ok"),
+        "N presence2 1".to_owned(),
+        "N pad_poweron 50 05 4b 46 7f ff 0c 10 1c crc ok".to_owned(),
+        "N convert_ms 750".to_owned(),
+        // 25.0625 °C = 401 / 16
+        "N pad 91 01 4b 46 7f ff 0c 10 ".to_owned(),
+        "N convert9_ms 90".to_owned(),
+        // 9 bit: the three low bits read 0; TH/TL/config as written
+        "N pad9 90 01 55 aa 1f ff 0c 10 ".to_owned(),
+        "N powered 1".to_owned(),
+    ];
+    let lines = onewire(&mut p);
+    assert_eq!(lines.len(), expected.len(), "{lines:#?}");
+    for (line, want) in lines.iter().zip(&expected) {
+        assert!(line.starts_with(want.as_str()), "{line:?} should start with {want:?}");
+        if line.contains("crc") {
+            assert!(line.ends_with("crc ok"), "{line}");
+        }
+    }
+}

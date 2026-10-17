@@ -31,9 +31,9 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   modes, complementary outputs and dead time of TIM1/TIM8, CCR preload (OCxPE)
 - DMA requests of I2C and timers (the controllers and the ADC, U(S)ART, SPI
   and DAC requests exist), DMA FIFO/bursts; then Ethernet (`Programs/Stack`)
-- External devices on the headers: I2C sensor via `I2cDevice`, 1-Wire
-  sensor; devices in the GUI (the rotary encoder exists on the command line,
-  `itsboard::devices`)
+- External devices: an I2C sensor via `I2cDevice`; the devices in the GUI
+  (rotary encoder and DS18B20 exist on the command line, `itsboard::devices`;
+  which header pins the course uses for them is still open)
 - ADC injected-group triggers, the CCx/EXTI11 (ADC) and EXTI9 (DAC) trigger
   sources; TRGO other than the update event (the ADC regular group starts on
   TIM2/TIM3/TIM8 TRGO, the DAC on TIM2/4/5/6/7/8 TRGO)

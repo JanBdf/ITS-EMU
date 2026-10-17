@@ -21,6 +21,7 @@ ITS-Board (Rev 02, NUCLEO-F429ZI, 180 MHz, ART accelerator on), taken
 | `HwCheck-dacwave.txt` | `dacwave` | DAC1 noise and triangle generation (software trigger), TIM6 TRGO trigger with DMA1 stream 5 feeding DHR, DMA underrun |
 | `HwCheck-timout.txt` | `timout` | TIM3/TIM8 CH1 driving PC6: PWM levels against CNT, CCR = 0 / above ARR, polarity, CCxE off, forced levels, mode change, toggle captured by CH2, MOE |
 | `HwCheck-enc.txt` | `enc` | TIM8 encoder modes (SMS 1/2/3, inverted TI1, wrap below 0) on PC6/PC7, quadrature edges made by switching the pins' pull-up/pull-down |
+| `HwCheck-onewire.txt` | `onewire` | 1-Wire master on PG2 (AUX2) with nothing connected: idle level, no presence pulse, reads all ones (compared in `crates/itsboard/tests/devices.rs`) |
 | `HwCheck-irqlat.txt` | `irqlat` | interrupt latency to a handler that reads DWT->CYCCNT first: pended by NVIC->STIR or EXTI->SWIER, with interrupts enabled or masked until CPSIE |
 | `HwCheck-regs.txt` | `wr`/`dump` (first line) | reset values of the registers of timers, SPIs, U(S)ARTs, I2Cs, ADC, DAC, SYSCFG, EXTI |
 

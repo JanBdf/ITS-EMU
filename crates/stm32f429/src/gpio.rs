@@ -63,9 +63,11 @@ pub struct PortState {
     pub cap_fall: u16,
     pub cap_ps: [u64; 16],
     /// Pins whose edges are logged in order (timer encoder inputs, devices)
-    /// and the log: (pin, new level, cycle).
+    /// and the log: (pin, new level, cycle, caused by an external driver).
     pub log_watch: u16,
-    pub edge_log: Vec<(u8, bool, u64)>,
+    pub edge_log: Vec<(u8, bool, u64, bool)>,
+    /// An external driver is changing its level (see `edge_log`).
+    external_change: bool,
     /// Levels that peripherals drive on the pins, per alternate function
     /// (timer outputs); they apply while the pin selects that function.
     af_drive: [[Option<bool>; 16]; 16],
@@ -206,7 +208,7 @@ impl PortState {
         let after = self.idr() as u16;
         for pin in 0..16u8 {
             if (before ^ after) & self.log_watch & (1 << pin) != 0 {
-                self.edge_log.push((pin, after & (1 << pin) != 0, due));
+                self.edge_log.push((pin, after & (1 << pin) != 0, due, self.external_change));
             }
         }
         let pending = self.cap_rise | self.cap_fall;
@@ -259,6 +261,7 @@ impl GpioBank {
     /// [`Self::drive`] at a known cycle (edges are logged with it).
     pub fn drive_at(&mut self, port: usize, pin: u32, level: Option<bool>, cycle: u64) {
         let bit = 1u16 << pin;
+        self.ports[port].external_change = true;
         self.ports[port].tracked(cycle, |p| match level {
             Some(l) => {
                 p.ext_mask |= bit;
@@ -270,12 +273,13 @@ impl GpioBank {
             }
             None => p.ext_mask &= !bit,
         });
+        self.ports[port].external_change = false;
     }
 
     /// Takes the logged edges of the pins in `mask`, in order.
-    pub fn take_edges(&mut self, port: usize, mask: u16) -> Vec<(u8, bool, u64)> {
+    pub fn take_edges(&mut self, port: usize, mask: u16) -> Vec<(u8, bool, u64, bool)> {
         let log = &mut self.ports[port].edge_log;
-        let (taken, kept) = std::mem::take(log).into_iter().partition(|&(pin, _, _)| mask & (1 << pin) != 0);
+        let (taken, kept) = std::mem::take(log).into_iter().partition(|&(pin, ..)| mask & (1 << pin) != 0);
         *log = kept;
         taken
     }
