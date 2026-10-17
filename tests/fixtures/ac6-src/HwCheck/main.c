@@ -30,6 +30,15 @@
  *   dma             DMA2: memory-to-memory copy, ADC1 scan into memory
  *   dmatx           USART3 transmission by DMA1
  *   dmaspi          SPI3 transfer by DMA1 (nothing connected)
+ *   adctrig         ADC1 triggered by TIM3 TRGO at 1 kHz
+ *   irqlat          interrupt latency: NVIC STIR, EXTI SWIER
+ *   dacwave         DAC wave generation, TIM6 trigger with DMA
+ *   timout          timer outputs on PC6 (TIM3/TIM8 CH1)
+ *   enc             TIM8 encoder mode on PC6/PC7 (pull switching)
+ *   onewire         1-Wire master on PG2 (AUX2): reset, ROM, DS18B20 conversion
+ *   timpre          CCR preload (OCxPE) on TIM3_CH1/PC6
+ *   timdir          TIM3 counting directions: PWM levels, flags
+ *   timslave        TIM3 slave modes with TI1/TI2 on PC6/PC7 (pull switching)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -777,7 +786,13 @@ static void cmd_tim(void) {
  * Analog header pins, DAC1 (PA4) measured by ADC1, flag semantics. */
 static volatile uint32_t adc_irqs, adc_irq_dr;
 
+static void (*volatile adc_irq_hook)(void);
+
 void ADC_IRQHandler(void) {
+    if (adc_irq_hook) {
+        adc_irq_hook();
+        return;
+    }
     adc_irq_dr = ADC1->DR;
     adc_irqs++;
 }
@@ -1350,6 +1365,862 @@ static void cmd_dmaspi(void) {
     GPIOC->MODER &= ~(0x3Fu << 20);
 }
 
+/* ---- ADC1 started by TIM3 TRGO (update event) at 1 kHz. */
+static volatile uint32_t trig_eocs, trig_cnt;
+
+static void adctrig_isr(void) {
+    trig_cnt = TIM3->CNT;
+    (void)ADC1->DR;
+    trig_eocs++;
+}
+
+static void cmd_adctrig(void) {
+    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
+    __DSB();
+    ADC->CCR = ADC_CCR_TSVREFE | (1u << 16); // PCLK2 / 4
+    ADC1->CR1 = ADC_CR1_EOCIE;
+    ADC1->SMPR1 = 7u << 21;                   // VREFINT: 480 cycles
+    ADC1->SQR1 = 0;
+    ADC1->SQR3 = 17;
+    ADC1->CR2 = ADC_CR2_ADON | (8u << 24) | (1u << 28); // TIM3_TRGO, rising edge
+    TIM3->CR1 = 0;
+    TIM3->PSC = 89;
+    TIM3->ARR = 999;
+    TIM3->CR2 = 2u << 4; // MMS: update
+    TIM3->EGR = 1;
+    TIM3->SR = 0;
+    trig_eocs = 0;
+    adc_irq_hook = adctrig_isr;
+    NVIC_EnableIRQ(ADC_IRQn);
+    uint32_t t0 = getTimeStamp();
+    TIM3->CR1 = 1;
+    while (getTimeStamp() - t0 < 10500 * 90) {
+    }
+    TIM3->CR1 = 0;
+    NVIC_DisableIRQ(ADC_IRQn);
+    adc_irq_hook = 0;
+    printf("G eocs_10_5ms %lu\n", (unsigned long)trig_eocs);
+    printf("G tim3_cnt_at_eoc %lu\n", (unsigned long)trig_cnt);
+    ADC1->CR2 = 0;
+    ADC1->CR1 = 0;
+    ADC->CCR = 0;
+    TIM3->CR2 = 0;
+}
+
+/* ---- Interrupt latency: handlers that read DWT->CYCCNT first thing. EXTI2
+ * is pended through NVIC->STIR (core only), EXTI1 by EXTI->SWIER (through
+ * the APB2 peripheral and its interrupt line). */
+volatile uint32_t lat_isr;
+
+__attribute__((naked)) void EXTI2_IRQHandler(void) {
+    __asm volatile("movw r0, #0x1004\n"
+                   "movt r0, #0xE000\n"
+                   "ldr r0, [r0]\n"
+                   "movw r1, #:lower16:lat_isr\n"
+                   "movt r1, #:upper16:lat_isr\n"
+                   "str r0, [r1]\n"
+                   "bx lr\n");
+}
+
+__attribute__((naked)) void EXTI1_IRQHandler(void) {
+    __asm volatile("movw r0, #0x1004\n"
+                   "movt r0, #0xE000\n"
+                   "ldr r0, [r0]\n"
+                   "movw r1, #:lower16:lat_isr\n"
+                   "movt r1, #:upper16:lat_isr\n"
+                   "str r0, [r1]\n"
+                   "movw r0, #0x3C14\n" // EXTI->PR
+                   "movt r0, #0x4001\n"
+                   "movs r1, #2\n"
+                   "str r1, [r0]\n"
+                   "dsb\n"
+                   "bx lr\n");
+}
+
+/* Writes `val` to `*reg` right after reading DWT->CYCCNT, which it returns. */
+__attribute__((naked, noinline)) static uint32_t lat_trigger(volatile uint32_t *reg, uint32_t val) {
+    __asm volatile("movw r2, #0x1004\n"
+                   "movt r2, #0xE000\n"
+                   "ldr r3, [r2]\n"
+                   "str r1, [r0]\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "mov r0, r3\n"
+                   "bx lr\n");
+}
+
+/* Same with interrupts masked during the write: taken after CPSIE. */
+__attribute__((naked, noinline)) static uint32_t lat_trigger_masked(volatile uint32_t *reg, uint32_t val) {
+    __asm volatile("cpsid i\n"
+                   "movw r2, #0x1004\n"
+                   "movt r2, #0xE000\n"
+                   "ldr r3, [r2]\n"
+                   "str r1, [r0]\n"
+                   "cpsie i\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "nop\n nop\n nop\n nop\n nop\n nop\n nop\n nop\n"
+                   "mov r0, r3\n"
+                   "bx lr\n");
+}
+
+static void cmd_irqlat(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
+    __DSB();
+    NVIC_EnableIRQ(EXTI2_IRQn);
+    for (int k = 0; k < 3; k++) {
+        lat_isr = 0;
+        uint32_t t0 = lat_trigger(&NVIC->STIR, EXTI2_IRQn);
+        printf("L stir %lu\n", (unsigned long)(lat_isr - t0));
+    }
+    for (int k = 0; k < 3; k++) {
+        lat_isr = 0;
+        uint32_t t0 = lat_trigger_masked(&NVIC->STIR, EXTI2_IRQn);
+        printf("L stir_masked %lu\n", (unsigned long)(lat_isr - t0));
+    }
+    NVIC_DisableIRQ(EXTI2_IRQn);
+    EXTI->PR = 1u << 1;
+    EXTI->IMR |= 1u << 1;
+    NVIC_EnableIRQ(EXTI1_IRQn);
+    for (int k = 0; k < 3; k++) {
+        lat_isr = 0;
+        uint32_t t0 = lat_trigger(&EXTI->SWIER, 1u << 1);
+        printf("L swier %lu\n", (unsigned long)(lat_isr - t0));
+    }
+    for (int k = 0; k < 3; k++) {
+        lat_isr = 0;
+        uint32_t t0 = lat_trigger_masked(&EXTI->SWIER, 1u << 1);
+        printf("L swier_masked %lu\n", (unsigned long)(lat_isr - t0));
+    }
+    NVIC_DisableIRQ(EXTI1_IRQn);
+    EXTI->IMR &= ~(1u << 1);
+}
+
+/* ---- DAC: wave generation with the software trigger, TIM6 TRGO trigger
+ * with DMA1 stream 5 feeding DHR12R1, DMA underrun. */
+static void dac_swtrig(const char *name, int n) {
+    for (int i = 0; i < n; i++) {
+        DAC->SWTRIGR = DAC_SWTRIGR_SWTRIG1;
+        __DSB();
+        printf("W %s %03lx\n", name, (unsigned long)DAC->DOR1);
+    }
+}
+
+static void cmd_dacwave(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_DACEN | RCC_APB1ENR_TIM6EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_DMA1EN;
+    __DSB();
+    const uint32_t sw = DAC_CR_EN1 | DAC_CR_TEN1 | (7u << 3);
+    // noise, all bits
+    DAC->CR = 0;
+    DAC->DHR12R1 = 0;
+    DAC->CR = sw | (1u << 6) | (11u << 8);
+    printf("W noise_start %03lx\n", (unsigned long)DAC->DOR1);
+    dac_swtrig("noise11", 24);
+    // re-enabled: does the LFSR restart?
+    DAC->CR = 0;
+    DAC->CR = sw | (1u << 6) | (11u << 8);
+    dac_swtrig("noise11_again", 3);
+    // noise, 4 bits, on top of DHR; DHR near the top (wrap)
+    DAC->CR = 0;
+    DAC->DHR12R1 = 0x100;
+    DAC->CR = sw | (1u << 6) | (3u << 8);
+    dac_swtrig("noise3", 8);
+    DAC->DHR12R1 = 0xFFC;
+    dac_swtrig("noise3_top", 4);
+    // triangle, amplitude 7, on top of DHR
+    DAC->CR = 0;
+    DAC->DHR12R1 = 0x200;
+    DAC->CR = sw | (2u << 6) | (2u << 8);
+    dac_swtrig("tri2", 20);
+    // a DHR write changes the base immediately? (waits for the trigger)
+    DAC->DHR12R1 = 0x300;
+    printf("W tri2_dhr_write %03lx\n", (unsigned long)DAC->DOR1);
+    dac_swtrig("tri2_new_base", 2);
+    // switching the wave off
+    DAC->CR = sw;
+    dac_swtrig("wave_off", 2);
+
+    // TIM6 TRGO at 1 kHz, DMA writes 8 table values into DHR12R1
+    static uint32_t table[8] = {0x100, 0x200, 0x300, 0x400, 0x500, 0x600, 0x700, 0x800};
+    DAC->CR = 0;
+    DAC->DHR12R1 = 0x050;
+    DAC->SR = DAC_SR_DMAUDR1;
+    DMA1_Stream5->CR = 0;
+    DMA1->HIFCR = 0x3Du << 6;
+    DMA1_Stream5->PAR = (uint32_t)&DAC->DHR12R1;
+    DMA1_Stream5->M0AR = (uint32_t)table;
+    DMA1_Stream5->NDTR = 8;
+    DMA1_Stream5->CR = (7u << 25) | (2u << 13) | (2u << 11) | DMA_SxCR_MINC | DMA_SxCR_DIR_0;
+    DMA1_Stream5->CR |= DMA_SxCR_EN;
+    DAC->CR = DAC_CR_EN1 | DAC_CR_TEN1 | DAC_CR_DMAEN1; // TSEL 000: TIM6 TRGO
+    printf("W hw_dor_before %03lx\n", (unsigned long)DAC->DOR1);
+    TIM6->CR1 = 0;
+    TIM6->PSC = 89; // 1 MHz
+    TIM6->ARR = 999;
+    TIM6->EGR = TIM_EGR_UG; // loads PSC; MMS is still 000: no trigger
+    TIM6->CR2 = 2u << 4;    // MMS = update
+    TIM6->SR = 0;
+    uint32_t t0 = DWT->CYCCNT;
+    TIM6->CR1 = TIM_CR1_CEN;
+    while (!(DMA1->HISR & (1u << 11)) && DWT->CYCCNT - t0 < 20 * 180000u) {
+    }
+    uint32_t t1 = DWT->CYCCNT;
+    uint32_t dor_tc = DAC->DOR1, sr_tc = DAC->SR, ndtr = DMA1_Stream5->NDTR;
+    while (DWT->CYCCNT - t1 < 2 * 180000u) {
+    }
+    uint32_t dor_after = DAC->DOR1, sr_after = DAC->SR;
+    TIM6->CR1 = 0;
+    printf("W hw_tc_us %lu\n", (unsigned long)((t1 - t0) / 180));
+    printf("W hw_tc_dor %03lx sr %08lx ndtr %lu\n", (unsigned long)dor_tc, (unsigned long)sr_tc, (unsigned long)ndtr);
+    printf("W hw_after_dor %03lx sr %08lx\n", (unsigned long)dor_after, (unsigned long)sr_after);
+    printf("W hw_dmaen_after %08lx\n", (unsigned long)DAC->CR);
+    DMA1_Stream5->CR = 0;
+    DAC->CR = 0;
+    DAC->SR = DAC_SR_DMAUDR1;
+    TIM6->CR2 = 0;
+}
+
+/* ---- Timer outputs on PC6 (TIM3_CH1 AF2, TIM8_CH1 AF3; open on the board):
+ * level read back through IDR against CNT, capture of the own output. */
+static void timout_scan(const char *name, uint32_t level) {
+    uint32_t lo = 0xFFFFFFFF, hi = 0;
+    for (int i = 0; i < 40000; i++) {
+        uint32_t c = TIM3->CNT;
+        uint32_t l = (GPIOC->IDR >> 6) & 1;
+        if (TIM3->CNT != c) {
+            continue;
+        }
+        if (l == level) {
+            lo = c < lo ? c : lo;
+            hi = c > hi ? c : hi;
+        }
+    }
+    if (hi == 0 && lo == 0xFFFFFFFF) {
+        printf("O %s none\n", name);
+    } else {
+        printf("O %s %lu %lu\n", name, (unsigned long)lo, (unsigned long)hi);
+    }
+}
+
+/* PC6 after the pin settled (an open pin follows its pull slowly). */
+static uint32_t timout_level(void) {
+    uint32_t t0 = DWT->CYCCNT;
+    while (DWT->CYCCNT - t0 < 1800) {
+    }
+    return (GPIOC->IDR >> 6) & 1;
+}
+
+static void timout_pc6(uint32_t af) {
+    GPIOC->AFR[0] = (GPIOC->AFR[0] & ~(0xFu << 24)) | (af << 24);
+    GPIOC->MODER = (GPIOC->MODER & ~(3u << 12)) | (2u << 12);
+}
+
+static void cmd_timout(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
+    RCC->APB2ENR |= RCC_APB2ENR_TIM8EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+    __DSB();
+    GPIOC->PUPDR &= ~(3u << 12);
+    timout_pc6(2);
+    // PWM mode 1 at 1 MHz, period 1000: high while CNT < CCR1
+    TIM3->CR1 = 0;
+    TIM3->PSC = 89;
+    TIM3->ARR = 999;
+    TIM3->CCR1 = 300;
+    TIM3->CCMR1 = 6u << 4;
+    TIM3->CCER = TIM_CCER_CC1E;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->CR1 = TIM_CR1_CEN;
+    timout_scan("pwm1_high", 1);
+    timout_scan("pwm1_low", 0);
+    TIM3->CCMR1 = 7u << 4; // PWM mode 2
+    timout_scan("pwm2_high", 1);
+    // a mode change keeps OCxREF until the next match or wrap
+    while (TIM3->CNT < 100 || TIM3->CNT >= 150) {
+    }
+    TIM3->CCMR1 = 6u << 4; // PWM1 would be high below 300
+    printf("O mode_change_stale %lu\n", (unsigned long)timout_level());
+    while (TIM3->CNT >= 100) {
+    }
+    printf("O mode_change_after_wrap %lu\n", (unsigned long)timout_level());
+    TIM3->CCER = TIM_CCER_CC1E | TIM_CCER_CC1P; // active low
+    timout_scan("pwm1_inv_high", 1);
+    TIM3->CCER = TIM_CCER_CC1E;
+    TIM3->CCR1 = 0;
+    timout_scan("pwm1_ccr0_high", 1);
+    TIM3->CCR1 = 1200; // above ARR
+    timout_scan("pwm1_ccr_above_arr_low", 0);
+    // output disabled: the pin reads its pull
+    TIM3->CCR1 = 300;
+    TIM3->CCER = 0;
+    GPIOC->PUPDR |= 1u << 12;
+    printf("O ccxe_off_pullup %lu\n", (unsigned long)timout_level());
+    GPIOC->PUPDR = (GPIOC->PUPDR & ~(3u << 12)) | (2u << 12);
+    printf("O ccxe_off_pulldown %lu\n", (unsigned long)timout_level());
+    // forced levels, counter stopped
+    TIM3->CR1 = 0;
+    TIM3->CCER = TIM_CCER_CC1E;
+    TIM3->CCMR1 = 5u << 4;
+    printf("O force_active %lu\n", (unsigned long)timout_level());
+    TIM3->CCMR1 = 4u << 4;
+    printf("O force_inactive %lu\n", (unsigned long)timout_level());
+    // the frozen mode keeps the level
+    TIM3->CCMR1 = 5u << 4;
+    TIM3->CCMR1 = 0;
+    printf("O frozen_after_active %lu\n", (unsigned long)timout_level());
+    // toggle on match at full speed, CH2 captures TI1 on both edges
+    TIM3->CCMR1 = 4u << 4; // force inactive first
+    TIM3->CCMR1 = (3u << 4) | (2u << 8); // OC1 toggle, IC2 <- TI1
+    TIM3->CCER = TIM_CCER_CC1E | TIM_CCER_CC2E | TIM_CCER_CC2P | TIM_CCER_CC2NP;
+    TIM3->PSC = 0;
+    TIM3->ARR = 999;
+    TIM3->CCR1 = 500;
+    TIM3->CNT = 0;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->SR = 0;
+    TIM3->CR1 = TIM_CR1_CEN;
+    while (!(TIM3->SR & TIM_SR_CC2IF)) {
+    }
+    uint32_t first = TIM3->CCR2;
+    while (!(TIM3->SR & TIM_SR_CC2IF)) {
+    }
+    uint32_t second = TIM3->CCR2;
+    uint32_t level = (GPIOC->IDR >> 6) & 1;
+    TIM3->CR1 = 0;
+    printf("O toggle_capture %lu %lu\n", (unsigned long)first, (unsigned long)second);
+    printf("O toggle_level_after_two %lu\n", (unsigned long)level);
+    TIM3->CCER = 0;
+    TIM3->CCMR1 = 0;
+    // TIM8_CH1: forced active, without and with MOE
+    timout_pc6(3);
+    TIM8->CCMR1 = 5u << 4;
+    TIM8->CCER = TIM_CCER_CC1E;
+    printf("O tim8_moe0 %lu\n", (unsigned long)timout_level());
+    TIM8->BDTR = TIM_BDTR_MOE;
+    printf("O tim8_moe1 %lu\n", (unsigned long)timout_level());
+    TIM8->BDTR = 0;
+    TIM8->CCER = 0;
+    TIM8->CCMR1 = 0;
+    // back to an input without pull
+    GPIOC->MODER &= ~(3u << 12);
+    GPIOC->PUPDR &= ~(3u << 12);
+}
+
+/* ---- TIM8 encoder mode on PC6/PC7 (TIM8_1/TIM8_2 header, open): quadrature
+ * edges made by switching the pins' pull-up/pull-down in AF mode. */
+static void enc_wait(void) {
+    uint32_t t0 = DWT->CYCCNT;
+    while (DWT->CYCCNT - t0 < 3600) { // 20 us: the open pin follows its pull
+    }
+}
+
+/* Quadrature state 0..3 -> (A, B) = 00, 10, 11, 01 (A leads B when counting up). */
+static void enc_set(int state) {
+    static const uint8_t ab[4] = {0, 1, 3, 2};
+    uint32_t pupdr = GPIOC->PUPDR & ~(0xFu << 12);
+    pupdr |= (ab[state & 3] & 1 ? 1u : 2u) << 12; // PC6 = A
+    pupdr |= (ab[state & 3] & 2 ? 1u : 2u) << 14; // PC7 = B
+    GPIOC->PUPDR = pupdr;
+    enc_wait();
+}
+
+static void enc_run(const char *name, uint32_t sms, uint32_t ccer) {
+    TIM8->CR1 = 0;
+    TIM8->SMCR = 0;
+    TIM8->CCMR1 = (1u << 0) | (1u << 8); // IC1 <- TI1, IC2 <- TI2
+    TIM8->CCER = ccer;
+    TIM8->ARR = 0xFFFF;
+    TIM8->SMCR = sms;
+    int s = 0;
+    enc_set(s);
+    TIM8->CNT = 100;
+    TIM8->CR1 = TIM_CR1_CEN;
+    for (int i = 0; i < 8; i++) {
+        enc_set(++s);
+    }
+    uint32_t up = TIM8->CNT, dir_up = (TIM8->CR1 >> 4) & 1;
+    for (int i = 0; i < 3; i++) {
+        enc_set(--s);
+    }
+    uint32_t down = TIM8->CNT, dir_down = (TIM8->CR1 >> 4) & 1;
+    // a glitch on A only (back and forth)
+    enc_set(s + 1);
+    enc_set(s);
+    uint32_t glitch = TIM8->CNT;
+    TIM8->CR1 = 0;
+    printf("Q %s up8 %lu dir %lu down3 %lu dir %lu glitch %lu\n", name, (unsigned long)up, (unsigned long)dir_up,
+           (unsigned long)down, (unsigned long)dir_down, (unsigned long)glitch);
+}
+
+static void cmd_enc(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB2ENR |= RCC_APB2ENR_TIM8EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+    __DSB();
+    GPIOC->AFR[0] = (GPIOC->AFR[0] & ~(0xFFu << 24)) | (0x33u << 24);
+    GPIOC->MODER = (GPIOC->MODER & ~(0xFu << 12)) | (0xAu << 12);
+    enc_run("sms3", 3, 0);
+    enc_run("sms1", 1, 0);
+    enc_run("sms2", 2, 0);
+    enc_run("sms3_inv1", 3, TIM_CCER_CC1P);
+    // ARR wrap: count down below 0
+    TIM8->CR1 = 0;
+    TIM8->SMCR = 3;
+    TIM8->CCER = 0;
+    TIM8->ARR = 19;
+    int s = 0;
+    enc_set(s);
+    TIM8->CNT = 1;
+    TIM8->SR = 0;
+    TIM8->CR1 = TIM_CR1_CEN;
+    for (int i = 0; i < 3; i++) {
+        enc_set(--s);
+    }
+    printf("Q wrap_down cnt %lu uif %lu\n", (unsigned long)TIM8->CNT, (unsigned long)(TIM8->SR & 1));
+    TIM8->CR1 = 0;
+    TIM8->SMCR = 0;
+    TIM8->CCMR1 = 0;
+    GPIOC->MODER &= ~(0xFu << 12);
+    GPIOC->PUPDR &= ~(0xFu << 12);
+}
+
+/* ---- 1-Wire master on PG2 (AUX2): open drain with the MCU's pull-up,
+ * timings of Maxim AN126 (standard speed). `ow_sample_us` moves the read
+ * sampling point (AN126: 9 us after releasing = 15 us after the falling edge). */
+static uint32_t ow_sample_us = 15;
+
+static void ow_delay_us(uint32_t us) {
+    uint32_t t0 = DWT->CYCCNT;
+    while (DWT->CYCCNT - t0 < us * 180u) {
+    }
+}
+
+static void ow_low(void) { GPIOG->BSRR = 1u << (2 + 16); }
+static void ow_release(void) { GPIOG->BSRR = 1u << 2; }
+static uint32_t ow_level(void) { return (GPIOG->IDR >> 2) & 1; }
+
+/* Reset pulse of `low_us`; returns 1 if a device answered with a presence pulse. */
+static uint32_t ow_reset_len(uint32_t low_us) {
+    ow_low();
+    ow_delay_us(low_us);
+    __disable_irq();
+    ow_release();
+    ow_delay_us(70);
+    uint32_t presence = !ow_level();
+    __enable_irq();
+    ow_delay_us(410);
+    return presence;
+}
+
+static uint32_t ow_reset(void) { return ow_reset_len(480); }
+
+static void ow_write_bit(uint32_t bit) {
+    __disable_irq();
+    ow_low();
+    ow_delay_us(bit ? 6 : 60);
+    ow_release();
+    __enable_irq();
+    ow_delay_us(bit ? 64 : 10);
+}
+
+static uint32_t ow_read_bit(void) {
+    __disable_irq();
+    ow_low();
+    ow_delay_us(6);
+    ow_release();
+    ow_delay_us(ow_sample_us - 6);
+    uint32_t bit = ow_level();
+    __enable_irq();
+    ow_delay_us(70 - ow_sample_us);
+    return bit;
+}
+
+static void ow_write(uint8_t byte) {
+    for (int i = 0; i < 8; i++) {
+        ow_write_bit((byte >> i) & 1);
+    }
+}
+
+static uint8_t ow_read(void) {
+    uint8_t byte = 0;
+    for (int i = 0; i < 8; i++) {
+        byte |= (uint8_t)(ow_read_bit() << i);
+    }
+    return byte;
+}
+
+static uint8_t ow_crc8(const uint8_t *data, int n) {
+    uint8_t crc = 0;
+    for (int i = 0; i < n; i++) {
+        uint8_t b = data[i];
+        for (int j = 0; j < 8; j++) {
+            uint8_t mix = (crc ^ b) & 1;
+            crc >>= 1;
+            if (mix) {
+                crc ^= 0x8C;
+            }
+            b >>= 1;
+        }
+    }
+    return crc;
+}
+
+static void ow_print(const char *name, const uint8_t *data, int n) {
+    printf("N %s", name);
+    for (int i = 0; i < n; i++) {
+        printf(" %02x", data[i]);
+    }
+    printf(" crc %s\n", ow_crc8(data, n - 1) == data[n - 1] ? "ok" : "bad");
+}
+
+static void cmd_onewire(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOGEN;
+    __DSB();
+    GPIOG->BSRR = 1u << 2; // released
+    GPIOG->OTYPER |= 1u << 2;
+    GPIOG->PUPDR = (GPIOG->PUPDR & ~(3u << 4)) | (1u << 4);
+    GPIOG->MODER = (GPIOG->MODER & ~(3u << 4)) | (1u << 4);
+    ow_delay_us(100);
+    printf("N idle %lu\n", (unsigned long)ow_level());
+    uint32_t presence = ow_reset();
+    printf("N presence %lu\n", (unsigned long)presence);
+    uint8_t rom[8], pad[9];
+    ow_write(0x33); // Read ROM
+    for (int i = 0; i < 8; i++) {
+        rom[i] = ow_read();
+    }
+    ow_print("rom", rom, 8);
+    // power-on scratchpad
+    printf("N presence2 %lu\n", (unsigned long)ow_reset());
+    ow_write(0xCC);
+    ow_write(0xBE);
+    for (int i = 0; i < 9; i++) {
+        pad[i] = ow_read();
+    }
+    ow_print("pad_poweron", pad, 9);
+    // conversion: read slots return 0 while converting
+    ow_reset();
+    ow_write(0xCC);
+    ow_write(0x44);
+    uint32_t t0 = DWT->CYCCNT, busy = 0;
+    while (!ow_read_bit() && busy < 20000) {
+        busy++;
+    }
+    uint32_t conv_ms = (DWT->CYCCNT - t0) / 180000u;
+    printf("N convert_ms %lu\n", (unsigned long)(busy ? conv_ms / 10 * 10 : 0));
+    ow_reset();
+    ow_write(0xCC);
+    ow_write(0xBE);
+    for (int i = 0; i < 9; i++) {
+        pad[i] = ow_read();
+    }
+    ow_print("pad", pad, 9);
+    // 9-bit resolution, then convert again with late sampling (14 us)
+    ow_reset();
+    ow_write(0xCC);
+    ow_write(0x4E);
+    ow_write(0x55); // TH
+    ow_write(0xAA); // TL
+    ow_write(0x1F); // config: 9 bit
+    ow_sample_us = 14;
+    ow_reset_len(960); // long reset
+    ow_write(0x55); // Match ROM
+    for (int i = 0; i < 8; i++) {
+        ow_write(rom[i]);
+    }
+    ow_write(0x44);
+    t0 = DWT->CYCCNT;
+    busy = 0;
+    while (!ow_read_bit() && busy < 20000) {
+        busy++;
+    }
+    conv_ms = (DWT->CYCCNT - t0) / 180000u;
+    printf("N convert9_ms %lu\n", (unsigned long)(busy ? conv_ms / 10 * 10 : 0));
+    ow_reset();
+    ow_write(0xCC);
+    ow_write(0xBE);
+    for (int i = 0; i < 9; i++) {
+        pad[i] = ow_read();
+    }
+    ow_print("pad9", pad, 9);
+    ow_sample_us = 15;
+    // power supply
+    ow_reset();
+    ow_write(0xCC);
+    ow_write(0xB4);
+    printf("N powered %lu\n", (unsigned long)ow_read_bit());
+    // back to an input
+    GPIOG->MODER &= ~(3u << 4);
+    GPIOG->PUPDR &= ~(3u << 4);
+    GPIOG->OTYPER &= ~(1u << 2);
+}
+
+/* ---- CCR preload (OCxPE) on TIM3_CH1/PC6: a CCR write in the middle of a
+ * PWM period, level later in the same period, then the next periods. */
+static void timpre_run(const char *name, uint32_t pe) {
+    TIM3->CR1 = 0;
+    TIM3->PSC = 89; // 1 MHz
+    TIM3->ARR = 999;
+    TIM3->CCR1 = 300;
+    TIM3->CCMR1 = (6u << 4) | pe;
+    TIM3->CCER = TIM_CCER_CC1E;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->CR1 = TIM_CR1_CEN;
+    while (TIM3->CNT < 100 || TIM3->CNT >= 150) {
+    }
+    TIM3->CCR1 = 600;
+    uint32_t ccr = TIM3->CCR1, w = TIM3->CNT;
+    uint32_t c[4], l[4];
+    for (int k = 0; k < 4; k++) {
+        uint32_t at = 250 + 150 * (uint32_t)k; // 250, 400, 550, 700
+        while (TIM3->CNT < at) {
+        }
+        c[k] = TIM3->CNT;
+        l[k] = (GPIOC->IDR >> 6) & 1;
+    }
+    printf("O %s_ccr %lu ccmr1 %lx written_at %lu\n", name, (unsigned long)ccr, (unsigned long)TIM3->CCMR1, (unsigned long)w);
+    printf("O %s_levels %lu:%lu %lu:%lu %lu:%lu %lu:%lu\n", name, (unsigned long)c[0], (unsigned long)l[0], (unsigned long)c[1],
+           (unsigned long)l[1], (unsigned long)c[2], (unsigned long)l[2], (unsigned long)c[3], (unsigned long)l[3]);
+    while (TIM3->CNT >= 100) { // next period
+    }
+    timout_scan(name, 1);
+    // a preloaded value waits for the update event: UG loads it at once
+    TIM3->CR1 = 0;
+    TIM3->CNT = 500;
+    TIM3->CCR1 = 800;
+    printf("O %s_stopped_500_level %lu\n", name, (unsigned long)timout_level());
+    TIM3->EGR = TIM_EGR_UG; // CNT = 0
+    TIM3->CNT = 700;
+    TIM3->CR1 = TIM_CR1_CEN;
+    while (TIM3->CNT < 750 || TIM3->CNT >= 790) {
+    }
+    printf("O %s_after_ug_750 %lu\n", name, (unsigned long)timout_level());
+    TIM3->CR1 = 0;
+}
+
+static void cmd_timpre(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+    __DSB();
+    GPIOC->PUPDR &= ~(3u << 12);
+    timout_pc6(2);
+    timpre_run("pe1", TIM_CCMR1_OC1PE);
+    timpre_run("pe0", 0);
+    TIM3->CCER = 0;
+    TIM3->CCMR1 = 0;
+    GPIOC->MODER &= ~(3u << 12);
+}
+
+/* ---- Counting directions of TIM3 (PWM1, CCR1 = 300, ARR = 999, 1 MHz) on
+ * PC6: where the output is high per direction, update and CC1 flags. */
+static void timdir_run(const char *name, uint32_t cr1) {
+    TIM3->CR1 = 0;
+    TIM3->PSC = 89;
+    TIM3->ARR = 999;
+    TIM3->CCR1 = 300;
+    TIM3->CCMR1 = 6u << 4;
+    TIM3->CCER = TIM_CCER_CC1E;
+    TIM3->CR1 = cr1;
+    TIM3->CNT = 0;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->SR = 0;
+    TIM3->CR1 = cr1 | TIM_CR1_CEN;
+    // flags during 10 ms from the start: count, and CNT:DIR when the first two were seen
+    uint32_t nu = 0, nc = 0, eu[2][2] = {{0}}, ec[2][2] = {{0}};
+    uint32_t t0 = DWT->CYCCNT;
+    while (DWT->CYCCNT - t0 < 10 * 180000u) {
+        uint32_t sr = TIM3->SR;
+        if (sr & (TIM_SR_UIF | TIM_SR_CC1IF)) {
+            uint32_t c = TIM3->CNT, d = (TIM3->CR1 >> 4) & 1;
+            TIM3->SR = ~(sr & (TIM_SR_UIF | TIM_SR_CC1IF));
+            if (sr & TIM_SR_UIF) {
+                if (nu < 2) {
+                    eu[nu][0] = c, eu[nu][1] = d;
+                }
+                nu++;
+            }
+            if (sr & TIM_SR_CC1IF) {
+                if (nc < 2) {
+                    ec[nc][0] = c, ec[nc][1] = d;
+                }
+                nc++;
+            }
+        }
+    }
+    // levels per direction
+    uint32_t lo[2] = {0xFFFF, 0xFFFF}, hi[2] = {0, 0};
+    for (int i = 0; i < 40000; i++) {
+        uint32_t c = TIM3->CNT;
+        uint32_t d = (TIM3->CR1 >> 4) & 1;
+        uint32_t l = (GPIOC->IDR >> 6) & 1;
+        if (TIM3->CNT != c || l == 0) {
+            continue;
+        }
+        lo[d] = c < lo[d] ? c : lo[d];
+        hi[d] = c > hi[d] ? c : hi[d];
+    }
+    TIM3->CR1 = 0;
+    printf("O %s high_up %lu %lu high_down %lu %lu\n", name, (unsigned long)lo[0], (unsigned long)hi[0],
+           (unsigned long)lo[1], (unsigned long)hi[1]);
+    printf("O %s uif %lu %lu:%lu %lu:%lu cc1if %lu %lu:%lu %lu:%lu\n", name, (unsigned long)nu,
+           (unsigned long)eu[0][0], (unsigned long)eu[0][1], (unsigned long)eu[1][0], (unsigned long)eu[1][1],
+           (unsigned long)nc, (unsigned long)ec[0][0], (unsigned long)ec[0][1], (unsigned long)ec[1][0],
+           (unsigned long)ec[1][1]);
+}
+
+static void cmd_timdir(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+    __DSB();
+    GPIOC->PUPDR &= ~(3u << 12);
+    timout_pc6(2);
+    timdir_run("up", 0);
+    timdir_run("down", TIM_CR1_DIR);
+    timdir_run("center1", 1u << 5);
+    timdir_run("center2", 2u << 5);
+    timdir_run("center3", 3u << 5);
+    TIM3->CCER = 0;
+    TIM3->CCMR1 = 0;
+    GPIOC->MODER &= ~(3u << 12);
+}
+
+/* ---- TIM3 slave modes with TI1 = PC6, TI2 = PC7 (open pins): edges made by
+ * switching the pulls. */
+static void slave_pin(int pin, int high) {
+    uint32_t sh = 2u * (uint32_t)pin;
+    GPIOC->PUPDR = (GPIOC->PUPDR & ~(3u << sh)) | ((high ? 1u : 2u) << sh);
+    enc_wait();
+}
+
+static void slave_setup(uint32_t smcr, uint32_t ccer, uint32_t psc, uint32_t arr) {
+    TIM3->CR1 = 0;
+    TIM3->SMCR = 0;
+    TIM3->CCMR1 = (1u << 0) | (1u << 8); // IC1 <- TI1, IC2 <- TI2
+    TIM3->CCER = ccer;
+    TIM3->PSC = psc;
+    TIM3->ARR = arr;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->CNT = 0;
+    TIM3->SMCR = smcr;
+    TIM3->SR = 0;
+}
+
+static void slave_wait_us(uint32_t us) {
+    uint32_t t0 = DWT->CYCCNT;
+    while (DWT->CYCCNT - t0 < us * 180u) {
+    }
+}
+
+static void slave_extclk(const char *name, uint32_t ts, uint32_t ccer, int pin, uint32_t arr) {
+    slave_pin(6, 0);
+    slave_pin(7, 0);
+    slave_setup((ts << 4) | 7u, ccer, 0, arr);
+    TIM3->CR1 = TIM_CR1_CEN;
+    for (int i = 0; i < 6; i++) {
+        slave_pin(pin, !(i & 1)); // 3 rising, 3 falling edges
+    }
+    printf("S %s cnt %lu sr %02lx\n", name, (unsigned long)TIM3->CNT, (unsigned long)(TIM3->SR & 0x41));
+    TIM3->CR1 = 0;
+}
+
+static void cmd_timslave(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+    __DSB();
+    GPIOC->AFR[0] = (GPIOC->AFR[0] & ~(0xFFu << 24)) | (0x22u << 24);
+    GPIOC->MODER = (GPIOC->MODER & ~(0xFu << 12)) | (0xAu << 12);
+    slave_extclk("ext_ti1fp1", 5, 0, 6, 0xFFFF);
+    slave_extclk("ext_ti1fp1_falling", 5, TIM_CCER_CC1P, 6, 0xFFFF);
+    slave_extclk("ext_ti1f_ed", 4, 0, 6, 0xFFFF);
+    slave_extclk("ext_ti2fp2", 6, 0, 7, 0xFFFF);
+    slave_extclk("ext_ti1f_ed_arr4", 4, 0, 6, 4);
+    // reset mode: a rising edge on TI1 re-initialises the counter
+    for (int urs = 0; urs < 2; urs++) {
+        slave_pin(6, 0);
+        slave_setup((5u << 4) | 4u, 0, 89, 0xFFFF); // 1 MHz
+        TIM3->CR1 = TIM_CR1_CEN | (urs ? TIM_CR1_URS : 0);
+        slave_wait_us(500);
+        uint32_t before = TIM3->CNT;
+        slave_pin(6, 1); // 20 us
+        slave_wait_us(30);
+        uint32_t after = TIM3->CNT, sr = TIM3->SR & 0x41;
+        TIM3->CR1 = 0;
+        printf("S reset_urs%d before %lu after %lu sr %02lx\n", urs, (unsigned long)(before / 100 * 100),
+               (unsigned long)after, (unsigned long)sr);
+    }
+    // gated mode: counts while TI1 is high
+    slave_pin(6, 0);
+    slave_setup((5u << 4) | 5u, 0, 89, 0xFFFF);
+    TIM3->CR1 = TIM_CR1_CEN;
+    slave_wait_us(200);
+    uint32_t low = TIM3->CNT;
+    slave_pin(6, 1);
+    slave_wait_us(280); // high for 300 us in all
+    slave_pin(6, 0);
+    slave_wait_us(200);
+    uint32_t gated = TIM3->CNT, sr = TIM3->SR & 0x41;
+    TIM3->CR1 = 0;
+    printf("S gated low %lu high300 %lu sr %02lx\n", (unsigned long)low, (unsigned long)gated, (unsigned long)sr);
+    // trigger mode: a rising edge on TI1 starts the counter
+    slave_pin(6, 0);
+    slave_setup((5u << 4) | 6u, 0, 89, 0xFFFF);
+    uint32_t cen_before = TIM3->CR1 & 1;
+    slave_pin(6, 1);
+    slave_wait_us(30);
+    uint32_t cen = TIM3->CR1 & 1, cnt = TIM3->CNT;
+    sr = TIM3->SR & 0x41;
+    TIM3->CR1 = 0;
+    printf("S trigger cen %lu -> %lu cnt %lu sr %02lx\n", (unsigned long)cen_before, (unsigned long)cen,
+           (unsigned long)cnt, (unsigned long)sr);
+    // PWM input: CH1 captures the period on the rising edge that resets the
+    // counter, CH2 the high time on the falling edge (300 us high, 700 us low)
+    slave_pin(6, 0);
+    TIM3->CR1 = 0;
+    TIM3->SMCR = 0;
+    TIM3->CCMR1 = (1u << 0) | (2u << 8); // IC1 <- TI1, IC2 <- TI1
+    TIM3->CCER = TIM_CCER_CC1E | TIM_CCER_CC2E | TIM_CCER_CC2P;
+    TIM3->PSC = 89;
+    TIM3->ARR = 0xFFFF;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->SMCR = (5u << 4) | 4u;
+    TIM3->CR1 = TIM_CR1_CEN;
+    for (int i = 0; i < 4; i++) {
+        slave_pin(6, 1);
+        slave_wait_us(280);
+        slave_pin(6, 0);
+        slave_wait_us(680);
+    }
+    slave_pin(6, 1);
+    slave_wait_us(50);
+    TIM3->CR1 = 0;
+    printf("S pwm_input period %lu high %lu\n", (unsigned long)TIM3->CCR1, (unsigned long)TIM3->CCR2);
+    TIM3->SMCR = 0;
+    TIM3->CCMR1 = 0;
+    TIM3->CCER = 0;
+    GPIOC->MODER &= ~(0xFu << 12);
+    GPIOC->PUPDR &= ~(0xFu << 12);
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -1397,6 +2268,24 @@ static void execute(char *line) {
         cmd_dmatx();
     } else if (!strcmp(line, "dmaspi")) {
         cmd_dmaspi();
+    } else if (!strcmp(line, "adctrig")) {
+        cmd_adctrig();
+    } else if (!strcmp(line, "irqlat")) {
+        cmd_irqlat();
+    } else if (!strcmp(line, "dacwave")) {
+        cmd_dacwave();
+    } else if (!strcmp(line, "timout")) {
+        cmd_timout();
+    } else if (!strcmp(line, "enc")) {
+        cmd_enc();
+    } else if (!strcmp(line, "onewire")) {
+        cmd_onewire();
+    } else if (!strcmp(line, "timpre")) {
+        cmd_timpre();
+    } else if (!strcmp(line, "timdir")) {
+        cmd_timdir();
+    } else if (!strcmp(line, "timslave")) {
+        cmd_timslave();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {

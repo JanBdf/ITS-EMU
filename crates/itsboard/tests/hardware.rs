@@ -247,6 +247,110 @@ fn spi_transfer_by_dma_matches_the_board() {
 }
 
 #[test]
+fn adc_timer_trigger_matches_the_board() {
+    // ADC1 started by TIM3 TRGO at 1 kHz (and by the UG at the start)
+    let Some(out) = run("adctrig", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-adctrig.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("G ")).collect();
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
+fn dac_waves_and_trigger_match_the_board() {
+    // noise/triangle generation by software triggers, TIM6 TRGO with DMA, underrun
+    let Some(out) = run("dacwave", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-dacwave.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("W ")).collect();
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
+fn timer_outputs_match_the_board() {
+    // PC6 driven by TIM3/TIM8 CH1: PWM levels against CNT, forced levels,
+    // stale OCxREF after a mode change, capture of the own toggling output
+    let Some(out) = run("timout", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timout.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("O ")).collect();
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
+fn slave_modes_match_the_board() {
+    // TIM3 external clock 1, reset, gated and trigger mode with TI1/TI2 on
+    // PC6/PC7 (edges from switching the pulls). The open pin needs about 1 µs
+    // to rise on the board: counts after an edge may be 1 lower there.
+    let Some(out) = run("timslave", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timslave.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("S ")).collect();
+    let board: Vec<&str> = board.lines().collect();
+    assert_eq!(emu.len(), board.len(), "{out}");
+    for (e, b) in emu.iter().zip(&board) {
+        let (et, bt): (Vec<&str>, Vec<&str>) = (e.split(' ').collect(), b.split(' ').collect());
+        assert_eq!(et.len(), bt.len(), "{e} / {b}");
+        for k in 0..et.len() {
+            let after_edge = k > 0 && (bt[k - 1] == "after" || (bt[1] == "trigger" && bt[k - 1] == "cnt"));
+            if after_edge {
+                let (x, y): (i64, i64) = (et[k].parse().unwrap(), bt[k].parse().unwrap());
+                assert!((x - y).abs() <= 1, "{e} / {b}");
+            } else {
+                assert_eq!(et[k], bt[k], "{e} / {b}");
+            }
+        }
+    }
+}
+
+#[test]
+fn counting_directions_match_the_board() {
+    // TIM3 up, down and center-aligned 1/2/3: PWM levels per direction, flags
+    let Some(out) = run("timdir", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timdir.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("O ")).collect();
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
+fn ccr_preload_matches_the_board() {
+    // TIM3_CH1 PWM on PC6: CCR written mid-period with and without OC1PE
+    let Some(out) = run("timpre", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timpre.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("O ")).collect();
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
+fn encoder_mode_matches_the_board() {
+    // TIM8 encoder modes on PC6/PC7, quadrature made by switching the pulls
+    let Some(out) = run("enc", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-enc.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("Q ")).collect();
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
+fn interrupt_latency_matches_the_board() {
+    // Cycles from the pending write to the handler's first instruction. Only
+    // with interrupts masked until CPSIE: the emulator takes interrupts at the
+    // end of a translated block, so the unmasked case depends on the layout.
+    let Some(out) = run("irqlat", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-irqlat.txt")).unwrap();
+    let lines = |text: &str| -> Vec<(String, f64)> {
+        text.lines()
+            .filter(|l| l.starts_with("L ") && l.contains("_masked"))
+            .map(|l| {
+                let v: Vec<&str> = l.split_whitespace().collect();
+                (v[1].to_owned(), v[2].parse().unwrap())
+            })
+            .collect()
+    };
+    let (emu, board) = (lines(&out), lines(&board));
+    assert_eq!(emu.len(), 6, "{out}");
+    for ((name, x), (b_name, y)) in emu.iter().zip(&board) {
+        assert_eq!(name, b_name);
+        assert!((x - y).abs() <= 2.0, "{name}: emulator {x}, board {y}");
+    }
+}
+
+#[test]
 fn watchdog_resets_like_the_board() {
     // HwCheck `iwdg 2 fff`: refreshed once, then the board resets after
     // 1.92 s (last line "W t 1920000"); the reset flags read IWDG + PIN.

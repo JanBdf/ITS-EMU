@@ -346,15 +346,45 @@ fn decode(code: &[u8]) -> Option<Insn> {
     }
 }
 
-/// Analyses the block at `base`. Division instructions are appended to `divs`.
-pub fn analyze_block(code: &[u8], base: u32, divs: &mut Vec<DivSite>) -> BlockTiming {
-    let mut t = BlockTiming::default();
+/// Decodes the block and calls `f` with each instruction's offset, decoded
+/// form and cycles (with the pipelining of neighbouring instructions).
+fn walk(code: &[u8], mut f: impl FnMut(usize, &Insn, u32)) {
     let mut off = 0usize;
     let mut prev = Kind::Other;
     while off < code.len() {
         let Some(insn) = decode(&code[off..]) else {
             break;
         };
+        let mut cycles = insn.cycles;
+        match insn.kind {
+            Kind::Load { rn, .. } => {
+                // Pipelined with a preceding load, unless the address depends
+                // on its result (not with a preceding store: STR; LDR = 3).
+                let pipelined = matches!(prev, Kind::Load { rt, .. } if rt != rn);
+                if pipelined {
+                    cycles -= 1;
+                }
+            }
+            Kind::Fp { src, .. } => {
+                // The result of a VFP operation is available one cycle late.
+                if let Kind::Fp { dst, .. } = prev
+                    && src.contains(&dst)
+                {
+                    cycles += 1;
+                }
+            }
+            _ => {}
+        }
+        f(off, &insn, cycles);
+        prev = insn.kind;
+        off += insn.len as usize;
+    }
+}
+
+/// Analyses the block at `base`. Division instructions are appended to `divs`.
+pub fn analyze_block(code: &[u8], base: u32, divs: &mut Vec<DivSite>) -> BlockTiming {
+    let mut t = BlockTiming::default();
+    walk(code, |off, insn, cycles| {
         if off == 0 {
             if insn.len == 4 && base % 4 == 2 {
                 t.entry_penalty = 1;
@@ -366,28 +396,9 @@ pub fn analyze_block(code: &[u8], base: u32, divs: &mut Vec<DivSite>) -> BlockTi
                 t.first_fp_src = Some(src);
             }
         }
-        let mut cycles = insn.cycles;
-        match insn.kind {
-            Kind::Load { rn, .. } => {
-                // Pipelined with a preceding load, unless the address depends
-                // on its result (not with a preceding store: STR; LDR = 3).
-                let pipelined = matches!(prev, Kind::Load { rt, .. } if rt != rn);
-                if pipelined {
-                    cycles -= 1;
-                }
-            }
-            Kind::Div { signed, rn, rm } => divs.push(DivSite { addr: base + off as u32, signed, rn, rm }),
-            Kind::Fp { src, .. } => {
-                // The result of a VFP operation is available one cycle late.
-                if let Kind::Fp { dst, .. } = prev
-                    && src.contains(&dst)
-                {
-                    cycles += 1;
-                }
-            }
-            _ => {}
+        if let Kind::Div { signed, rn, rm } = insn.kind {
+            divs.push(DivSite { addr: base + off as u32, signed, rn, rm });
         }
-        prev = insn.kind;
         t.insns += 1;
         t.cycles += cycles;
         t.stores |= insn.store;
@@ -402,9 +413,79 @@ pub fn analyze_block(code: &[u8], base: u32, divs: &mut Vec<DivSite>) -> BlockTi
             Kind::Fp { dst, .. } => Some(dst),
             _ => None,
         };
-        off += insn.len as usize;
-    }
+    });
     t
+}
+
+/// Address operand of a word load (LDR immediate or register offset).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadAddr {
+    /// `[rn, #offset]`; post-indexed forms access `rn` itself (offset 0).
+    Imm { rn: u8, offset: i32 },
+    /// `[rn, rm, LSL #shift]`
+    Reg { rn: u8, rm: u8, shift: u8 },
+}
+
+impl LoadAddr {
+    /// The address accessed, given the core registers.
+    pub fn resolve(self, reg: impl Fn(u8) -> u32) -> u32 {
+        match self {
+            Self::Imm { rn, offset } => reg(rn).wrapping_add_signed(offset),
+            Self::Reg { rn, rm, shift } => reg(rn).wrapping_add(reg(rm) << shift),
+        }
+    }
+}
+
+fn load_addr(code: &[u8]) -> Option<LoadAddr> {
+    let hw1 = u16::from_le_bytes([*code.first()?, *code.get(1)?]);
+    let low = |v: u16| (v & 7) as u8;
+    if hw1 >> 11 == 0b01101 {
+        return Some(LoadAddr::Imm { rn: low(hw1 >> 3), offset: i32::from((hw1 >> 6) & 0x1F) * 4 });
+    }
+    if hw1 >> 9 == 0b0101100 {
+        return Some(LoadAddr::Reg { rn: low(hw1 >> 3), rm: low(hw1 >> 6), shift: 0 });
+    }
+    if hw1 >> 11 < 0b11101 {
+        return None;
+    }
+    let hw2 = u16::from_le_bytes([*code.get(2)?, *code.get(3)?]);
+    let rn = (hw1 & 0xF) as u8;
+    if rn == 15 {
+        return None; // literal
+    }
+    match hw1 & 0xFFF0 {
+        0xF8D0 => Some(LoadAddr::Imm { rn, offset: i32::from(hw2 & 0xFFF) }),
+        0xF850 if hw2 & 0x0800 != 0 => {
+            // imm8 with P (pre-indexed) and U (add)
+            let imm = i32::from(hw2 & 0xFF);
+            let offset = match (hw2 & 0x0400 != 0, hw2 & 0x0200 != 0) {
+                (false, _) => 0,
+                (true, true) => imm,
+                (true, false) => -imm,
+            };
+            Some(LoadAddr::Imm { rn, offset })
+        }
+        0xF850 if hw2 & 0x0FC0 == 0 => Some(LoadAddr::Reg { rn, rm: (hw2 & 0xF) as u8, shift: ((hw2 >> 4) & 3) as u8 }),
+        _ => None,
+    }
+}
+
+/// A word load and the cycles of the instructions after it in its block.
+pub type LoadSite = (LoadAddr, u32);
+
+/// Word loads of a block with the cycles of the instructions after them, in
+/// program order. A peripheral read by one of them happens that many cycles
+/// before the end of the block (whose cycles are counted at its start).
+pub fn load_sites(code: &[u8]) -> Vec<LoadSite> {
+    let mut sites = Vec::new();
+    let mut total = 0;
+    walk(code, |off, _, cycles| {
+        total += cycles;
+        if let Some(addr) = load_addr(&code[off..]) {
+            sites.push((addr, total));
+        }
+    });
+    sites.into_iter().map(|(addr, upto)| (addr, total - upto)).collect()
 }
 
 /// Duration of UDIV/SDIV: the divider terminates early depending on the
@@ -442,6 +523,34 @@ mod tests {
         let t = block(&words);
         assert!(t.ends_with_branch);
         t.cycles + 1 // the backward branch is taken
+    }
+
+    #[test]
+    fn loads_with_the_cycles_after_them() {
+        let words: [u16; 12] = [
+            0xF241, 0x0004, // movw r0, #0x1004
+            0xF2CE, 0x0000, // movt r0, #0xE000
+            0x6800, // ldr r0, [r0]
+            0x9001, // str r0, [sp, #4]
+            0xF8D1, 0x2004, // ldr.w r2, [r1, #4]
+            0x5888, // ldr r0, [r1, r2]
+            0xF851, 0x3D08, // ldr r3, [r1, #-8]!
+            0x1C49, // adds r1, #1
+        ];
+        let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let sites = load_sites(&code);
+        assert_eq!(
+            sites,
+            [
+                (LoadAddr::Imm { rn: 0, offset: 0 }, 1 + 2 + 1 + 1 + 1), // later loads pipeline
+                (LoadAddr::Imm { rn: 1, offset: 4 }, 1 + 1 + 1),
+                (LoadAddr::Reg { rn: 1, rm: 2, shift: 0 }, 1 + 1),
+                (LoadAddr::Imm { rn: 1, offset: -8 }, 1),
+            ]
+        );
+        let regs = |r: u8| [0xE000_1004, 0x2000_0010, 4][usize::from(r)];
+        assert_eq!(sites[2].0.resolve(regs), 0x2000_0014);
+        assert_eq!(sites[3].0.resolve(regs), 0x2000_0008);
     }
 
     #[test]
