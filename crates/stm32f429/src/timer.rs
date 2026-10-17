@@ -1,7 +1,7 @@
 //! Timers (TIM1–TIM14) in up-counting mode.
 //!
 //! The counter is evaluated lazily from virtual time. Supported: prescaler and
-//! auto-reload (with preload), update events (overflow, `EGR`), the
+//! auto-reload and compare values (with preload), update events (overflow, `EGR`), the
 //! repetition counter of TIM1/TIM8, output compare flags and interrupts, PWM
 //! duty cycles, `CNT` reads/writes, input capture of edges that drive the
 //! channel pins from outside (buttons, analog inputs; with prescaler,
@@ -113,7 +113,9 @@ pub struct GpTimer {
     rcr: u32,
     /// Overflows left until the next update event (repetition counter).
     rep_left: u32,
+    /// CCR as written (the preload register) and as compared.
     ccr: [u32; 4],
+    ccr_active: [u32; 4],
     bdtr: u32,
     dcr: u32,
     or: u32,
@@ -165,6 +167,7 @@ impl GpTimer {
             rcr: 0,
             rep_left: 0,
             ccr: [0; 4],
+            ccr_active: [0; 4],
             bdtr: 0,
             dcr: 0,
             or: 0,
@@ -231,7 +234,7 @@ impl GpTimer {
     fn reset_regs(&mut self) {
         let max = self.max();
         (self.cr1, self.cr2, self.smcr, self.dier, self.sr, self.ccer) = (0, 0, 0, 0, 0, 0);
-        (self.ccmr, self.ccr) = ([0; 2], [0; 4]);
+        (self.ccmr, self.ccr, self.ccr_active) = ([0; 2], [0; 4], [0; 4]);
         (self.psc, self.psc_active, self.arr, self.arr_active) = (0, 0, max, max);
         (self.rcr, self.rep_left, self.bdtr, self.dcr, self.or) = (0, 0, 0, 0, 0);
         (self.cnt_base, self.base_ps, self.checked, self.next_event, self.warned) = (0, 0, 0, None, false);
@@ -442,8 +445,8 @@ impl GpTimer {
     fn oc_wrap(&mut self, ch: usize) -> bool {
         let before = self.oc_ref[ch];
         match self.oc_mode(ch) {
-            6 => self.oc_ref[ch] = self.ccr[ch] > 0,
-            7 => self.oc_ref[ch] = self.ccr[ch] == 0,
+            6 => self.oc_ref[ch] = self.ccr_active[ch] > 0,
+            7 => self.oc_ref[ch] = self.ccr_active[ch] == 0,
             _ => {}
         }
         self.oc_ref[ch] != before
@@ -464,7 +467,7 @@ impl GpTimer {
     /// Counter value of the output match of `ch` (0 matches at the wrap, a
     /// CCR above ARR never), as a position in a period: 1..=ARR+1.
     fn oc_match_pos(&self, ch: usize) -> Option<u128> {
-        let ccr = self.ccr[ch];
+        let ccr = self.ccr_active[ch];
         (self.compares(ch) && ccr <= self.arr_active).then(|| if ccr == 0 { self.period() } else { u128::from(ccr) })
     }
 
@@ -570,7 +573,8 @@ impl GpTimer {
                 if !enabled || !matches!(mode, 6 | 7) {
                     continue;
                 }
-                let mut v = (f64::from(self.ccr[ch]) / (f64::from(self.arr_active) + 1.0)).clamp(0.0, 1.0) as f32;
+                let mut v =
+                    (f64::from(self.ccr_active[ch]) / (f64::from(self.arr_active) + 1.0)).clamp(0.0, 1.0) as f32;
                 if mode == 7 {
                     v = 1.0 - v; // PWM mode 2
                 }
@@ -651,9 +655,16 @@ impl GpTimer {
         self.checked = 0;
     }
 
+    /// Output compare channel `ch` with CCR preload (OCxPE).
+    fn ccr_preload(&self, ch: usize) -> bool {
+        self.compares(ch) && (self.ccmr[ch / 2] >> (8 * (ch % 2))) & 0x08 != 0
+    }
+
     fn update_event(&mut self, set_flag: bool) {
         self.psc_active = self.psc;
         self.arr_active = self.arr;
+        self.ccr_active = self.ccr;
+        self.update_pwm(); // preloaded values take effect
         self.rep_left = self.rcr;
         if set_flag {
             self.sr |= SR_UIF;
@@ -684,7 +695,7 @@ impl GpTimer {
     /// Counter value at which channel `ch` matches: CCR, or 0 (at the
     /// overflow) if CCR is above ARR, as measured on the board.
     fn match_value(&self, ch: usize) -> u32 {
-        if self.ccr[ch] > self.arr_active { 0 } else { self.ccr[ch] }
+        if self.ccr_active[ch] > self.arr_active { 0 } else { self.ccr_active[ch] }
     }
 
     /// Flags the channels whose match value the counter reaches when it goes
@@ -995,7 +1006,7 @@ impl Peripheral for GpTimer {
             0x24 => {
                 let cnt = self.cnt(now_ps);
                 for ch in 0..self.channels {
-                    self.oc_compare_changed(ch, cnt < self.ccr[ch], v & mask < self.ccr[ch]);
+                    self.oc_compare_changed(ch, cnt < self.ccr_active[ch], v & mask < self.ccr_active[ch]);
                 }
                 self.rebase(now_ps, v & mask);
                 self.base_ps = now_ps;
@@ -1010,11 +1021,15 @@ impl Peripheral for GpTimer {
             // read-only while capturing
             0x34..=0x40 if self.capture_source((aligned - 0x34) as usize / 4).is_none() => {
                 let ch = (aligned - 0x34) as usize / 4;
-                let cnt = self.cnt(now_ps);
-                if ch < self.channels {
-                    self.oc_compare_changed(ch, cnt < self.ccr[ch], cnt < v & mask);
+                self.ccr[ch] = v & mask;
+                // with preload (OCxPE) the value waits for the next update event
+                if !self.ccr_preload(ch) {
+                    let cnt = self.cnt(now_ps);
+                    if ch < self.channels {
+                        self.oc_compare_changed(ch, cnt < self.ccr_active[ch], cnt < v & mask);
+                    }
+                    self.ccr_active[ch] = v & mask;
                 }
-                self.ccr[ch] = v & mask
             }
             0x30 if self.cc_irq.is_some() => self.rcr = v & 0xFF,
             0x44 if self.cc_irq.is_some() => self.bdtr = v,

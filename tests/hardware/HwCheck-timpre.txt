@@ -1,0 +1,10 @@
+O pe1_ccr 600 ccmr1 68 written_at 100
+O pe1_levels 250:1 400:0 550:0 700:0
+O pe1 0 599
+O pe1_stopped_500_level 1
+O pe1_after_ug_750 1
+O pe0_ccr 600 ccmr1 60 written_at 100
+O pe0_levels 250:1 400:1 550:1 700:0
+O pe0 0 599
+O pe0_stopped_500_level 1
+O pe0_after_ug_750 1

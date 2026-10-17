@@ -36,6 +36,7 @@
  *   timout          timer outputs on PC6 (TIM3/TIM8 CH1)
  *   enc             TIM8 encoder mode on PC6/PC7 (pull switching)
  *   onewire         1-Wire master on PG2 (AUX2): reset, ROM, DS18B20 conversion
+ *   timpre          CCR preload (OCxPE) on TIM3_CH1/PC6
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1966,6 +1967,64 @@ static void cmd_onewire(void) {
     GPIOG->OTYPER &= ~(1u << 2);
 }
 
+/* ---- CCR preload (OCxPE) on TIM3_CH1/PC6: a CCR write in the middle of a
+ * PWM period, level later in the same period, then the next periods. */
+static void timpre_run(const char *name, uint32_t pe) {
+    TIM3->CR1 = 0;
+    TIM3->PSC = 89; // 1 MHz
+    TIM3->ARR = 999;
+    TIM3->CCR1 = 300;
+    TIM3->CCMR1 = (6u << 4) | pe;
+    TIM3->CCER = TIM_CCER_CC1E;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->CR1 = TIM_CR1_CEN;
+    while (TIM3->CNT < 100 || TIM3->CNT >= 150) {
+    }
+    TIM3->CCR1 = 600;
+    uint32_t ccr = TIM3->CCR1, w = TIM3->CNT;
+    uint32_t c[4], l[4];
+    for (int k = 0; k < 4; k++) {
+        uint32_t at = 250 + 150 * (uint32_t)k; // 250, 400, 550, 700
+        while (TIM3->CNT < at) {
+        }
+        c[k] = TIM3->CNT;
+        l[k] = (GPIOC->IDR >> 6) & 1;
+    }
+    printf("O %s_ccr %lu ccmr1 %lx written_at %lu\n", name, (unsigned long)ccr, (unsigned long)TIM3->CCMR1, (unsigned long)w);
+    printf("O %s_levels %lu:%lu %lu:%lu %lu:%lu %lu:%lu\n", name, (unsigned long)c[0], (unsigned long)l[0], (unsigned long)c[1],
+           (unsigned long)l[1], (unsigned long)c[2], (unsigned long)l[2], (unsigned long)c[3], (unsigned long)l[3]);
+    while (TIM3->CNT >= 100) { // next period
+    }
+    timout_scan(name, 1);
+    // a preloaded value waits for the update event: UG loads it at once
+    TIM3->CR1 = 0;
+    TIM3->CNT = 500;
+    TIM3->CCR1 = 800;
+    printf("O %s_stopped_500_level %lu\n", name, (unsigned long)timout_level());
+    TIM3->EGR = TIM_EGR_UG; // CNT = 0
+    TIM3->CNT = 700;
+    TIM3->CR1 = TIM_CR1_CEN;
+    while (TIM3->CNT < 750 || TIM3->CNT >= 790) {
+    }
+    printf("O %s_after_ug_750 %lu\n", name, (unsigned long)timout_level());
+    TIM3->CR1 = 0;
+}
+
+static void cmd_timpre(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_TIM3EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+    __DSB();
+    GPIOC->PUPDR &= ~(3u << 12);
+    timout_pc6(2);
+    timpre_run("pe1", TIM_CCMR1_OC1PE);
+    timpre_run("pe0", 0);
+    TIM3->CCER = 0;
+    TIM3->CCMR1 = 0;
+    GPIOC->MODER &= ~(3u << 12);
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -2025,6 +2084,8 @@ static void execute(char *line) {
         cmd_enc();
     } else if (!strcmp(line, "onewire")) {
         cmd_onewire();
+    } else if (!strcmp(line, "timpre")) {
+        cmd_timpre();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {
