@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use unicorn_engine::{Arch, ArmCpuModel, HookType, MemType, Mode, Prot, RegisterARM, UcHookId, Unicorn, uc_error};
 
-use crate::bus::{Bus, DeviceCtx};
+use crate::bus::{Bus, DeviceCtx, ResetKind};
 use crate::clock::Clock;
 use crate::elf::ElfImage;
 use crate::exception::{self, AccessError, CoreAccess, CoreReg, ExceptionError};
@@ -112,7 +112,7 @@ pub struct System {
     /// Last invalid memory access reported by Unicorn (address, is_write, is_fetch).
     last_invalid: Option<(u32, bool, bool)>,
     stop: Option<StopReason>,
-    reset_requested: bool,
+    reset_requested: Option<ResetKind>,
     idle: IdleDetector,
     /// Fast-forward idle loops to the next event (disable for debugging).
     pub idle_skipping: bool,
@@ -156,6 +156,15 @@ impl System {
         }
         let (mut ctx, bus) = self.ctx();
         bus.update(&mut ctx);
+        self.take_reset_request();
+    }
+
+    /// A peripheral (watchdog) asked for a reset: done before the next instruction.
+    fn take_reset_request(&mut self) {
+        if let Some(kind) = self.nvic.reset_request.take() {
+            self.reset_requested = Some(kind);
+            self.request_stop();
+        }
     }
 
     /// Next cycle at which the block hook has to look at devices.
@@ -173,7 +182,7 @@ impl System {
             return false;
         }
         self.sync_devices();
-        if self.nvic.any_pending() {
+        if self.nvic.any_pending() || self.reset_requested.is_some() {
             return false;
         }
         self.slice_end = self.next_slice_end();
@@ -581,7 +590,7 @@ impl Machine {
             block_insns: BlockCache::new(),
             last_invalid: None,
             stop: None,
-            reset_requested: false,
+            reset_requested: None,
             idle: IdleDetector::default(),
             idle_skipping: true,
             stepping: false,
@@ -638,6 +647,7 @@ impl Machine {
                 if sys.nvic.any_pending() {
                     sys.request_stop();
                 }
+                sys.take_reset_request();
                 sys.clip_slice_to_events();
             }),
         )?;
@@ -661,7 +671,7 @@ impl Machine {
                     ScsAction::None => {}
                     ScsAction::CheckPending => sys.request_stop(),
                     ScsAction::SystemReset => {
-                        sys.reset_requested = true;
+                        sys.reset_requested = Some(ResetKind::Software);
                         sys.request_stop();
                     }
                 }
@@ -924,16 +934,21 @@ impl Machine {
         if self.write_mem(addr, data) { Ok(()) } else { Err(MachineError::SegmentOutOfRange { addr, len: data.len() }) }
     }
 
-    /// Resets the core and the system peripherals (memory contents are kept).
+    /// Resets the core and the system peripherals (memory contents are kept),
+    /// like the reset button.
     pub fn reset(&mut self) {
+        self.reset_with(ResetKind::Pin);
+    }
+
+    pub fn reset_with(&mut self, kind: ResetKind) {
         let sys = self.uc.get_data_mut();
         sys.nvic.reset();
         sys.scs.reset();
-        sys.bus.reset();
+        sys.bus.reset(kind);
         sys.clock.set_cpu_hz(sys.config.reset_cpu_hz);
         sys.stop = None;
         sys.watch_hit = None;
-        sys.reset_requested = false;
+        sys.reset_requested = None;
         sys.last_invalid = None;
         sys.idle = IdleDetector::default();
 
@@ -1050,8 +1065,8 @@ impl Machine {
     /// masked; exceptions caused by the instruction itself (SVC, faults) are.
     pub fn step(&mut self) -> StopReason {
         self.sync_devices();
-        if self.uc.get_data().reset_requested {
-            self.reset();
+        if let Some(kind) = self.uc.get_data().reset_requested {
+            self.reset_with(kind);
         }
         let pc = self.pc();
         let at_breakpoint = self.breakpoints.remove(&pc);
@@ -1085,8 +1100,8 @@ impl Machine {
         loop {
             self.sync_devices();
             self.install_div_hooks();
-            if self.uc.get_data().reset_requested {
-                self.reset();
+            if let Some(kind) = self.uc.get_data().reset_requested {
+                self.reset_with(kind);
             }
             if let Some(stop) = self.uc.get_data_mut().stop.take() {
                 return stop;
@@ -1133,7 +1148,7 @@ impl Machine {
 
     fn stopped_on_purpose(&self) -> bool {
         let sys = self.uc.get_data();
-        sys.stop.is_some() || sys.watch_hit.is_some() || sys.reset_requested || sys.nvic.any_pending()
+        sys.stop.is_some() || sys.watch_hit.is_some() || sys.reset_requested.is_some() || sys.nvic.any_pending()
     }
 
     /// Unicorn returned early without an error: either we stopped it from a

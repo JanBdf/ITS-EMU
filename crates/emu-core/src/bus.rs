@@ -10,6 +10,17 @@ use crate::clock::Clock;
 use crate::nvic::Nvic;
 
 /// Context handed to peripherals on every access and update.
+/// What reset the MCU (reset flags in RCC_CSR).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResetKind {
+    PowerOn,
+    /// NRST pin (reset button, debugger).
+    Pin,
+    /// SYSRESETREQ in SCB_AIRCR.
+    Software,
+    Watchdog,
+}
+
 pub struct DeviceCtx<'a> {
     pub clock: &'a mut Clock,
     pub nvic: &'a mut Nvic,
@@ -23,6 +34,11 @@ impl DeviceCtx<'_> {
     /// Drives the level of external interrupt line `irq`.
     pub fn set_irq(&mut self, irq: u32, high: bool) {
         self.nvic.set_irq_level(irq, high);
+    }
+
+    /// Resets the MCU once the current instruction is done.
+    pub fn request_reset(&mut self, kind: ResetKind) {
+        self.nvic.reset_request = Some(kind);
     }
 
     /// Drives source `src` of an interrupt line that several peripherals share.
@@ -58,6 +74,12 @@ pub trait Peripheral {
     }
 
     fn reset(&mut self) {}
+
+    /// Reset of the MCU; peripherals that keep state across some resets (reset
+    /// flags) look at `kind`.
+    fn system_reset(&mut self, _kind: ResetKind) {
+        self.reset();
+    }
 }
 
 struct Mapping {
@@ -212,9 +234,9 @@ impl Bus {
         self.maps.iter().filter_map(|m| m.dev.next_event()).min()
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self, kind: ResetKind) {
         for m in &mut self.maps {
-            m.dev.reset();
+            m.dev.system_reset(kind);
         }
     }
 }

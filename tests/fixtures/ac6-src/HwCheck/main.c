@@ -26,6 +26,7 @@
  *                   counter, basic timers, shared interrupt lines
  *   adc             ADC/DAC: conversion times, internal channels, Analog pins, DAC1
  *   i2c             I2C1 (PB8/PB9, nothing connected): START, address NACK, STOP
+ *   iwdg PR RLR     starts the watchdog, prints the time (us) until it resets
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -1132,6 +1133,37 @@ static void cmd_i2c(void) {
     GPIOB->OTYPER &= ~((1u << 8) | (1u << 9));
 }
 
+/* ---- Independent watchdog: starts it with prescaler PR and reload RLR
+ * (given as "PR RLR" in hex), refreshes it once after 1 ms and prints the
+ * time (us) since the refresh every 10 ms until it
+ * resets the board. */
+static void cmd_iwdg(const char *arg) {
+    unsigned long pr = strtoul(arg ? arg : "0", NULL, 16);
+    const char *sp = arg ? strchr(arg, ' ') : NULL;
+    unsigned long rlr = sp ? strtoul(sp, NULL, 16) : 0xFFF;
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    printf("W csr %08lx\n", (unsigned long)RCC->CSR);
+    RCC->CSR |= RCC_CSR_RMVF;
+    IWDG->KR = 0x5555;
+    IWDG->PR = pr;
+    IWDG->RLR = rlr;
+    printf("W sr %lu\n", (unsigned long)IWDG->SR);
+    uint32_t t0 = DWT->CYCCNT;
+    IWDG->KR = 0xCCCC;
+    // one refresh after 1 ms: loads the new reload value
+    while (DWT->CYCCNT - t0 < 180000u) {
+    }
+    IWDG->KR = 0xAAAA;
+    t0 = DWT->CYCCNT;
+    printf("W sr_refresh %lu\n", (unsigned long)IWDG->SR);
+    for (uint32_t n = 1;; n++) {
+        while (DWT->CYCCNT - t0 < n * 1800000u) {
+        }
+        printf("W t %lu\n", (unsigned long)((DWT->CYCCNT - t0) / 180));
+    }
+}
+
 static void cmd_in(void) {
     printf("IN GPIOF %04lx GPIOG %04lx GPIOC %04lx\n", (unsigned long)(GPIOF->IDR & 0xFFFF),
            (unsigned long)(GPIOG->IDR & 0xFFFF), (unsigned long)(GPIOC->IDR & 0xFFFF));
@@ -1171,6 +1203,8 @@ static void execute(char *line) {
         cmd_adc();
     } else if (!strcmp(line, "i2c")) {
         cmd_i2c();
+    } else if (!strcmp(line, "iwdg")) {
+        cmd_iwdg(arg);
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {

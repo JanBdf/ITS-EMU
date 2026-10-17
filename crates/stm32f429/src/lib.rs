@@ -4,6 +4,7 @@ pub mod adc;
 pub mod exti;
 pub mod gpio;
 pub mod i2c;
+pub mod iwdg;
 pub mod rcc;
 pub mod spi;
 pub mod timer;
@@ -180,6 +181,7 @@ pub fn build() -> (Bus, Stm32f429) {
         Box::new(Usart::new("USART3", 39, ApbBus::Apb1, 18, clocks.clone(), usart3.clone())),
     );
     bus.attach(0x4000_7000, 0x400, Box::new(Pwr::new()));
+    bus.attach(0x4000_3000, 0x400, Box::new(iwdg::Iwdg::new()));
     let i2c1 = i2c::I2cBus::default();
     let i2c = [
         ("I2C1", 0x4000_5400, 31, 21, &[('B', 6), ('B', 8)][..], &[('B', 7), ('B', 9)][..], i2c1.clone()),

@@ -67,6 +67,8 @@ pub struct Nvic {
     level: Bits,
     /// Requests of the sources of lines that several peripherals share.
     sources: [u8; NUM_IRQS as usize],
+    /// A peripheral asked for a reset of the MCU (watchdog).
+    pub reset_request: Option<crate::bus::ResetKind>,
     priority: [u8; NUM_EXCEPTIONS],
     prigroup: u8,
     /// SHCSR enable bits for MemManage/BusFault/UsageFault.
@@ -89,6 +91,7 @@ impl Nvic {
             active: Bits::default(),
             level: Bits::default(),
             sources: [0; NUM_IRQS as usize],
+            reset_request: None,
             priority: [0; NUM_EXCEPTIONS],
             prigroup: 0,
             mem_fault_ena: false,

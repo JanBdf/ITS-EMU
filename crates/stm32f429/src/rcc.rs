@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use emu_core::bus::{extract_read, merge_write};
-use emu_core::{Clock, DeviceCtx, Peripheral};
+use emu_core::{Clock, DeviceCtx, Peripheral, ResetKind};
 
 pub const HSI_HZ: u32 = 16_000_000;
 /// The NUCLEO-F429ZI feeds the 8 MHz MCO of the ST-LINK into OSC_IN (HSE bypass).
@@ -258,6 +258,21 @@ impl Peripheral for Rcc {
     fn reset(&mut self) {
         self.reset_regs();
         self.clocks.set(Clocks::default());
+    }
+
+    /// The reset flags in CSR collect until RMVF; every reset but power-on
+    /// also asserts NRST (measured: software reset 0x1400_0000, watchdog
+    /// 0x2400_0000 after clearing the flags).
+    fn system_reset(&mut self, kind: ResetKind) {
+        let flags = self.csr & 0xFE00_0000;
+        self.reset();
+        const PIN: u32 = 1 << 26;
+        self.csr = match kind {
+            ResetKind::PowerOn => self.csr,
+            ResetKind::Pin => flags | PIN,
+            ResetKind::Software => flags | PIN | 1 << 28,
+            ResetKind::Watchdog => flags | PIN | 1 << 29,
+        };
     }
 }
 
