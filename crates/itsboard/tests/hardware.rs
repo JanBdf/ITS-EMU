@@ -171,6 +171,26 @@ fn timers_match_the_board() {
 }
 
 #[test]
+fn i2c_matches_the_board() {
+    // I2C1 with nothing on the header: flags exact, durations within 2 %
+    // (the shortest ones are one iteration of the polling loop)
+    let Some(out) = run("i2c", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-i2c.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("I ")).collect();
+    let board: Vec<&str> = board.lines().collect();
+    assert_eq!(emu.len(), board.len(), "{out}");
+    for (e, b) in emu.iter().zip(&board) {
+        if b.contains("_cycles") {
+            let value = |l: &str| -> f64 { l.rsplit(' ').next().unwrap().parse().unwrap() };
+            let (x, y) = (value(e), value(b));
+            assert!((x - y).abs() <= (y * 0.02).max(40.0), "{e} / board {b}");
+        } else {
+            assert_eq!(e, b);
+        }
+    }
+}
+
+#[test]
 fn adc_and_dac_match_the_board() {
     let Some(out) = run("adc", 500) else { return };
     let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-adc.txt")).unwrap();

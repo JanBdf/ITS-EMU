@@ -3,6 +3,7 @@
 pub mod adc;
 pub mod exti;
 pub mod gpio;
+pub mod i2c;
 pub mod rcc;
 pub mod spi;
 pub mod timer;
@@ -60,6 +61,8 @@ pub struct Stm32f429 {
     pub usart3: SharedSerial,
     /// Voltages on the analog inputs and the DAC outputs.
     pub analog: adc::SharedAnalog,
+    /// Devices on I2C1 (the I2C header of the ITS-Board).
+    pub i2c1: i2c::I2cBus,
 }
 
 /// Ethernet MAC/DMA registers: reads as idle, writes ignored. The LCD driver
@@ -153,6 +156,27 @@ pub fn build() -> (Bus, Stm32f429) {
         Box::new(Usart::new("USART3", 39, ApbBus::Apb1, 18, clocks.clone(), usart3.clone())),
     );
     bus.attach(0x4000_7000, 0x400, Box::new(Pwr::new()));
+    let i2c1 = i2c::I2cBus::default();
+    let i2c = [
+        ("I2C1", 0x4000_5400, 31, 21, &[('B', 6), ('B', 8)][..], &[('B', 7), ('B', 9)][..], i2c1.clone()),
+        (
+            "I2C2",
+            0x4000_5800,
+            33,
+            22,
+            &[('B', 10), ('F', 1), ('H', 4)],
+            &[('B', 11), ('F', 0), ('H', 5)],
+            Default::default(),
+        ),
+        ("I2C3", 0x4000_5C00, 72, 23, &[('A', 8), ('H', 7)], &[('C', 9), ('H', 8)], Default::default()),
+    ];
+    for (name, base, irq, en_bit, scl, sda, devices) in i2c {
+        bus.attach(
+            base,
+            0x400,
+            Box::new(i2c::I2c::new(name, irq, en_bit, clocks.clone(), gpio.clone(), scl, sda, devices)),
+        );
+    }
     let analog = adc::SharedAnalog::default();
     bus.attach(0x4000_7400, 0x400, Box::new(adc::Dac::new(clocks.clone(), analog.clone())));
     bus.attach(0x4001_2000, 0x400, Box::new(adc::Adc::new(clocks.clone(), gpio.clone(), analog.clone())));
@@ -173,5 +197,5 @@ pub fn build() -> (Bus, Stm32f429) {
     bus.set_wait_states(Box::new(bus_wait_states(clocks.clone())));
 
     let tim_pwm: [SharedPwm; 4] = tim_pwm.try_into().unwrap_or_else(|_| unreachable!());
-    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3, analog })
+    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3, analog, i2c1 })
 }
