@@ -510,12 +510,9 @@ impl IdleDetector {
                     d.skip = d.backoff;
                     None
                 } else {
-                    // Reads return the same values only before `stable_until`
-                    // (`u64::MAX`: no time-dependent reads): repeat whole
-                    // iterations as long as all of their reads happen before
-                    // it and before the slice ends.  Skipping whole iterations
-                    // only keeps the timing identical to running them: the
-                    // slice then ends at the same block, not mid-iteration.
+                    // Skip whole iterations whose reads all happen before
+                    // `stable_until` and the slice end, so that the timing
+                    // stays identical to running them.
                     let (at, with_ram) = (snap.at, d.stored);
                     let until = d.stable_until.min(uc.get_data().slice_end);
                     let now = uc.get_data().clock.cycles();

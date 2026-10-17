@@ -7,7 +7,7 @@ as a vector image for the GUI.
 Everything is drawn from shapes and fonts; there are no bitmaps in the
 output.  Positions are GUI design units (the board is 1000 units wide,
 1 unit = 0.2408 mm) and were measured in the rectified, focus-stacked photo
-of the real board (boardstack.py / boardasset.py) and in hardware_img/.
+of the real board (hardware_img/board-rect.jpg) and the other photos there.
 
 Text is converted to paths here, so the SVG does not need any fonts:
 - the silkscreen of the carrier board uses a stroke font modelled on
@@ -53,12 +53,11 @@ GLASS = list(zip(_g[0::2], _g[1::2]))
 
 # ---- orthographic view
 # The Nucleo (14 mm) and the display (~30 mm) stand above the carrier.  The
-# rectified photo (rect.png) shows them scaled about the point below the
+# rectified photo (board-rect.jpg) shows them scaled about the point below the
 # camera, by the magnifications below: from the Morpho pitch (11.01 units in
 # the photo for 2.54 mm) and from the active area of the display (83.52 ×
-# 55.68 mm).  The second photo (rect_b.png, camera moved by 644, 369 units)
-# gives the same layer heights.  Coordinates measured in rect.png are drawn
-# inside layer(), which undoes the scaling.
+# 55.68 mm).  Coordinates measured in that photo are drawn inside layer(),
+# which undoes the scaling.
 NADIR = (690.0, 330.0)
 M_NUCLEO = 1.0438
 M_SHIELD = 1.10

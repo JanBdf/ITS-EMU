@@ -1,9 +1,8 @@
 //! Drawing of the ITS-Board and its interactive parts.
 //!
 //! The board (Rev 02, 15.12.2020, with the Nucleo and the display shield) is a
-//! vector drawing, assets/board.svg, made by tools/hw/boarddraw.py after the
-//! focus- and exposure-stacked photo of the real board (stack-capture.sh,
-//! boardstack.py, boardasset.py).  It is rendered at the size it is shown at.
+//! vector drawing, assets/board.svg, made by tools/hw/boarddraw.py after a
+//! photo of the real board.  It is rendered at the size it is shown at.
 //! LEDs, pressed buttons and the display are drawn on top of it.  Positions are
 //! in design units (the board is 1000 units wide); the drawing is an
 //! orthographic top view, the parts on the Nucleo and the display were moved
