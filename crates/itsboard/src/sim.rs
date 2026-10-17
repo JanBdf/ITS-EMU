@@ -35,8 +35,8 @@ impl Simulator {
     }
 
     fn with_image(image: ElfImage, fonts: Option<&[u8]>) -> Result<Self, LoadError> {
-        let (bus, mcu) = stm32f429::build();
-        let board = ItsBoard::attach(&mcu);
+        let (mut bus, mcu) = stm32f429::build();
+        let board = ItsBoard::attach(&mcu, &mut bus);
         let mut machine = stm32f429::machine(bus, &mcu)?;
         machine.load_elf(&image)?;
         if let Some(fonts) = fonts {

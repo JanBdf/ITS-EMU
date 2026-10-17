@@ -55,9 +55,17 @@ struct Args {
     /// `S0`..`S7` and `USER` take 1 (pressed) / 0 (released),
     /// `TOUCH` takes `x;y` or `0`, `SERIAL` takes text for the virtual COM
     /// port (`\n` = newline, no commas), a pin such as `PC3` takes a voltage
-    /// or `open` (analog input). Example: `2.5:S7=1,2.6:S7=0,3:SERIAL=hi\n,4:PC3=1.65`
+    /// or `open` (analog input), `ENC` (`ENC1`, ...) turns a rotary encoder
+    /// of `--device` by that many detents (negative: counter-clockwise).
+    /// Example: `2.5:S7=1,2.6:S7=0,3:SERIAL=hi\n,4:PC3=1.65,5:ENC=-3`
     #[arg(long, value_parser = parse_inputs)]
     input: Option<InputScript>,
+
+    /// External device on header pins (repeatable): `encoder@PC6,PC7` is a
+    /// rotary encoder with contacts A, B to GND and pull-ups (clockwise, A
+    /// falls first); turn it with the `ENC` input
+    #[arg(long = "device", value_name = "DEVICE@PINS", value_parser = parse_device)]
+    devices: Vec<Device>,
 
     /// Forward the terminal's standard input to the virtual COM port
     #[arg(long)]
@@ -73,6 +81,35 @@ struct Args {
 const GDB_SLICE_NS: u64 = 1_000_000;
 
 #[derive(Debug, Clone)]
+enum Device {
+    Encoder((char, u32), (char, u32)),
+}
+
+/// `PC6` -> ('C', 6)
+fn parse_pin(s: &str) -> Result<(char, u32), String> {
+    let s = s.trim().to_ascii_uppercase();
+    let b = s.as_bytes();
+    if b.len() >= 3
+        && b[0] == b'P'
+        && (b'A'..=b'K').contains(&b[1])
+        && let Some(n) = s[2..].parse::<u32>().ok().filter(|&n| n < 16)
+    {
+        return Ok((b[1] as char, n));
+    }
+    Err(format!("expected a pin such as PC6, got {s:?}"))
+}
+
+fn parse_device(s: &str) -> Result<Device, String> {
+    let (kind, pins) = s.split_once('@').ok_or_else(|| format!("expected DEVICE@PINS, got {s:?}"))?;
+    let pins = pins.split(',').map(parse_pin).collect::<Result<Vec<_>, _>>()?;
+    match (kind.to_ascii_lowercase().as_str(), pins.as_slice()) {
+        ("encoder", &[a, b]) => Ok(Device::Encoder(a, b)),
+        ("encoder", _) => Err("an encoder needs two pins: encoder@PA,PB".to_owned()),
+        _ => Err(format!("unknown device {kind:?} (known: encoder)")),
+    }
+}
+
+#[derive(Debug, Clone)]
 enum Input {
     Button(u32, bool),
     User(bool),
@@ -80,6 +117,8 @@ enum Input {
     Serial(Vec<u8>),
     /// Voltage applied to a pin (port index, pin), `None` = open.
     Analog(usize, u32, Option<f32>),
+    /// Turns encoder n by that many detents.
+    Encoder(usize, i32),
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +159,12 @@ fn parse_inputs(s: &str) -> Result<InputScript, String> {
                 };
                 Input::Analog((p.as_bytes()[1] - b'A') as usize, pin, volts)
             }
+            e if e.starts_with("ENC") => {
+                let n = if e.len() == 3 { Some(0) } else { e[3..].parse::<usize>().ok() };
+                let n = n.ok_or_else(|| format!("unknown input {name}"))?;
+                let detents = value.parse::<i32>().map_err(|_| format!("expected detents in {item:?}"))?;
+                Input::Encoder(n, detents)
+            }
             b if b.len() == 2 && b.starts_with('S') => {
                 let n =
                     b[1..].parse::<u32>().ok().filter(|&n| n < 8).ok_or_else(|| format!("unknown button {name}"))?;
@@ -135,6 +180,11 @@ fn parse_inputs(s: &str) -> Result<InputScript, String> {
 
 fn apply_input(board: &itsboard::ItsBoard, input: &Input) {
     match input {
+        Input::Encoder(n, detents) => {
+            if let Err(e) = board.rotate_encoder(*n, *detents) {
+                log::warn!("input ENC: {e} (add one with --device encoder@PA,PB)");
+            }
+        }
         Input::Button(n, pressed) => board.set_button(*n, *pressed),
         Input::User(pressed) => board.set_user_button(*pressed),
         Input::Touch(pos) => board.set_touch(*pos),
@@ -162,6 +212,13 @@ fn main() -> Result<()> {
         None => itsboard::Simulator::blank(fonts.as_deref())?,
     };
     let itsboard::Simulator { mut machine, board, mut image } = sim;
+    for device in &args.devices {
+        match *device {
+            Device::Encoder(a, b) => {
+                board.add_encoder(a, b);
+            }
+        }
+    }
     let mcu = board.mcu().clone();
     machine.system_mut().idle_skipping = !args.no_idle_skip;
 

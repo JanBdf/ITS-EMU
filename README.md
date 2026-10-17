@@ -14,7 +14,7 @@ Status: work in progress — see [PLAN.md](PLAN.md).
 | CPU | Cortex-M4F (Thumb-2, FPU) via [Unicorn](https://www.unicorn-engine.org/); NVIC, SysTick, exceptions, faults in Rust |
 | Clock | RCC clock tree, virtual time in CPU cycles (16 MHz HSI → 180 MHz PLL); cycle model of the Cortex-M4 (loads, branches, divisions, exceptions, APB wait states) measured on the board |
 | Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (output compare and PWM on the pins, input capture, encoder mode, TIM1/8 repetition counter), ADC1–3 (regular group started by TIM2/TIM3/TIM8 TRGO), DAC (timer triggers, noise/triangle waves), I²C1–3 (master; nothing connected answers with NACK), SPI1–6, USART1–6 + UART4/5/7/8 (only USART3 connected), IWDG (watchdog reset, reset flags in RCC_CSR), CRC, RNG, DMA1/2 (direct mode; requests from the ADCs, U(S)ARTs, SPIs and the DAC), PWR, flash interface, bit-banding |
-| Board | LEDs OUT0–15, buttons S0–S7, INT0–5, Analog header (voltages on the ADC pins, DAC1), Nucleo LEDs and USER button |
+| Board | LEDs OUT0–15, buttons S0–S7, INT0–5, Analog header (voltages on the ADC pins, DAC1), Nucleo LEDs and USER button; external devices on any pins: rotary encoder (command line) |
 | Display | ILI9486 480×320 TFT with SPI timing, XPT2046 touch, backlight PWM, tone response of the real panel (GUI; `--ideal-colors` to switch off) |
 | Serial | Virtual COM port (USART3, `printf` / `stdin_getchar`) |
 | Debugging | GDB remote server: breakpoints, single step, watchpoints, registers incl. FPU, memory, `monitor reset halt` |
@@ -38,6 +38,9 @@ display is a touch, clicking an AUX pad connects it to GND/3V3, the mouse
 wheel or a right click on a pad of the Analog header applies a voltage,
 firmware files can be dropped onto the window. On the command line,
 `--input 2:PC3=1.65` applies 1.65 V to PC3 (`open` disconnects it).
+`--device encoder@PC6,PC7` connects a rotary encoder (contacts to GND,
+pull-ups; the TIM8_1/TIM8_2 header pins suit TIM8's encoder mode) and
+`--input 3:ENC=5` turns it five detents clockwise (`ENC=-5` back).
 
 The font table that ITS_BRD_LIB expects in flash at `0x0810_0000` is built in.
 
