@@ -5,8 +5,9 @@
 //! focus- and exposure-stacked photo of the real board (stack-capture.sh,
 //! boardstack.py, boardasset.py).  It is rendered at the size it is shown at.
 //! LEDs, pressed buttons and the display are drawn on top of it.  Positions are
-//! in design units (the board is 1000 units wide) and were measured in the
-//! photo by boardasset.py.
+//! in design units (the board is 1000 units wide); the drawing is an
+//! orthographic top view, the parts on the Nucleo and the display were moved
+//! from where the camera saw them to where they are.
 
 use eframe::egui::{
     self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2, epaint::Vertex,
@@ -38,11 +39,12 @@ const BUTTON_CAP_R: f32 = 7.2;
 const AUX_X: f32 = 945.8;
 const AUX_Y: [f32; 6] = [285.5, 317.0, 348.6, 380.1, 411.7, 448.6];
 /// Nucleo buttons B1 (USER, blue) and B2 (RESET, black).
-const USER: (f32, f32) = (289.2, 71.7);
-const RESET: (f32, f32) = (290.6, 318.1);
-/// Active area of the display (480 × 320): top left, top right, bottom right,
-/// bottom left.  Not quite a rectangle: the glass is ~15 mm above the PCB.
-const GLASS: [(f32, f32); 4] = [(515.0, 61.9), (895.9, 63.5), (898.4, 314.5), (518.6, 317.2)];
+const USER: (f32, f32) = (321.2, 92.4);
+const RESET: (f32, f32) = (321.2, 318.3);
+/// Active area of the display (480 × 320, 83.52 × 55.68 mm): top left, top
+/// right, bottom right, bottom left.  The board is drawn as seen from straight
+/// above, so this is a rectangle.
+const GLASS: [(f32, f32); 4] = [(532.1, 86.5), (878.9, 86.5), (878.9, 317.7), (532.1, 317.7)];
 
 /// The board drawing and its rendering at the current size.
 pub struct Textures {
@@ -189,8 +191,8 @@ impl Pcb<'_> {
             egui::CornerRadius::same(self.len(1.5) as u8),
             color.gamma_multiply(0.6 * b),
         );
-        self.glow(x, y, 42.0, 42.0, color, 0.9 * b); // light on the solder mask
-        self.glow(x, y, 10.0, 13.0, color, 0.9 * b); // the package lights up
+        self.glow(x, y, 24.0, 24.0, color, 0.45 * b); // light on the solder mask
+        self.glow(x, y, 9.0, 12.0, color, 0.75 * b); // the package lights up
         self.glow(x, y, 4.5, 4.5, hot, b); // the die
     }
 
