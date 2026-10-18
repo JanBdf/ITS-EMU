@@ -212,6 +212,14 @@ fn stlink_commands_over_usbip() {
     assert_eq!(ret_submit(&mut rig, &mut s, seq, false).status, 0);
     assert_eq!(rig.mcu.usart3.borrow().rx.iter().copied().collect::<Vec<_>>(), b"hi");
 
+    // output while the port is not opened (no IN transfers) stays bounded
+    for i in 0..100_000u32 {
+        rig.mcu.usart3.borrow_mut().push_output(b'a' + (i % 26) as u8);
+    }
+    let kept = rig.mcu.usart3.borrow().mirror.as_ref().unwrap().len();
+    assert!(kept <= stm32f429::usart::MIRROR_LIMIT, "{kept} bytes kept");
+    assert!(kept >= stm32f429::usart::MIRROR_LIMIT / 2);
+
     // unplugging: the server notices the closed connection
     drop(s);
     let end = Instant::now() + Duration::from_secs(5);
