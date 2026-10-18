@@ -158,7 +158,9 @@ Started from the launcher, the GUI plugs the ST-LINK in by itself: the
 toolbar switch **USB ST-LINK** (remembered in `~/.config/its-emu/gui.conf`,
 on by default) and the status bar show its state (*plugged in*, *in use by a
 debugger*, or why attaching failed). Quitting or switching it off unplugs
-it. The emulator's own GDB server (port 3333, for the *ITS-Board Emulator*
+it. After a kernel update the computer needs a restart first: pacman removes
+the running kernel's modules, so vhci-hcd cannot be loaded until then (the
+installer and the status bar say so). The emulator's own GDB server (port 3333, for the *ITS-Board Emulator*
 debug configuration) leaves the port to pyOCD while pyOCD has the ST-LINK in
 debug mode and takes it back afterwards, so both debug configurations work
 without changing anything.
