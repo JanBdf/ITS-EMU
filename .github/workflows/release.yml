@@ -1,0 +1,90 @@
+name: Release
+
+# A tag v<version> (the version in Cargo.toml) builds the packages and
+# publishes them as a GitHub release. Run by hand, it only builds them and
+# keeps them as workflow artifacts.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Each platform is one job that uploads its files as an artifact named
+# package-<platform>; the release job attaches all of them. A new platform
+# (Debian package, Windows installer, macOS app, ...) is one more job of that
+# kind, added to the needs of the release job.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  version:
+    name: check tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          fi
+
+  arch:
+    name: Arch Linux package
+    needs: version
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # git before the checkout, or it downloads a tarball without .git
+      # (build.sh takes the package version from git)
+      - name: Install build tools
+        run: pacman -Syu --noconfirm --needed base-devel git
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Install dependencies
+        run: |
+          . packaging/arch/PKGBUILD
+          pacman -S --noconfirm --needed "${makedepends[@]}" "${depends[@]}"
+      # makepkg refuses to run as root
+      - name: Build
+        run: |
+          useradd -m builder
+          chown -R builder: "$GITHUB_WORKSPACE"
+          runuser -u builder -- packaging/arch/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-arch-x86_64
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [arch]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: assets
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l assets
+          gh release create "$GITHUB_REF_NAME" assets/* \
+            --repo "$GITHUB_REPOSITORY" --title "ITS-Board Emulator $GITHUB_REF_NAME" \
+            --generate-notes
