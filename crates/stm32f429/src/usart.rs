@@ -41,12 +41,19 @@ impl SerialPort {
     pub fn push_output(&mut self, byte: u8) {
         self.tx.push(byte);
         if let Some(m) = &mut self.mirror {
+            // Nobody may be reading (port not opened): keep only the latest output.
+            if m.len() >= MIRROR_LIMIT {
+                m.drain(..MIRROR_LIMIT / 2);
+            }
             m.push(byte);
         }
     }
 }
 
 pub type SharedSerial = Rc<RefCell<SerialPort>>;
+
+/// Most output kept for the second consumer ([`SerialPort::mirror`]).
+pub const MIRROR_LIMIT: usize = 16 * 1024;
 
 const SR_PE: u32 = 1 << 0;
 const SR_FE: u32 = 1 << 1;

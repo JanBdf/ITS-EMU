@@ -14,8 +14,6 @@ const SEND_BREAK: u8 = 0x23;
 
 /// Bytes from the host that may wait for the USART before the probe NAKs.
 const RX_LIMIT: usize = 1024;
-/// Output kept while nobody reads the port (older bytes are dropped).
-const TX_LIMIT: usize = 16 * 1024;
 
 pub struct Vcp {
     serial: Option<SharedSerial>,
@@ -74,12 +72,9 @@ impl Vcp {
         let Some(s) = &self.serial else { return Reply::Nak };
         let mut port = s.borrow_mut();
         let Some(m) = port.mirror.as_mut() else { return Reply::Nak };
+        // (the USART keeps at most MIRROR_LIMIT bytes while nobody reads)
         if m.is_empty() {
             return Reply::Nak;
-        }
-        if m.len() > TX_LIMIT {
-            let excess = m.len() - TX_LIMIT;
-            m.drain(..excess);
         }
         let n = max_len.min(m.len());
         Reply::Done(m.drain(..n).collect())

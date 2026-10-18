@@ -123,7 +123,7 @@ through the emulated FLASH interface), *STLink@pyOCD (launch)* debugs through
 pyOCD's GDB server, and a terminal program talks to `/dev/ttyACM0`.
 
 ```sh
-sudo pacman -S usbip            # Debian/Ubuntu: linux-tools-generic (usbip)
+sudo pacman -S usbip            # Debian: apt install usbip; Ubuntu: linux-tools-generic
 sudo modprobe vhci-hcd          # once per boot (or add it to /etc/modules-load.d)
 
 its-emu-gui --usb               # or: its-emu Program.axf --usb
