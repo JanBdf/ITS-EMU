@@ -417,7 +417,8 @@ impl Worker {
             StopReason::Budget
             | StopReason::DebugBreakpoint { .. }
             | StopReason::Step
-            | StopReason::Watchpoint { .. } => {}
+            | StopReason::Watchpoint { .. }
+            | StopReason::Halted { .. } => {}
             StopReason::Breakpoint { pc } => {
                 self.state = RunState::Stopped(format!("BKPT at {}", sim.describe_pc(pc)));
             }

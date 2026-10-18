@@ -12,7 +12,7 @@ pub mod spi;
 pub mod timer;
 pub mod usart;
 
-use emu_core::{Bus, Machine, MachineConfig, MachineError, MemoryMap};
+use emu_core::{Bus, DebugIds, Machine, MachineConfig, MachineError, MemoryMap};
 
 use dma::DmaLine;
 use gpio::{GPIOA_BASE, GpioPort, NUM_PORTS, PORT_STRIDE, SharedGpio};
@@ -165,8 +165,21 @@ fn bus_wait_states(clocks: SharedClocks) -> impl Fn(u32, bool, u64) -> u64 {
 pub fn machine(bus: Bus, mcu: &Stm32f429) -> Result<Machine, MachineError> {
     let mut m = Machine::new(machine_config(), bus)?;
     m.set_bus_master(Box::new(dma::DmaMaster(mcu.dma.clone())));
+    m.set_debug_ids(DEBUG_IDS);
     Ok(m)
 }
+
+/// DBGMCU_IDCODE: DEV_ID 0x419 (STM32F42x/43x), REV_ID 0x2001 (revision 3).
+pub const DBGMCU_IDCODE: u32 = 0x2001_6419;
+
+/// ST's parts of the debug system: the ROM table carries the device ID as
+/// part number and ST's JEP106 code (bank 0, 0x20).
+pub const DEBUG_IDS: DebugIds = DebugIds {
+    rom_table_part: 0x419,
+    rom_table_jep106: (0, 0x20),
+    rom_table_revision: 0,
+    dbgmcu_idcode: Some(DBGMCU_IDCODE),
+};
 
 /// Builds the peripheral bus with all modelled STM32F429 peripherals.
 pub fn build() -> (Bus, Stm32f429) {

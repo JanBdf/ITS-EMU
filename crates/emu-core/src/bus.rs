@@ -36,6 +36,13 @@ impl Ram {
             .map(|&(_, ptr, len, _)| unsafe { std::slice::from_raw_parts(ptr, len as usize) })
     }
 
+    /// The contents of the region that starts at `base`.
+    pub fn region_mut(&mut self, base: u32) -> Option<&mut [u8]> {
+        let &(_, ptr, len, _) = self.regions.iter().find(|r| r.0 == base)?;
+        // SAFETY: valid while the `Ram` is used (see `add`); borrowed mutably with `self`
+        Some(unsafe { std::slice::from_raw_parts_mut(ptr, len as usize) })
+    }
+
     fn locate(&self, addr: u32, size: u32) -> Option<(*mut u8, bool)> {
         self.regions.iter().find_map(|&(base, ptr, len, w)| {
             let off = addr.checked_sub(base)?;

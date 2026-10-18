@@ -4,6 +4,8 @@
 
 pub mod bus;
 pub mod clock;
+pub mod dap;
+pub mod debug;
 pub mod elf;
 pub mod exception;
 #[cfg(feature = "gdb")]
@@ -16,6 +18,9 @@ pub mod timing;
 
 pub use bus::{Bus, BusMaster, DeviceCtx, Peripheral, Ram, ResetKind};
 pub use clock::Clock;
+pub use debug::DebugIds;
 pub use elf::ElfImage;
 pub use exception::CoreReg;
-pub use machine::{Machine, MachineConfig, MachineError, MemoryMap, StopReason, WatchKind};
+pub use machine::{
+    DebugFault, FlashController, Machine, MachineConfig, MachineError, MemoryMap, StopReason, WatchKind,
+};
