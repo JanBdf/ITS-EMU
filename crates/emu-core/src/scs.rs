@@ -25,6 +25,7 @@ pub const CFSR_DACCVIOL: u32 = 1 << 1;
 pub const CFSR_MMARVALID: u32 = 1 << 7;
 // HFSR bits
 pub const HFSR_FORCED: u32 = 1 << 30;
+pub const HFSR_DEBUGEVT: u32 = 1 << 31;
 
 /// Exception number whose priority byte lives at PPB offset `off`
 /// (NVIC_IPRn or SCB_SHPRn), if any.
@@ -102,6 +103,13 @@ impl Scs {
 
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    /// `cycles` passed while the core was halted (debug state): SysTick and
+    /// DWT_CYCCNT count core cycles and stood still.
+    pub fn core_halted_for(&mut self, cycles: u64) {
+        self.systick.shift(cycles);
+        self.dwt_cyc_base += cycles;
     }
 
     pub fn stkalign(&self) -> bool {

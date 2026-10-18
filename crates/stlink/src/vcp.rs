@@ -31,6 +31,12 @@ impl Vcp {
         Self { serial, line_coding }
     }
 
+    pub fn set_serial(&mut self, serial: Option<SharedSerial>, attached: bool) {
+        self.attached(false);
+        self.serial = serial;
+        self.attached(attached);
+    }
+
     /// The host attached or detached the probe: start or stop copying the output.
     pub fn attached(&mut self, attached: bool) {
         if let Some(s) = &self.serial {

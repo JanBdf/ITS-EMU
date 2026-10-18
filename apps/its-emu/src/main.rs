@@ -284,8 +284,10 @@ fn main() -> Result<()> {
         }
         None => None,
     };
-    // Like the board on the desk: in real time while plugged in.
+    // Like the board on the desk: in real time while plugged in, and a BKPT
+    // without a debugger is a HardFault (the probe may leave the core on one).
     let realtime = args.realtime || usb.is_some();
+    machine.system_mut().bkpt_stops = usb.is_none();
     let seconds = args.seconds.unwrap_or(if gdb.is_some() || usb.is_some() { 0.0 } else { 10.0 });
     let limit_ns = if seconds > 0.0 { (seconds * 1e9) as u64 } else { u64::MAX };
     let mut waiting_for_debugger = gdb.is_some();
@@ -294,6 +296,7 @@ fn main() -> Result<()> {
     let start = Instant::now();
     // Real-time pacing reference (wall clock, virtual ns).
     let mut pace_anchor = (start, 0u64);
+    let mut halted_since: Option<Instant> = None;
     let mut bkpts = 0u32;
     let stop = loop {
         let clock = machine.clock();
@@ -325,9 +328,19 @@ fn main() -> Result<()> {
         if execution == Execution::Halted || held {
             forward_serial(&mcu, stdin_rx.as_ref());
             let _ = wake_rx.recv_timeout(Duration::from_millis(1));
-            pace_anchor = (Instant::now(), machine.clock().time_ns());
+            // While the probe halts the core, the peripherals run on in real time.
+            let now = Instant::now();
+            if let Some(since) = halted_since
+                && execution != Execution::Halted
+            {
+                let cycles = machine.clock().ns_to_cycles((now - since).as_nanos() as u64);
+                machine.advance_halted(cycles);
+            }
+            halted_since = Some(now);
+            pace_anchor = (now, machine.clock().time_ns());
             continue;
         }
+        halted_since = None;
         let clock = machine.clock();
         let mut slice_ns = if realtime { REALTIME_SLICE_NS } else { limit_ns - now_ns }.min(limit_ns - now_ns);
         if gdb.is_some() || usb.is_some() {

@@ -1894,6 +1894,7 @@ dependencies = [
  "png",
  "resvg",
  "rfd",
+ "stlink",
  "stm32f429",
 ]
 
