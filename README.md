@@ -243,7 +243,8 @@ cargo test --release
 
 CI (`.github/workflows/ci.yml`) checks formatting and clippy, and builds and
 tests on Linux, Windows and macOS, each on x64 and arm64 (Windows on Arm is
-experimental). It installs `gdb-multiarch` on Linux for the GDB server tests,
+experimental: Unicorn does not build for it natively, so it runs the x64 build
+under emulation). It installs `gdb-multiarch` on Linux for the GDB server tests,
 records throughput in the job summary and keeps the binaries as artifacts for
 14 days. The tests that need the personal lab solutions in `tests/fixtures/ac6`
 (not published) skip themselves there.
