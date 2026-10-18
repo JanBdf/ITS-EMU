@@ -11,5 +11,8 @@ if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
   echo "port out of range: $port" >&2
   exit 2
 fi
-modprobe vhci-hcd 2>/dev/null || true
+if ! modprobe vhci-hcd 2>/dev/null && [ ! -d "/usr/lib/modules/$(uname -r)" ]; then
+  echo "the kernel was updated since the last start: restart the computer to load the vhci-hcd kernel module" >&2
+  exit 1
+fi
 exec /usr/bin/usbip --tcp-port "$port" attach -r 127.0.0.1 -b 1-1

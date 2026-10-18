@@ -308,6 +308,9 @@ impl eframe::App for App {
                     UsbStatus::Unplugged { error: None, .. } => {
                         (Some("ST-LINK: waiting for usbip attach"), Color32::YELLOW)
                     }
+                    UsbStatus::Unplugged { error: Some(_), .. } if stlink::restart_needed() => {
+                        (Some("ST-LINK: restart the computer (kernel updated)"), ERR_RED)
+                    }
                     UsbStatus::Unplugged { error: Some(_), .. } | UsbStatus::Unavailable(_) => {
                         (Some("ST-LINK: not attached"), ERR_RED)
                     }
