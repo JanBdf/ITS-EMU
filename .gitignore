@@ -17,7 +17,5 @@
 
 /tools/vscode-nodebug/*.vsix
 
-# makepkg output
-/packaging/arch/src/
-/packaging/arch/pkg/
-/packaging/arch/*.pkg.tar.*
+# Linux packages (packaging/arch/build.sh)
+/dist

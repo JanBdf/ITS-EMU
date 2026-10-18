@@ -1,59 +1,58 @@
-# Arch Linux package of the ITS-Board emulator, built from this checkout:
-#
-#   cd packaging/arch && makepkg -si        # build and install here
-#   makepkg && scp its-emu-*.pkg.tar.zst laptop:   # then: sudo pacman -U its-emu-*.pkg.tar.zst
-#
-# Installs the GUI (desktop entry "ITS-Board Emulator"), the command line
-# version, and what the board's ST-LINK on USB/IP needs: the vhci-hcd module
-# at boot, a polkit-authorized helper that runs `usbip attach` (so the GUI
-# plugs the probe in without a terminal) and udev access for the logged-in
-# user to the probe and its virtual COM port.
+# Arch package of the ITS-Board emulator, built from the local checkout.
+# Not run directly: packaging/arch/build.sh copies it into target/, sets
+# pkgver from git and points ITS_EMU_ROOT at the checkout.
 
 pkgname=its-emu
-pkgver=0.1.0
+pkgver=0
 pkgrel=1
-pkgdesc="Emulator of the HAW Hamburg ITS-Board (STM32F429) with display, GDB server and a USB ST-LINK for pyOCD"
-arch=('x86_64' 'aarch64')
-license=('MIT')
-# The GUI loads the windowing libraries at run time.
-depends=('glibc' 'gcc-libs' 'libxkbcommon' 'wayland' 'libglvnd' 'usbip' 'polkit' 'hicolor-icon-theme')
-optdepends=(
-  'libx11: X11 sessions'
-  'libxcursor: X11 sessions'
-  'libxrandr: X11 sessions'
-  'libxi: X11 sessions'
-  'xdg-desktop-portal: file dialog'
-  'arm-none-eabi-gdb: debugging through the built-in GDB server'
-)
-makedepends=('cargo' 'cmake' 'clang' 'git')
+pkgdesc='Emulator for the HAW Hamburg ITS-Board (STM32F429 + ITS carrier board + TFT) with a USB ST-LINK for pyOCD'
+arch=(x86_64)
+license=(MIT)
+# The GUI loads the window system, GL/Vulkan and D-Bus (file dialog via the
+# XDG portal) at run time, so ldd does not show them.
+depends=(glibc gcc-libs dbus fontconfig libglvnd vulkan-icd-loader wayland
+         libx11 libxcb libxcursor libxi libxkbcommon libxkbcommon-x11 hicolor-icon-theme
+         # the board's ST-LINK on USB/IP: usbip attach through a polkit helper
+         usbip polkit)
+makedepends=(cargo cmake clang git zip)
+optdepends=('arm-none-eabi-gdb: debugging the firmware through the GDB server'
+            'code: Run Without Debugging (Ctrl+F5) for the emulator launch configuration'
+            'xdg-desktop-portal: file dialog of the GUI')
 install=its-emu.install
-# Unicorn's C code is built by CMake inside cargo; makepkg's LTO flags do not suit it.
-options=('!lto' '!debug')
-
-_root="$(realpath "$startdir/../..")"
-
-pkgver() {
-  cd "$_root"
-  local version
-  version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
-}
+# no -debug split package; makepkg's LTO flags are not meant for Unicorn's C build
+options=(!debug !lto)
 
 build() {
-  cd "$_root"
-  export CARGO_TARGET_DIR="$srcdir/target"
-  cargo build --release --locked -p its-emu -p its-emu-gui
+  cd "$ITS_EMU_ROOT"
+  # own target directory: makepkg's CFLAGS/RUSTFLAGS differ from those of
+  # normal builds and would rebuild Unicorn every time
+  CARGO_TARGET_DIR="$ITS_EMU_ROOT/target/pkg-cargo" \
+    cargo build --release --locked -p its-emu -p its-emu-gui
+  tools/vscode-nodebug/package.sh >/dev/null
 }
 
 package() {
-  install -Dm755 "$srcdir/target/release/its-emu-gui" "$pkgdir/usr/bin/its-emu-gui"
-  install -Dm755 "$srcdir/target/release/its-emu" "$pkgdir/usr/bin/its-emu"
-  cd "$startdir"
-  install -Dm755 usbip-attach "$pkgdir/usr/lib/its-emu/usbip-attach"
-  install -Dm644 its-emu.policy "$pkgdir/usr/share/polkit-1/actions/its-emu.usbip-attach.policy"
-  install -Dm644 vhci-hcd.conf "$pkgdir/usr/lib/modules-load.d/its-emu.conf"
-  install -Dm644 70-its-emu-stlink.rules "$pkgdir/usr/lib/udev/rules.d/70-its-emu-stlink.rules"
-  install -Dm644 its-emu.desktop "$pkgdir/usr/share/applications/its-emu.desktop"
-  install -Dm644 its-emu.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/its-emu.svg"
-  install -Dm644 "$_root/README.md" "$pkgdir/usr/share/doc/its-emu/README.md"
+  cd "$ITS_EMU_ROOT"
+  local bin="$ITS_EMU_ROOT/target/pkg-cargo/release"
+  install -Dm755 "$bin/its-emu" "$bin/its-emu-gui" -t "$pkgdir/usr/bin/"
+  install -Dm644 packaging/arch/its-emu-gui.desktop -t "$pkgdir/usr/share/applications/"
+  install -Dm644 packaging/arch/its-emu-gui.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
+  install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname/"
+
+  # The ST-LINK on USB/IP: vhci-hcd at boot, a helper that polkit lets the
+  # user at the computer run to attach the probe (from 127.0.0.1 only), and
+  # access for the logged-in user to the probe and its virtual COM port
+  local arch=packaging/arch
+  install -Dm755 $arch/usbip-attach "$pkgdir/usr/lib/its-emu/usbip-attach"
+  install -Dm644 $arch/its-emu.policy "$pkgdir/usr/share/polkit-1/actions/its-emu.usbip-attach.policy"
+  install -Dm644 $arch/vhci-hcd.conf "$pkgdir/usr/lib/modules-load.d/its-emu.conf"
+  install -Dm644 $arch/70-its-emu-stlink.rules -t "$pkgdir/usr/lib/udev/rules.d/"
+
+  # VS Code extension: built in to Code - OSS (Arch's code package), so
+  # pacman owns it and removes it with the package; the .vsix for other
+  # VS Code builds
+  local ext=tools/vscode-nodebug
+  install -Dm644 $ext/package.json $ext/extension.js $ext/README.md \
+    -t "$pkgdir/usr/lib/code/extensions/its-emu.gdbtarget-nodebug/"
+  install -Dm644 $ext/gdbtarget-nodebug.vsix -t "$pkgdir/usr/share/$pkgname/"
 }
