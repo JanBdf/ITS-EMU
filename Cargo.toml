@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/emu-core", "apps/its-emu", "crates/stm32f429", "apps/its-emu-gui"]
+members = ["crates/emu-core", "apps/its-emu", "crates/stm32f429", "apps/its-emu-gui", "crates/usbip", "crates/stlink"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,8 @@ license = "MIT"
 emu-core = { path = "crates/emu-core" }
 stm32f429 = { path = "crates/stm32f429" }
 itsboard = { path = "crates/itsboard" }
+usbip = { path = "crates/usbip" }
+stlink = { path = "crates/stlink" }
 # only the Arm guest (the default builds all ten architectures)
 unicorn-engine = { version = "2.1.5", default-features = false, features = ["arch_arm"] }
 object = { version = "0.40", default-features = false, features = ["read_core", "elf", "std"] }

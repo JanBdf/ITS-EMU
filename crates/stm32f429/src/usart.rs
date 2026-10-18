@@ -24,6 +24,8 @@ pub struct SerialPort {
     pub tx: Vec<u8>,
     /// Bytes the host wants to send to the MCU.
     pub rx: VecDeque<u8>,
+    /// A second consumer of the output (the USB virtual COM port), if any.
+    pub mirror: Option<Vec<u8>>,
 }
 
 impl SerialPort {
@@ -33,6 +35,14 @@ impl SerialPort {
 
     pub fn take_output(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.tx)
+    }
+
+    /// A byte the MCU has sent.
+    pub fn push_output(&mut self, byte: u8) {
+        self.tx.push(byte);
+        if let Some(m) = &mut self.mirror {
+            m.push(byte);
+        }
     }
 }
 
@@ -188,7 +198,7 @@ impl Usart {
             if done > now {
                 break;
             }
-            self.port.borrow_mut().tx.push(byte as u8);
+            self.port.borrow_mut().push_output(byte as u8);
             self.shifting = self.tdr.take().map(|b| (b, done + self.frame_cycles(ctx)));
             if self.shifting.is_some() {
                 self.sr |= SR_TXE;

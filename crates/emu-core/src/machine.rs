@@ -11,6 +11,7 @@ use unicorn_engine::{
 
 use crate::bus::{Bus, BusMaster, DeviceCtx, Ram, ResetKind};
 use crate::clock::Clock;
+use crate::debug::{self, CoreDebug, DebugAction, DebugIds};
 use crate::elf::ElfImage;
 use crate::exception::{self, AccessError, CoreAccess, CoreReg, ExceptionError};
 use crate::nvic::{self, Nvic};
@@ -64,6 +65,28 @@ pub enum StopReason {
     /// A watched address ([`Machine::add_watchpoint`]) was accessed; `pc` is
     /// the instruction after the access.
     Watchpoint { pc: u32, addr: u32, kind: WatchKind },
+    /// The core is in debug state (DHCSR.S_HALT: halted by a debugger on
+    /// the debug port, an FPB/DWT match, BKPT or vector catch) or held in
+    /// reset; it does not run until the debugger resumes it.
+    Halted { pc: u32 },
+}
+
+/// The memory system refused a debugger access (AP transfer fault).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DebugFault {
+    pub addr: u32,
+}
+
+/// The MCU's flash interface as far as the core needs it: stores to flash
+/// (programming) and operations started through its registers (erasing).
+pub trait FlashController {
+    /// A store of `size` bytes at offset `offset` into flash, by the core or
+    /// a debugger. Returns true if the memory takes the value (programming
+    /// is enabled and the access is valid); otherwise it faults.
+    fn store(&mut self, now: u64, offset: u32, size: u32, value: u32) -> bool;
+    /// Carries out operations started by register writes (erase) on the
+    /// flash contents; returns the byte range that changed.
+    fn service(&mut self, now: u64, flash: &mut [u8]) -> Option<std::ops::Range<u32>>;
 }
 
 /// Accesses a watchpoint reacts to.
@@ -79,6 +102,8 @@ struct Watchpoint {
     len: u32,
     kind: WatchKind,
     hook: UcHookId,
+    /// Set up for a DWT comparator (not by GDB).
+    dwt: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -103,6 +128,19 @@ pub struct System {
     pub nvic: Nvic,
     pub scs: Scs,
     pub bus: Bus,
+    /// Halting debug, FPB, DWT comparators, CoreSight IDs.
+    pub debug: CoreDebug,
+    /// Programming and erasing flash, if the MCU model provides it.
+    flash_ctl: Option<Box<dyn FlashController>>,
+    /// Flash bytes changed by the flash controller during a run (offsets):
+    /// their translations are dropped before the next run.
+    flash_dirty: Option<std::ops::Range<u32>>,
+    /// FPB/DWT comparators changed (by software): re-apply before the next run.
+    points_dirty: bool,
+    /// The core locked up (DHCSR.S_LOCKUP).
+    locked_up: bool,
+    /// The reset pin is held low (by the debug probe).
+    reset_held: bool,
     /// Cycles of the blocks since the start of a chain of blocks that the
     /// translator split (see `wait_states`).
     mmio_shift: u64,
@@ -189,6 +227,36 @@ impl System {
         }
     }
 
+    /// Lets the flash controller carry out erase operations a register write started.
+    fn service_flash(&mut self) {
+        let Some(ctl) = self.flash_ctl.as_mut() else { return };
+        let now = self.clock.cycles();
+        let base = self.config.memory.flash_base;
+        let Some(flash) = self.ram.region_mut(base) else { return };
+        if let Some(r) = ctl.service(now, flash) {
+            self.mark_flash_dirty(r);
+        }
+    }
+
+    fn mark_flash_dirty(&mut self, r: std::ops::Range<u32>) {
+        self.flash_dirty = Some(match self.flash_dirty.take() {
+            Some(d) => d.start.min(r.start)..d.end.max(r.end),
+            None => r,
+        });
+        self.idle.dirty();
+        self.request_stop();
+    }
+
+    /// A store to flash by the core (`offset` into flash): asks the flash controller.
+    fn flash_store(&mut self, offset: u32, size: u32, value: u32) -> bool {
+        let now = self.clock.cycles();
+        let ok = self.flash_ctl.as_mut().is_some_and(|c| c.store(now, offset, size, value));
+        if ok {
+            self.mark_flash_dirty(offset..offset + size);
+        }
+        ok
+    }
+
     /// A peripheral (watchdog) asked for a reset: done before the next instruction.
     fn take_reset_request(&mut self) {
         if let Some(kind) = self.nvic.reset_request.take() {
@@ -269,6 +337,9 @@ pub struct Machine {
     /// Debugger breakpoints, implemented as Unicorn exits: execution stops
     /// before an instruction at one of these addresses.
     breakpoints: BTreeSet<u32>,
+    /// Breakpoints of the FPB and PC-match comparators of the DWT, with
+    /// the DFSR bit a hit sets. Also Unicorn exits.
+    hw_breakpoints: std::collections::BTreeMap<u32, u32>,
     watchpoints: Vec<Watchpoint>,
     /// Code hook on every instruction while watchpoints exist: stops right
     /// after the instruction that hit one.
@@ -660,6 +731,12 @@ impl Machine {
             nvic: Nvic::new(),
             scs: Scs::new(),
             bus,
+            debug: CoreDebug::new(DebugIds::default()),
+            flash_ctl: None,
+            flash_dirty: None,
+            points_dirty: false,
+            locked_up: false,
+            reset_held: false,
             mmio_shift: 0,
             master: None,
             ram: Ram::default(),
@@ -744,6 +821,7 @@ impl Machine {
                 let (mut ctx, bus) = sys.ctx();
                 bus.write(&mut ctx, addr, size as u32, value as u32);
                 sys.service_master();
+                sys.service_flash();
                 // A device may have raised an interrupt: let the run loop look at it.
                 if sys.nvic.any_pending() {
                     sys.request_stop();
@@ -761,6 +839,9 @@ impl Machine {
                 let at = if off == 0x1004 { Self::cyccnt_now(uc) } else { uc.get_data().clock.cycles() };
                 let sys = uc.get_data_mut();
                 let now = sys.clock.cycles();
+                if sys.debug.handles(off as u32) {
+                    return u64::from(sys.debug.read(off as u32, size as u32, sys.locked_up));
+                }
                 let until = sys.scs.read_stable_until(off as u32, now);
                 sys.idle.note_read(until, now);
                 u64::from(sys.scs.read(&sys.nvic, at, ipsr, off as u32, size as u32))
@@ -769,6 +850,14 @@ impl Machine {
                 let sys = uc.get_data_mut();
                 sys.idle.dirty();
                 let now = sys.clock.cycles();
+                if sys.debug.handles(off as u32) {
+                    // Software can only reprogram comparators (and DEMCR).
+                    if sys.debug.write(off as u32, size as u32, value as u32, false) == DebugAction::PointsChanged {
+                        sys.points_dirty = true;
+                        sys.request_stop();
+                    }
+                    return;
+                }
                 match sys.scs.write(&mut sys.nvic, now, off as u32, size as u32, value as u32) {
                     ScsAction::None => {}
                     ScsAction::CheckPending => sys.request_stop(),
@@ -919,7 +1008,26 @@ impl Machine {
         // on its slow path. RAM is fully mapped, so nothing there is invalid
         // except instruction fetches (`make_ram_executable`).
         for (begin, end) in gaps(&mem.ram) {
-            uc.add_mem_hook(invalid, begin, end, |uc, ty, addr, _size, _value| {
+            uc.add_mem_hook(invalid, begin, end, |uc, ty, addr, size, value| {
+                if ty == MemType::WRITE_PROT {
+                    // Flash programming: Unicorn completes the store if the
+                    // flash controller accepts it.
+                    let sys = uc.get_data_mut();
+                    let mem = &sys.config.memory;
+                    let a = addr as u32;
+                    let off = if a.wrapping_sub(mem.flash_base) < mem.flash_size {
+                        Some(a - mem.flash_base)
+                    } else if mem.flash_alias_at_zero && a < mem.flash_size {
+                        Some(a)
+                    } else {
+                        None
+                    };
+                    if let Some(off) = off
+                        && sys.flash_store(off, size as u32, value as u32)
+                    {
+                        return true;
+                    }
+                }
                 let is_write = matches!(ty, MemType::WRITE_UNMAPPED | MemType::WRITE_PROT);
                 let is_fetch = matches!(ty, MemType::FETCH_UNMAPPED | MemType::FETCH_PROT);
                 uc.get_data_mut().last_invalid = Some((addr as u32, is_write, is_fetch));
@@ -932,6 +1040,7 @@ impl Machine {
             flash,
             _ram: ram,
             breakpoints: BTreeSet::new(),
+            hw_breakpoints: std::collections::BTreeMap::new(),
             watchpoints: Vec::new(),
             watch_stopper: None,
             div_hooks: Vec::new(),
@@ -994,28 +1103,319 @@ impl Machine {
             self.flash_writes += 1;
             if alias {
                 // The same code may also have been translated at its alias at 0.
-                let _ = self.uc.ctl_remove_cache(u64::from(off as u32), off as u64 + data.len() as u64);
+                self.invalidate_code(off as u32, data.len() as u32);
             }
             true
         } else {
             self.uc.mem_write(u64::from(addr), data).is_ok()
         };
         if ok {
-            // Drop stale translations of modified code.
-            let end = u64::from(addr) + data.len() as u64;
-            let _ = self.uc.ctl_remove_cache(u64::from(addr), end);
-            self.uc.get_data_mut().block_insns.clear();
-            self.uc.get_data_mut().cyccnt_sites = None;
-            let (stale, keep) = std::mem::take(&mut self.div_hooks)
-                .into_iter()
-                .partition(|&(a, _)| u64::from(a) + 4 > u64::from(addr) && u64::from(a) < end);
-            self.div_hooks = keep;
-            for (a, id) in stale {
-                let _ = self.uc.remove_hook(id);
-                self.uc.get_data_mut().hooked_divs.remove(&a);
-            }
+            self.invalidate_code(addr, data.len() as u32);
         }
         ok
+    }
+
+    /// Drops stale translations (and timing data) of code at `addr..addr + len`.
+    fn invalidate_code(&mut self, addr: u32, len: u32) {
+        let end = u64::from(addr) + u64::from(len);
+        let _ = self.uc.ctl_remove_cache(u64::from(addr), end);
+        self.uc.get_data_mut().block_insns.clear();
+        self.uc.get_data_mut().cyccnt_sites = None;
+        let (stale, keep) = std::mem::take(&mut self.div_hooks)
+            .into_iter()
+            .partition(|&(a, _)| u64::from(a) + 4 > u64::from(addr) && u64::from(a) < end);
+        self.div_hooks = keep;
+        for (a, id) in stale {
+            let _ = self.uc.remove_hook(id);
+            self.uc.get_data_mut().hooked_divs.remove(&a);
+        }
+    }
+
+    /// Flash bytes changed by the flash controller: drop their translations
+    /// (at the flash address and its alias).
+    fn take_flash_dirty(&mut self) {
+        let Some(r) = self.uc.get_data_mut().flash_dirty.take() else { return };
+        let mem = &self.uc.get_data().config.memory;
+        let (fb, alias) = (mem.flash_base, mem.flash_alias_at_zero);
+        self.flash_writes += 1;
+        self.invalidate_code(fb + r.start, r.end - r.start);
+        if alias {
+            self.invalidate_code(r.start, r.end - r.start);
+        }
+    }
+
+    /// Identification of the vendor parts of the debug system (ROM table, DBGMCU).
+    pub fn set_debug_ids(&mut self, ids: DebugIds) {
+        self.uc.get_data_mut().debug = CoreDebug::new(ids);
+    }
+
+    /// Installs the model of the MCU's flash interface (programming by the
+    /// core or a debugger, erase operations).
+    pub fn set_flash_controller(&mut self, ctl: Box<dyn FlashController>) {
+        self.uc.get_data_mut().flash_ctl = Some(ctl);
+    }
+
+    /// The core is in debug state or held in reset: [`run`](Self::run)
+    /// returns [`StopReason::Halted`] right away.
+    pub fn is_halted(&self) -> bool {
+        let sys = self.uc.get_data();
+        sys.debug.halted() || sys.reset_held
+    }
+
+    /// The core locked up (until a reset or a debugger halts it).
+    pub fn is_locked_up(&self) -> bool {
+        self.uc.get_data().locked_up
+    }
+
+    /// A debugger halts the core (as if it wrote DHCSR.C_HALT).
+    pub fn debug_halt(&mut self) {
+        let _ = self.debug_write(PPB_BASE + debug::DHCSR, 4, 0xA05F_0003);
+    }
+
+    /// Drives the reset pin (NRST). Releasing it resets the MCU; the core
+    /// does not run while it is held low.
+    pub fn set_reset_pin(&mut self, low: bool) {
+        let sys = self.uc.get_data_mut();
+        let was = std::mem::replace(&mut sys.reset_held, low);
+        if was && !low {
+            self.reset_with(ResetKind::Pin);
+        } else if low {
+            // Peripherals are in reset while the pin is low.
+            self.reset_with(ResetKind::Pin);
+        }
+    }
+
+    /// Reads `size` (1, 2, 4) bytes at `addr` as a debugger does through the
+    /// AHB-AP, including the debug and peripheral registers.
+    pub fn debug_read(&mut self, addr: u32, size: u32) -> Result<u32, DebugFault> {
+        let fault = DebugFault { addr };
+        if !addr.is_multiple_of(size) {
+            return Err(fault);
+        }
+        let sys = self.uc.get_data_mut();
+        let mem = &sys.config.memory;
+        if addr.wrapping_sub(PPB_BASE) < PPB_SIZE {
+            let off = addr - PPB_BASE;
+            if sys.debug.handles(off) {
+                return Ok(sys.debug.read(off, size, sys.locked_up));
+            }
+            let ipsr = self.uc.reg_read(RegisterARM::IPSR).unwrap_or(0) as u32;
+            let sys = self.uc.get_data_mut();
+            let now = sys.clock.cycles();
+            return Ok(sys.scs.read(&sys.nvic, now, ipsr, off, size));
+        }
+        if addr.wrapping_sub(mem.periph_base) < mem.periph_size {
+            let (mut ctx, bus) = sys.ctx();
+            let v = bus.read(&mut ctx, addr, size);
+            sys.service_master();
+            return Ok(v);
+        }
+        let mut b = [0u8; 4];
+        self.uc.mem_read(u64::from(addr), &mut b[..size as usize]).map_err(|_| fault)?;
+        Ok(u32::from_le_bytes(b))
+    }
+
+    /// Writes `size` (1, 2, 4) bytes at `addr` as a debugger does through the
+    /// AHB-AP. Flash is written only through the flash controller (as on
+    /// the chip); halting, register transfers and resets happen at once.
+    pub fn debug_write(&mut self, addr: u32, size: u32, value: u32) -> Result<(), DebugFault> {
+        let fault = DebugFault { addr };
+        if !addr.is_multiple_of(size) {
+            return Err(fault);
+        }
+        let sys = self.uc.get_data_mut();
+        sys.idle.dirty();
+        let mem = sys.config.memory.clone();
+        if addr.wrapping_sub(PPB_BASE) < PPB_SIZE {
+            let off = addr - PPB_BASE;
+            if sys.debug.handles(off) {
+                let action = sys.debug.write(off, size, value, true);
+                // Entering debug state ends a lockup.
+                if sys.debug.halted() {
+                    sys.locked_up = false;
+                }
+                self.debug_action(action);
+                return Ok(());
+            }
+            let now = sys.clock.cycles();
+            if sys.scs.write(&mut sys.nvic, now, off, size, value) == ScsAction::SystemReset {
+                self.reset_with(ResetKind::Software);
+            }
+            return Ok(());
+        }
+        if addr.wrapping_sub(mem.periph_base) < mem.periph_size {
+            let (mut ctx, bus) = sys.ctx();
+            bus.write(&mut ctx, addr, size, value);
+            sys.service_master();
+            sys.service_flash();
+            sys.take_reset_request();
+            if let Some(kind) = sys.reset_requested.take() {
+                self.reset_with(kind);
+            }
+            self.take_flash_dirty();
+            return Ok(());
+        }
+        let flash_off = if addr.wrapping_sub(mem.flash_base) < mem.flash_size {
+            Some(addr - mem.flash_base)
+        } else if mem.flash_alias_at_zero && addr < mem.flash_size {
+            Some(addr)
+        } else {
+            None
+        };
+        if let Some(off) = flash_off {
+            if !sys.flash_store(off, size, value) {
+                return Err(fault);
+            }
+            let bytes = value.to_le_bytes();
+            self.flash[off as usize..(off + size) as usize].copy_from_slice(&bytes[..size as usize]);
+            self.take_flash_dirty();
+            return Ok(());
+        }
+        let bytes = value.to_le_bytes();
+        self.uc.mem_write(u64::from(addr), &bytes[..size as usize]).map_err(|_| fault)?;
+        self.invalidate_code(addr, size);
+        Ok(())
+    }
+
+    /// Reads a block with accesses of `size` bytes (a debugger's memory
+    /// read); stops at the first fault.
+    pub fn debug_read_block(&mut self, addr: u32, buf: &mut [u8], size: u32) -> Result<(), DebugFault> {
+        if self.plain_memory(addr, buf.len() as u32) {
+            return self.uc.mem_read(u64::from(addr), buf).map_err(|_| DebugFault { addr });
+        }
+        for (i, chunk) in buf.chunks_mut(size as usize).enumerate() {
+            let a = addr.wrapping_add((i as u32) * size);
+            let n = chunk.len() as u32;
+            let v = self.debug_read(a, n.min(size))?;
+            chunk.copy_from_slice(&v.to_le_bytes()[..chunk.len()]);
+        }
+        Ok(())
+    }
+
+    /// Writes a block with accesses of `size` bytes (a debugger's memory
+    /// write); stops at the first fault.
+    pub fn debug_write_block(&mut self, addr: u32, data: &[u8], size: u32) -> Result<(), DebugFault> {
+        if self.plain_memory(addr, data.len() as u32) && self.ram_contains(addr, data.len() as u32) {
+            self.uc.mem_write(u64::from(addr), data).map_err(|_| DebugFault { addr })?;
+            self.invalidate_code(addr, data.len() as u32);
+            self.uc.get_data_mut().idle.dirty();
+            return Ok(());
+        }
+        for (i, chunk) in data.chunks(size as usize).enumerate() {
+            let a = addr.wrapping_add((i as u32) * size);
+            let mut b = [0u8; 4];
+            b[..chunk.len()].copy_from_slice(chunk);
+            self.debug_write(a, chunk.len() as u32, u32::from_le_bytes(b))?;
+        }
+        Ok(())
+    }
+
+    /// `addr..addr + len` lies in RAM or flash (no side effects on access).
+    fn plain_memory(&self, addr: u32, len: u32) -> bool {
+        let mem = &self.uc.get_data().config.memory;
+        let inside = |base: u32, size: u32| {
+            addr.wrapping_sub(base) < size && u64::from(addr - base) + u64::from(len) <= u64::from(size)
+        };
+        self.ram_contains(addr, len) || inside(mem.flash_base, mem.flash_size)
+    }
+
+    fn ram_contains(&self, addr: u32, len: u32) -> bool {
+        let mem = &self.uc.get_data().config.memory;
+        mem.ram.iter().any(|&(base, size)| {
+            addr.wrapping_sub(base) < size && u64::from(addr - base) + u64::from(len) <= u64::from(size)
+        })
+    }
+
+    /// Carries out what a debugger's write to a debug register requested.
+    fn debug_action(&mut self, action: DebugAction) {
+        match action {
+            DebugAction::None => {}
+            DebugAction::PointsChanged => self.update_debug_points(),
+            DebugAction::Register { sel, write } => self.transfer_core_register(sel, write),
+            DebugAction::Resume { step } => {
+                self.update_debug_points();
+                if step {
+                    // C_MASKINTS or not: `step` does not take pending interrupts.
+                    match self.step() {
+                        StopReason::Halted { .. } => {}
+                        _ => self.uc.get_data_mut().debug.halt(debug::DFSR_HALTED),
+                    }
+                }
+            }
+        }
+    }
+
+    /// DCRSR register transfer between core register `sel` and DCRDR.
+    fn transfer_core_register(&mut self, sel: u32, write: bool) {
+        let reg = match sel {
+            0..=12 => Some(CoreReg::R(sel as u8)),
+            13 => Some(CoreReg::Sp),
+            14 => Some(CoreReg::Lr),
+            15 => Some(CoreReg::Pc),
+            16 => Some(CoreReg::Xpsr),
+            17 => Some(CoreReg::Msp),
+            18 => Some(CoreReg::Psp),
+            33 => Some(CoreReg::Fpscr),
+            64..=95 => Some(CoreReg::S((sel - 64) as u8)),
+            _ => None,
+        };
+        let dcrdr = self.uc.get_data().debug.dcrdr();
+        match (reg, write) {
+            (Some(CoreReg::Pc), true) => self.set_reg(CoreReg::Pc, dcrdr | 1),
+            (Some(r), true) => self.set_reg(r, dcrdr),
+            (Some(r), false) => {
+                let mut v = self.reg(r);
+                if r == CoreReg::Pc {
+                    v &= !1;
+                }
+                self.uc.get_data_mut().debug.set_dcrdr(v);
+            }
+            // CONTROL, FAULTMASK, BASEPRI, PRIMASK packed into one word
+            (None, false) if sel == 20 => {
+                let v = (self.reg(CoreReg::Control) & 0xFF) << 24
+                    | (self.reg(CoreReg::Faultmask) & 1) << 16
+                    | (self.reg(CoreReg::Basepri) & 0xFF) << 8
+                    | (self.reg(CoreReg::Primask) & 1);
+                self.uc.get_data_mut().debug.set_dcrdr(v);
+            }
+            (None, true) if sel == 20 => {
+                self.set_reg(CoreReg::Control, (dcrdr >> 24) & 0xFF);
+                self.set_reg(CoreReg::Faultmask, (dcrdr >> 16) & 1);
+                self.set_reg(CoreReg::Basepri, (dcrdr >> 8) & 0xFF);
+                self.set_reg(CoreReg::Primask, dcrdr & 1);
+            }
+            (None, false) => self.uc.get_data_mut().debug.set_dcrdr(0),
+            (None, true) => {}
+        }
+    }
+
+    /// Applies the FPB and DWT comparators to the breakpoints and watchpoints.
+    fn update_debug_points(&mut self) {
+        let sys = self.uc.get_data_mut();
+        sys.points_dirty = false;
+        let mut bps: std::collections::BTreeMap<u32, u32> =
+            sys.debug.breakpoints().into_iter().map(|a| (a, debug::DFSR_BKPT)).collect();
+        let (watch, pcs) = sys.debug.dwt_points();
+        for a in pcs {
+            bps.entry(a & !1).or_insert(debug::DFSR_DWTTRAP);
+        }
+        if bps != self.hw_breakpoints {
+            let changed: Vec<u32> = bps.keys().chain(self.hw_breakpoints.keys()).copied().collect();
+            self.hw_breakpoints = bps;
+            for a in changed {
+                self.update_exits(a);
+            }
+        }
+        let current: Vec<(u32, u32, WatchKind)> =
+            self.watchpoints.iter().filter(|w| w.dwt).map(|w| (w.addr, w.len, w.kind)).collect();
+        if current != watch {
+            for (addr, len, kind) in current {
+                self.remove_watch(addr, len, kind, true);
+            }
+            for (addr, len, kind) in watch {
+                self.add_watch(addr, len, kind, true);
+            }
+        }
     }
 
     /// Time of a DWT_CYCCNT read. The clock counts a block's cycles at its
@@ -1110,7 +1510,10 @@ impl Machine {
         sys.watch_hit = None;
         sys.reset_requested = None;
         sys.last_invalid = None;
+        sys.locked_up = false;
         sys.idle = IdleDetector::default();
+        // Halts at the reset vector with reset vector catch.
+        sys.debug.on_reset();
 
         let msp = self.read_u32(0).unwrap_or(0);
         let reset_vector = self.read_u32(4).unwrap_or(0);
@@ -1145,6 +1548,10 @@ impl Machine {
 
     /// Stops execution after an access of `kind` to `addr..addr + len`.
     pub fn add_watchpoint(&mut self, addr: u32, len: u32, kind: WatchKind) -> bool {
+        self.add_watch(addr, len, kind, false)
+    }
+
+    fn add_watch(&mut self, addr: u32, len: u32, kind: WatchKind, dwt: bool) -> bool {
         let hook_type = match kind {
             WatchKind::Write => HookType::MEM_WRITE,
             WatchKind::Read => HookType::MEM_READ,
@@ -1159,7 +1566,7 @@ impl Machine {
             true
         });
         let Ok(hook) = hook else { return false };
-        self.watchpoints.push(Watchpoint { addr, len, kind, hook });
+        self.watchpoints.push(Watchpoint { addr, len, kind, hook, dwt });
         if self.watch_stopper.is_none() {
             // Unicorn checks for a stop request after each code hook, i.e.
             // before the next instruction (a block would otherwise run to its end).
@@ -1186,7 +1593,13 @@ impl Machine {
     }
 
     pub fn remove_watchpoint(&mut self, addr: u32, len: u32, kind: WatchKind) -> bool {
-        let Some(i) = self.watchpoints.iter().position(|w| w.addr == addr && w.len == len && w.kind == kind) else {
+        self.remove_watch(addr, len, kind, false)
+    }
+
+    fn remove_watch(&mut self, addr: u32, len: u32, kind: WatchKind, dwt: bool) -> bool {
+        let Some(i) =
+            self.watchpoints.iter().position(|w| w.addr == addr && w.len == len && w.kind == kind && w.dwt == dwt)
+        else {
             return false;
         };
         let w = self.watchpoints.remove(i);
@@ -1196,12 +1609,14 @@ impl Machine {
         true
     }
 
-    /// Removes all breakpoints and watchpoints.
+    /// Removes all breakpoints and watchpoints of the GDB client.
     pub fn clear_debug_points(&mut self) {
         for addr in self.breakpoints().collect::<Vec<_>>() {
             self.remove_breakpoint(addr);
         }
-        for w in std::mem::take(&mut self.watchpoints) {
+        let (gdb, dwt) = std::mem::take(&mut self.watchpoints).into_iter().partition(|w| !w.dwt);
+        self.watchpoints = dwt;
+        for w in gdb {
             let _ = self.uc.remove_hook(w.hook);
         }
         self.remove_watch_stopper_if_unused();
@@ -1210,11 +1625,24 @@ impl Machine {
 
     fn take_watch_hit(&mut self) -> Option<StopReason> {
         let (addr, kind) = self.uc.get_data_mut().watch_hit.take()?;
-        Some(StopReason::Watchpoint { pc: self.pc(), addr, kind })
+        let pc = self.pc();
+        let by_gdb = self.watchpoints.iter().any(|w| !w.dwt && w.addr == addr && w.kind == kind);
+        let sys = self.uc.get_data_mut();
+        if !by_gdb && sys.debug.dwt_matched(addr, kind) {
+            sys.debug.halt(debug::DFSR_DWTTRAP);
+            return Some(StopReason::Halted { pc });
+        }
+        Some(StopReason::Watchpoint { pc, addr, kind })
+    }
+
+    /// Execution stops before this address (a GDB or FPB/DWT breakpoint).
+    fn is_exit(&self, addr: u32) -> bool {
+        self.breakpoints.contains(&addr) || self.hw_breakpoints.contains_key(&addr)
     }
 
     fn update_exits(&mut self, changed: u32) {
-        let exits: Vec<u64> = self.breakpoints.iter().map(|&a| u64::from(a)).collect();
+        let exits: Vec<u64> =
+            self.breakpoints.iter().chain(self.hw_breakpoints.keys()).map(|&a| u64::from(a)).collect();
         let _ = self.uc.ctl_set_exits(&exits);
         // Exits are checked when code is translated: retranslate around `changed`.
         let _ = self.uc.ctl_remove_cache(u64::from(changed), u64::from(changed) + 4);
@@ -1228,15 +1656,22 @@ impl Machine {
         if let Some(kind) = self.uc.get_data().reset_requested {
             self.reset_with(kind);
         }
+        self.take_flash_dirty();
         let pc = self.pc();
         let at_breakpoint = self.breakpoints.remove(&pc);
-        if at_breakpoint {
+        let at_hw_breakpoint = self.hw_breakpoints.remove(&pc);
+        if at_breakpoint || at_hw_breakpoint.is_some() {
             self.update_exits(pc);
         }
         let sys = self.uc.get_data_mut();
+        sys.debug.retired();
         sys.stepping = true;
         sys.slice_end = u64::MAX;
         sys.slice_limit = u64::MAX;
+        // Unicorn counts instructions with a code hook that only blocks
+        // translated after it was added call: cached code (a polling loop)
+        // would run on forever.
+        let _ = self.uc.ctl_flush_tb();
         let mut result = self.uc.emu_start(u64::from(pc | 1), u64::MAX, 0, 1);
         if let Err(err) = result
             && self.fetch_from_new_ram_code(err)
@@ -1250,9 +1685,14 @@ impl Machine {
         if at_breakpoint {
             self.add_breakpoint(pc);
         }
+        if let Some(dfsr) = at_hw_breakpoint {
+            self.hw_breakpoints.insert(pc, dfsr);
+            self.update_exits(pc);
+        }
         if let Err(err) = result {
             self.on_emu_error(err);
         }
+        self.take_flash_dirty();
         let stop = self.uc.get_data_mut().stop.take();
         stop.or_else(|| self.take_watch_hit()).unwrap_or(StopReason::Step)
     }
@@ -1261,11 +1701,15 @@ impl Machine {
     /// A breakpoint at the current PC is stepped over (resuming from it).
     pub fn run(&mut self, budget: u64) -> StopReason {
         let end = self.clock().cycles().saturating_add(budget);
-        let resume_pc = self.breakpoints.contains(&self.pc()).then(|| self.pc());
+        let resume_pc = self.is_exit(self.pc()).then(|| self.pc());
         let mut first = true;
         loop {
             self.sync_devices();
             self.install_div_hooks();
+            self.take_flash_dirty();
+            if self.uc.get_data().points_dirty {
+                self.update_debug_points();
+            }
             if let Some(kind) = self.uc.get_data().reset_requested {
                 self.reset_with(kind);
             }
@@ -1274,6 +1718,9 @@ impl Machine {
             }
             if let Some(stop) = self.take_watch_hit() {
                 return stop;
+            }
+            if self.is_halted() {
+                return StopReason::Halted { pc: self.pc() };
             }
             self.take_pending_exception();
             if let Some(stop) = self.uc.get_data_mut().stop.take() {
@@ -1302,10 +1749,17 @@ impl Machine {
                 }
             }
             let result = self.uc.emu_start(u64::from(pc | 1), u64::MAX, 0, 0);
+            self.uc.get_data_mut().debug.retired();
+            let at = self.pc();
             if let Err(err) = result {
                 self.on_emu_error(err);
-            } else if self.breakpoints.contains(&self.pc()) && self.uc.get_data().stop.is_none() {
-                return StopReason::DebugBreakpoint { pc: self.pc() };
+            } else if self.breakpoints.contains(&at) && self.uc.get_data().stop.is_none() {
+                return StopReason::DebugBreakpoint { pc: at };
+            } else if let Some(&dfsr) = self.hw_breakpoints.get(&at)
+                && self.uc.get_data().stop.is_none()
+            {
+                self.uc.get_data_mut().debug.halt(dfsr);
+                return StopReason::Halted { pc: at };
             } else if self.clock().cycles() < slice_limit && !self.stopped_on_purpose() {
                 self.on_idle_return();
             }
@@ -1382,6 +1836,7 @@ impl Machine {
         let pc = uc.reg_read(RegisterARM::PC).unwrap_or(0) as u32;
         log::error!("core lockup at {pc:#010x}: {reason}");
         let sys = uc.get_data_mut();
+        sys.locked_up = true;
         sys.stop = Some(StopReason::Lockup { pc, reason });
         sys.request_stop();
     }
@@ -1398,6 +1853,14 @@ impl Machine {
                 log::debug!("fault: exception {exc} -> {target} at {return_addr:#010x}");
                 uc.get_data_mut().nvic.set_pending(target);
                 Self::enter_exception(uc, target, return_addr);
+                // Vector catch: halt before the handler's first instruction.
+                if uc.get_data().debug.catches_exception(target) {
+                    let pc = uc.reg_read(RegisterARM::PC).unwrap_or(0) as u32;
+                    let sys = uc.get_data_mut();
+                    sys.debug.halt(debug::DFSR_VCATCH);
+                    sys.stop = Some(StopReason::Halted { pc });
+                    sys.request_stop();
+                }
             }
             None => Self::lockup(uc, format!("fault (exception {exc}) while in HardFault/NMI or with FAULTMASK set")),
         }
@@ -1445,7 +1908,13 @@ impl Machine {
             }
             EXCP_BKPT => {
                 let sys = uc.get_data_mut();
-                sys.stop = Some(StopReason::Breakpoint { pc });
+                if sys.debug.enabled() {
+                    // Halting debug: the core enters debug state at the BKPT.
+                    sys.debug.halt(debug::DFSR_BKPT);
+                    sys.stop = Some(StopReason::Halted { pc });
+                } else {
+                    sys.stop = Some(StopReason::Breakpoint { pc });
+                }
                 sys.request_stop();
             }
             EXCP_UDEF | EXCP_NOCP | EXCP_INVSTATE | EXCP_UNALIGNED => {

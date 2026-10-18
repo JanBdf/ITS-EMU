@@ -129,7 +129,7 @@ fn stop_reason(reason: &StopReason) -> Option<SingleThreadStopReason<u32>> {
         StopReason::Budget => return None,
         StopReason::Step => SingleThreadStopReason::DoneStep,
         StopReason::DebugBreakpoint { .. } => SingleThreadStopReason::SwBreak(()),
-        StopReason::Breakpoint { .. } => SingleThreadStopReason::Signal(Signal::SIGTRAP),
+        StopReason::Breakpoint { .. } | StopReason::Halted { .. } => SingleThreadStopReason::Signal(Signal::SIGTRAP),
         StopReason::Lockup { .. } => SingleThreadStopReason::Signal(Signal::SIGSEGV),
         &StopReason::Watchpoint { addr, kind, .. } => {
             SingleThreadStopReason::Watch { tid: (), kind: gdb_watch_kind(kind), addr }
