@@ -3,6 +3,7 @@
 //! sends [`Command`]s and reads the latest [`Snapshot`].
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -37,7 +38,43 @@ pub enum Command {
     /// Show the frame buffer's ideal colours instead of the measured look of
     /// the real panel (tone response, grey black level).
     IdealColors(bool),
+    /// Plug the board's ST-LINK in (USB/IP) or unplug it.
+    SetUsb(bool),
+    /// A USB request arrived.
+    Wake,
     Quit,
+}
+
+/// The board's ST-LINK on USB/IP.
+#[derive(Debug, Clone)]
+pub struct UsbConfig {
+    /// USB/IP server address.
+    pub addr: String,
+    /// Plug it in at start.
+    pub enabled: bool,
+    /// Attach it to this computer (`usbip attach`, through the packaged
+    /// polkit helper or sudo) whenever it is enabled.
+    pub attach: bool,
+}
+
+/// State of the ST-LINK as the UI shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UsbStatus {
+    Off,
+    /// The USB/IP server could not start.
+    Unavailable(String),
+    /// Exported, but no host has attached it (yet): the command that does,
+    /// and why the automatic attach failed, if it did.
+    Unplugged {
+        addr: String,
+        cmd: String,
+        error: Option<String>,
+    },
+    /// Attached; `debugging`: a debugger has it in debug mode.
+    PluggedIn {
+        addr: String,
+        debugging: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +112,7 @@ pub struct Snapshot {
     pub gdb: Result<String, String>,
     /// A debugger is connected.
     pub gdb_attached: bool,
+    pub usb: UsbStatus,
     /// Output voltage of DAC1 while it is enabled.
     pub dac1: Option<f32>,
 }
@@ -98,6 +136,7 @@ impl Default for Snapshot {
             serial: Vec::new(),
             gdb: Err("off".into()),
             gdb_attached: false,
+            usb: UsbStatus::Off,
             dac1: None,
         }
     }
@@ -127,17 +166,30 @@ impl Drop for EmuHandle {
 }
 
 /// Starts the emulator thread. `repaint` is called whenever the snapshot
-/// changed. With `gdb_addr`, a GDB server listens there.
-pub fn spawn(repaint: impl Fn() + Send + 'static, gdb_addr: Option<String>) -> EmuHandle {
+/// changed. With `gdb_addr`, a GDB server listens there (except while
+/// pyOCD uses the ST-LINK: its own GDB server takes the port).
+pub fn spawn(repaint: impl Fn() + Send + 'static, gdb_addr: Option<String>, usb: UsbConfig) -> EmuHandle {
     let (tx, rx) = channel();
     let snapshot = SharedSnapshot::default();
     let shared = snapshot.clone();
+    // USB requests wake the thread while it waits for commands (one pending wake is enough).
+    let pending = Arc::new(AtomicBool::new(false));
+    let wake_tx = tx.clone();
+    let wake_pending = pending.clone();
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        if !wake_pending.swap(true, Ordering::AcqRel) {
+            let _ = wake_tx.send(Command::Wake);
+        }
+    });
     let thread = std::thread::Builder::new()
         .name("emulator".into())
-        .spawn(move || Worker::new(rx, shared, Box::new(repaint), gdb_addr).run())
+        .spawn(move || Worker::new(rx, shared, Box::new(repaint), gdb_addr, usb, wake, pending).run())
         .expect("spawn emulator thread");
     EmuHandle { commands: tx, snapshot, thread: Some(thread) }
 }
+
+/// GDB server status while pyOCD (its own GDB server) uses the ST-LINK.
+const PORT_LEFT_TO_PYOCD: &str = "port left to pyOCD (ST-LINK in use)";
 
 /// Virtual time executed between two looks at the command queue / clock.
 const SLICE: Duration = Duration::from_millis(4);
@@ -170,8 +222,28 @@ struct Worker {
     analog: [Option<f32>; 8],
     gdb: Option<GdbServer>,
     gdb_status: Result<String, String>,
+    /// Address the GDB server should listen on, if any.
+    gdb_addr: Option<String>,
+    /// Next attempt to (re)open the GDB server's port.
+    gdb_retry_at: Instant,
     /// How the debugger wants the core to run (`Free` without debugger).
     execution: Execution,
+    usb: Option<stlink::UsbProbe>,
+    usb_config: UsbConfig,
+    usb_server_error: Option<String>,
+    /// Outcome of the running `usbip attach`, and the last failure.
+    attach_result: Option<Receiver<Result<(), String>>>,
+    attach_error: Option<String>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+    /// Cleared when a [`Command::Wake`] is taken.
+    wake_pending: Arc<AtomicBool>,
+    /// The core was halted by the debug probe at the last look.
+    core_halted: bool,
+    /// Flash write count known to the worker: the probe's flash algorithm
+    /// programs while the machine runs.
+    seen_flash_writes: u64,
+    /// The probe has held the core halted since this instant (time passes for the peripherals).
+    halted_since: Option<Instant>,
 }
 
 impl Worker {
@@ -180,23 +252,12 @@ impl Worker {
         snapshot: SharedSnapshot,
         repaint: Box<dyn Fn() + Send>,
         gdb_addr: Option<String>,
+        usb_config: UsbConfig,
+        wake: Arc<dyn Fn() + Send + Sync>,
+        wake_pending: Arc<AtomicBool>,
     ) -> Self {
         let now = Instant::now();
-        let (gdb, gdb_status) = match gdb_addr {
-            None => (None, Err("off".to_owned())),
-            Some(addr) => match GdbServer::bind(addr.as_str()) {
-                Ok(server) => {
-                    let addr = server.local_addr().map_or(addr, |a| a.to_string());
-                    log::info!("GDB server on {addr}");
-                    (Some(server), Ok(addr))
-                }
-                Err(e) => {
-                    log::warn!("cannot start GDB server on {addr}: {e}");
-                    (None, Err(format!("{addr}: {e}")))
-                }
-            },
-        };
-        Self {
+        let mut w = Self {
             commands,
             snapshot,
             repaint,
@@ -216,9 +277,126 @@ impl Worker {
             buttons: [false; 8],
             ints: [None; 6],
             analog: [None; 8],
-            gdb,
-            gdb_status,
+            gdb: None,
+            gdb_status: Err("off".to_owned()),
+            gdb_addr,
+            gdb_retry_at: now,
             execution: Execution::Free,
+            usb: None,
+            usb_config: usb_config.clone(),
+            usb_server_error: None,
+            attach_result: None,
+            attach_error: None,
+            wake,
+            wake_pending,
+            core_halted: false,
+            seen_flash_writes: 0,
+            halted_since: None,
+        };
+        w.manage_gdb();
+        if usb_config.enabled {
+            w.set_usb(true);
+        }
+        w.adopt_sim();
+        w
+    }
+
+    /// Plugs the ST-LINK in (starts the USB/IP server, attaches it) or unplugs it.
+    fn set_usb(&mut self, on: bool) {
+        if !on {
+            if self.usb.take().is_some() {
+                log::info!("ST-LINK unplugged");
+            }
+            self.attach_result = None;
+            self.attach_error = None;
+            self.usb_server_error = None;
+            self.core_halted = false;
+            if let Some(sim) = &mut self.sim {
+                sim.machine.system_mut().bkpt_stops = true;
+                sim.board.mcu().usart3.borrow_mut().mirror = None;
+            }
+            return;
+        }
+        if self.usb.is_some() {
+            return;
+        }
+        match stlink::UsbProbe::start(&self.usb_config.addr, None, self.wake.clone()) {
+            Ok(probe) => {
+                log::info!("ST-LINK on USB/IP {}; attach with {}", probe.local_addr(), probe.attach_command());
+                if self.usb_config.attach {
+                    self.attach_result = Some(stlink::spawn_attach(probe.local_addr()));
+                }
+                self.usb = Some(probe);
+                self.usb_server_error = None;
+                self.adopt_sim();
+            }
+            Err(e) => {
+                log::warn!("cannot start the USB/IP server on {}: {e}", self.usb_config.addr);
+                self.usb_server_error = Some(format!("{}: {e}", self.usb_config.addr));
+            }
+        }
+    }
+
+    fn usb_status(&self) -> UsbStatus {
+        match &self.usb {
+            None => self.usb_server_error.clone().map_or(UsbStatus::Off, UsbStatus::Unavailable),
+            Some(p) if p.is_attached() => {
+                UsbStatus::PluggedIn { addr: p.local_addr().to_string(), debugging: p.debug_active() }
+            }
+            Some(p) => UsbStatus::Unplugged {
+                addr: p.local_addr().to_string(),
+                cmd: p.attach_command(),
+                error: self.attach_error.clone(),
+            },
+        }
+    }
+
+    /// Opens the GDB server's port, and leaves it to pyOCD while pyOCD has
+    /// the ST-LINK in debug mode (`pyocd gdbserver` listens on the same port).
+    fn manage_gdb(&mut self) {
+        let Some(addr) = self.gdb_addr.clone() else { return };
+        // pyOCD binds its GDB server right after connecting; one that was
+        // killed leaves the probe in debug mode, but then the port is free.
+        let probe_busy = self.usb.as_ref().is_some_and(|p| p.debug_busy(Duration::from_millis(1500)));
+        match &self.gdb {
+            Some(server) if probe_busy && !server.has_controller() => {
+                log::info!("GDB server closed: pyOCD uses the ST-LINK");
+                self.gdb = None;
+                self.gdb_status = Err(PORT_LEFT_TO_PYOCD.to_owned());
+                self.execution = Execution::Free;
+            }
+            None if !probe_busy && Instant::now() >= self.gdb_retry_at => match GdbServer::bind(addr.as_str()) {
+                Ok(server) => {
+                    let addr = server.local_addr().map_or(addr, |a| a.to_string());
+                    log::info!("GDB server on {addr}");
+                    self.gdb = Some(server);
+                    self.gdb_status = Ok(addr);
+                }
+                Err(e) => {
+                    // e.g. pyOCD's GDB server still holds the port: try again later
+                    let pyocd = self.usb.as_ref().is_some_and(stlink::UsbProbe::debug_active);
+                    let msg = if pyocd { PORT_LEFT_TO_PYOCD.to_owned() } else { format!("{addr}: {e}") };
+                    if !pyocd && self.gdb_status.as_ref().err() != Some(&msg) {
+                        log::warn!("cannot start GDB server on {msg}");
+                    }
+                    self.gdb_status = Err(msg);
+                    self.gdb_retry_at = Instant::now() + Duration::from_secs(2);
+                }
+            },
+            _ => {}
+        }
+    }
+
+    /// Connects a new board to the USB probe.
+    fn adopt_sim(&mut self) {
+        self.seen_flash_writes = self.sim.as_ref().map_or(0, |s| s.machine.flash_writes());
+        let Some(usb) = &mut self.usb else { return };
+        if let Some(sim) = &mut self.sim {
+            // The probe may leave the core on a BKPT: a HardFault on the chip.
+            sim.machine.system_mut().bkpt_stops = false;
+            usb.set_serial(Some(sim.board.mcu().usart3.clone()));
+        } else {
+            usb.set_serial(None);
         }
     }
 
@@ -236,6 +414,7 @@ impl Worker {
             // While not running, block on the command queue (shortly while a
             // debugger may send packets).
             let idle_wait = if self.gdb.is_some() { Duration::from_millis(5) } else { Duration::from_millis(50) };
+            // USB requests wake the thread (Command::Wake).
             let wait = if self.state == RunState::Running { Duration::ZERO } else { idle_wait };
             match self.commands.recv_timeout(wait) {
                 Ok(Command::Quit) | Err(RecvTimeoutError::Disconnected) => return,
@@ -251,6 +430,9 @@ impl Worker {
                 Err(RecvTimeoutError::Timeout) => {}
             }
             self.poll_gdb();
+            self.poll_usb();
+            self.manage_gdb();
+            self.advance_halted();
             if self.state == RunState::Running {
                 self.step();
             }
@@ -259,6 +441,11 @@ impl Worker {
     }
 
     fn handle(&mut self, cmd: Command) {
+        if matches!(cmd, Command::Wake) {
+            // handled by poll_usb below
+            self.wake_pending.store(false, Ordering::Release);
+            return;
+        }
         match cmd {
             Command::Load(path) => self.load(path),
             Command::Reset => {
@@ -310,7 +497,8 @@ impl Worker {
                 self.ideal_colors = on;
                 self.published_generation = u64::MAX;
             }
-            Command::Quit => {}
+            Command::SetUsb(on) => self.set_usb(on),
+            Command::Wake | Command::Quit => {}
         }
         self.publish(true);
     }
@@ -323,7 +511,11 @@ impl Worker {
         let changed = execution != self.execution;
         self.execution = execution;
         let loaded = sim.machine.take_gdb_loaded();
-        if loaded.is_some() || sim.machine.flash_writes() != flash_writes {
+        let gdb_wrote = sim.machine.flash_writes() != flash_writes;
+        if gdb_wrote {
+            self.seen_flash_writes = sim.machine.flash_writes();
+        }
+        if loaded.is_some() || gdb_wrote {
             match loaded {
                 // `monitor load FILE`: as if the file had been opened.
                 Some((path, image)) => {
@@ -357,6 +549,69 @@ impl Worker {
             Execution::Running | Execution::Free => return,
         }
         self.publish(true);
+    }
+
+    /// Lets the USB host talk to the probe and follows the core's debug state.
+    fn poll_usb(&mut self) {
+        if let Some(rx) = &self.attach_result
+            && let Ok(result) = rx.try_recv()
+        {
+            self.attach_error = result.err();
+            self.attach_result = None;
+            self.publish(true);
+        }
+        let (Some(usb), Some(sim)) = (&mut self.usb, &mut self.sim) else { return };
+        let progress = usb.poll(&mut sim.machine);
+        let mut changed = progress;
+        if sim.machine.flash_writes() != self.seen_flash_writes {
+            // Programmed through the probe: the symbols of the old file are stale.
+            self.seen_flash_writes = sim.machine.flash_writes();
+            sim.image = ElfImage { entry: 0, segments: Vec::new(), symbols: Vec::new() };
+            self.uploaded = true;
+            changed = true;
+        }
+        let halted = sim.machine.is_halted();
+        let locked_up = sim.machine.is_locked_up();
+        if halted != self.core_halted {
+            self.core_halted = halted;
+            changed = true;
+            if halted && matches!(self.state, RunState::Running | RunState::Stopped(_) | RunState::NoFirmware) {
+                self.state = RunState::Halted;
+            } else if !halted && self.state == RunState::Halted && self.execution != Execution::Halted {
+                // resumed (or reset without halt) by the probe: runs like the board
+                self.state = RunState::Running;
+                self.reanchor();
+            }
+        }
+        if let RunState::Stopped(_) = self.state
+            && !locked_up
+            && !halted
+        {
+            // the probe reset a locked-up core
+            self.state = RunState::Running;
+            self.reanchor();
+            changed = true;
+        }
+        if changed {
+            self.publish(false);
+        }
+    }
+
+    /// While the probe halts the core, the peripherals and the flash
+    /// interface run on in real time (as on the board).
+    fn advance_halted(&mut self) {
+        let now = Instant::now();
+        let since = self.halted_since.replace(now);
+        let probe_halt = self.usb.is_some() && self.execution != Execution::Halted;
+        match &mut self.sim {
+            Some(sim) if probe_halt && sim.machine.is_halted() => {
+                if let Some(t) = since {
+                    let cycles = sim.machine.clock().ns_to_cycles((now - t).as_nanos() as u64);
+                    sim.machine.advance_halted(cycles);
+                }
+            }
+            _ => self.halted_since = None,
+        }
     }
 
     fn with_board(&mut self, f: impl FnOnce(&itsboard::ItsBoard)) {
@@ -394,6 +649,8 @@ impl Worker {
                 self.state = RunState::Error(format!("cannot load {}: {e}", path.display()));
             }
         }
+        self.adopt_sim();
+        self.core_halted = false;
         self.restore_inputs();
         self.firmware = Some(path);
         self.uploaded = false;
@@ -417,7 +674,8 @@ impl Worker {
             StopReason::Budget
             | StopReason::DebugBreakpoint { .. }
             | StopReason::Step
-            | StopReason::Watchpoint { .. } => {}
+            | StopReason::Watchpoint { .. }
+            | StopReason::Halted { .. } => {}
             StopReason::Breakpoint { pc } => {
                 self.state = RunState::Stopped(format!("BKPT at {}", sim.describe_pc(pc)));
             }
@@ -483,6 +741,7 @@ impl Worker {
         snap.speed = if self.state == RunState::Running { self.measured_speed } else { 0.0 };
         snap.gdb = self.gdb_status.clone();
         snap.gdb_attached = self.gdb.as_ref().is_some_and(GdbServer::has_controller);
+        snap.usb = self.usb_status();
         if let Some(sim) = &self.sim {
             let b = &sim.board;
             if let Some(generation) = new_frame {

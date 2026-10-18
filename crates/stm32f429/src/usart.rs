@@ -24,6 +24,8 @@ pub struct SerialPort {
     pub tx: Vec<u8>,
     /// Bytes the host wants to send to the MCU.
     pub rx: VecDeque<u8>,
+    /// A second consumer of the output (the USB virtual COM port), if any.
+    pub mirror: Option<Vec<u8>>,
 }
 
 impl SerialPort {
@@ -34,9 +36,24 @@ impl SerialPort {
     pub fn take_output(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.tx)
     }
+
+    /// A byte the MCU has sent.
+    pub fn push_output(&mut self, byte: u8) {
+        self.tx.push(byte);
+        if let Some(m) = &mut self.mirror {
+            // Nobody may be reading (port not opened): keep only the latest output.
+            if m.len() >= MIRROR_LIMIT {
+                m.drain(..MIRROR_LIMIT / 2);
+            }
+            m.push(byte);
+        }
+    }
 }
 
 pub type SharedSerial = Rc<RefCell<SerialPort>>;
+
+/// Most output kept for the second consumer ([`SerialPort::mirror`]).
+pub const MIRROR_LIMIT: usize = 16 * 1024;
 
 const SR_PE: u32 = 1 << 0;
 const SR_FE: u32 = 1 << 1;
@@ -188,7 +205,7 @@ impl Usart {
             if done > now {
                 break;
             }
-            self.port.borrow_mut().tx.push(byte as u8);
+            self.port.borrow_mut().push_output(byte as u8);
             self.shifting = self.tdr.take().map(|b| (b, done + self.frame_cycles(ctx)));
             if self.shifting.is_some() {
                 self.sr |= SR_TXE;

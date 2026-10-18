@@ -8,6 +8,7 @@ license.workspace = true
 emu-core = { workspace = true, features = ["gdb"] }
 stm32f429.workspace = true
 itsboard.workspace = true
+stlink.workspace = true
 png.workspace = true
 anyhow.workspace = true
 clap.workspace = true

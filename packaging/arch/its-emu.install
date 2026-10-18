@@ -1,0 +1,18 @@
+post_install() {
+  # USB/IP host driver for the emulated ST-LINK: loaded at boot from now on
+  # (modules-load.d), here for the running system
+  modprobe vhci-hcd 2>/dev/null || true
+  cat <<'MSG'
+==> ITS-Board emulator: its-emu (command line), its-emu-gui (application menu).
+==> The VS Code extension "gdbtarget: Run Without Debugging" is built in to
+    the code package. Remove a copy installed earlier from the .vsix with
+      code --uninstall-extension its-emu.gdbtarget-nodebug
+    Other VS Code builds: /usr/share/its-emu/gdbtarget-nodebug.vsix
+==> The GUI plugs in the board's ST-LINK (toolbar: USB ST-LINK), usable by
+    pyOCD/OpenOCD and as /dev/ttyACM*.
+MSG
+}
+
+post_upgrade() {
+  modprobe vhci-hcd 2>/dev/null || true
+}

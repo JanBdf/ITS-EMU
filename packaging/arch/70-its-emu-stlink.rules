@@ -1,0 +1,7 @@
+# ST-LINK/V2-1 of the ITS-Board emulator (0483:3752, attached over USB/IP) and
+# of the real NUCLEO-F429ZI (0483:374b): access for the logged-in user, for
+# pyOCD/OpenOCD and the virtual COM port (/dev/ttyACM*) without extra groups.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="3752", MODE="660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="374b", MODE="660", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="3752", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="374b", TAG+="uaccess"

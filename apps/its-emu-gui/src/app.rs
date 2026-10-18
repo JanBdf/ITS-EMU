@@ -7,7 +7,8 @@ use eframe::egui::{self, Color32, Key, RichText};
 use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
 use crate::board::{self, BoardState};
-use crate::emu::{self, Command, EmuHandle, RunState, Speed};
+use crate::emu::{self, Command, EmuHandle, RunState, Speed, UsbStatus};
+use crate::settings::Settings;
 
 const OK_GREEN: Color32 = Color32::from_rgb(0x34, 0xD3, 0x59);
 const ERR_RED: Color32 = Color32::from_rgb(0xFF, 0x5B, 0x50);
@@ -39,6 +40,9 @@ pub struct App {
     ints: [Option<bool>; 6],
     analog: [Option<f32>; 8],
     self_screenshot: Option<SelfScreenshot>,
+    /// The toolbar switch of the ST-LINK.
+    usb_on: bool,
+    settings: Settings,
 }
 
 /// Saves a picture of the own window and quits (`ITS_EMU_GUI_SCREENSHOT=file.png[:seconds]`).
@@ -93,15 +97,41 @@ fn save_png(path: &std::path::Path, img: &egui::ColorImage) -> anyhow::Result<()
     Ok(())
 }
 
+/// Details of the ST-LINK state for tooltips.
+fn usb_hover(usb: &UsbStatus) -> String {
+    match usb {
+        UsbStatus::Off => "The board's ST-LINK (debug probe + virtual COM port) as a USB device of this \
+             computer, for pyOCD (the course's STLink@pyOCD configurations), OpenOCD and terminal programs. \
+             Switch on to plug it in."
+            .to_owned(),
+        UsbStatus::PluggedIn { addr, debugging } => format!(
+            "Plugged in over USB/IP ({addr}).{}",
+            if *debugging {
+                " A debugger (pyOCD) uses it; the emulator's GDB server leaves port 3333 to it."
+            } else {
+                ""
+            }
+        ),
+        UsbStatus::Unplugged { addr, cmd, error } => {
+            let why = error.as_ref().map_or_else(String::new, |e| format!("Attaching failed: {e}\n\n"));
+            format!("{why}Exported over USB/IP on {addr}. Plug it in with\n{cmd}\n(needs the vhci-hcd kernel module)")
+        }
+        UsbStatus::Unavailable(e) => format!("The USB/IP server cannot start: {e}"),
+    }
+}
+
 impl App {
     pub fn new(
         cc: &eframe::CreationContext,
         firmware: Option<PathBuf>,
         gdb_addr: Option<String>,
+        usb: emu::UsbConfig,
+        settings: Settings,
         ideal_colors: bool,
     ) -> Self {
         let ctx = cc.egui_ctx.clone();
-        let emu = emu::spawn(move || ctx.request_repaint(), gdb_addr);
+        let usb_on = usb.enabled;
+        let emu = emu::spawn(move || ctx.request_repaint(), gdb_addr, usb);
         if ideal_colors {
             emu.send(Command::IdealColors(true));
         }
@@ -125,6 +155,8 @@ impl App {
             ints: [None; 6],
             analog: [None; 8],
             self_screenshot: SelfScreenshot::from_env(),
+            usb_on,
+            settings,
         }
     }
 
@@ -143,7 +175,7 @@ impl eframe::App for App {
 
         // ---- take the latest snapshot
         let mut new_frame = false;
-        let (state, firmware, led_duty, inputs, nucleo_duty, virtual_ns, core_mhz, speed, gdb, dac1) = {
+        let (state, firmware, led_duty, inputs, nucleo_duty, virtual_ns, core_mhz, speed, gdb, usb, dac1) = {
             let mut snap = self.emu.snapshot.lock().unwrap();
             if snap.display_generation != self.display_generation {
                 self.display_generation = snap.display_generation;
@@ -169,6 +201,7 @@ impl eframe::App for App {
                 snap.core_mhz,
                 snap.speed,
                 (snap.gdb.clone(), snap.gdb_attached),
+                snap.usb.clone(),
                 snap.dac1,
             )
         };
@@ -207,6 +240,15 @@ impl eframe::App for App {
                         self.speed = s;
                         self.emu.send(Command::SetSpeed(s));
                     }
+                }
+                ui.separator();
+                let mut on = self.usb_on;
+                let switch = ui.toggle_value(&mut on, "USB ST-LINK").on_hover_text(usb_hover(&usb));
+                if switch.changed() {
+                    self.usb_on = on;
+                    self.emu.send(Command::SetUsb(on));
+                    self.settings.usb = on;
+                    self.settings.save();
                 }
                 ui.separator();
                 // The Nucleo user LEDs are hidden under the display on the real board.
@@ -259,6 +301,21 @@ impl eframe::App for App {
                     (Ok(addr), false) => ui.label(format!("GDB: {addr}")),
                     (Err(e), _) => ui.label(RichText::new(format!("GDB: {e}")).color(ui.visuals().weak_text_color())),
                 };
+                let (text, color) = match &usb {
+                    UsbStatus::Off => (None, OK_GREEN),
+                    UsbStatus::PluggedIn { debugging: true, .. } => (Some("ST-LINK in use by a debugger"), OK_GREEN),
+                    UsbStatus::PluggedIn { .. } => (Some("ST-LINK plugged in"), OK_GREEN),
+                    UsbStatus::Unplugged { error: None, .. } => {
+                        (Some("ST-LINK: waiting for usbip attach"), Color32::YELLOW)
+                    }
+                    UsbStatus::Unplugged { error: Some(_), .. } | UsbStatus::Unavailable(_) => {
+                        (Some("ST-LINK: not attached"), ERR_RED)
+                    }
+                };
+                if let Some(text) = text {
+                    ui.separator();
+                    ui.label(RichText::new(text).color(color)).on_hover_text(usb_hover(&usb));
+                }
             });
         });
 
