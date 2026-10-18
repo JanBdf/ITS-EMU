@@ -1,5 +1,6 @@
-//! Reset and clock control (RCC), power controller (PWR) and the flash
-//! interface registers — everything `SystemClock_Config()` waits on.
+//! Reset and clock control (RCC) and power controller (PWR) — with the
+//! flash interface ([`crate::flash`]) everything `SystemClock_Config()`
+//! waits on.
 //!
 //! Oscillators and PLLs become ready immediately. The RCC computes the
 //! resulting bus clocks, publishes them in [`Clocks`] and sets the core clock
@@ -327,67 +328,6 @@ impl Peripheral for Pwr {
         match off & !3 {
             0x0 => self.cr = merge_write(self.cr, off, size, value) & 0x000F_FFFF & !0xC, // CWUF/CSBF are write-only
             0x4 => self.csr = merge_write(self.csr, off, size, value) & 0x0300,
-            _ => {}
-        }
-    }
-
-    fn reset(&mut self) {
-        *self = Self::new();
-    }
-}
-
-/// Flash interface registers (access control and the locked programming interface).
-pub struct FlashInterface {
-    acr: u32,
-    cr: u32,
-    optcr: u32,
-    optcr1: u32,
-}
-
-impl Default for FlashInterface {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl FlashInterface {
-    pub fn new() -> Self {
-        Self { acr: 0, cr: 0x8000_0000, optcr: 0x0FFF_AAED, optcr1: 0x0FFF_0000 }
-    }
-
-    /// Configured number of wait states.
-    pub fn latency(&self) -> u32 {
-        self.acr & 0xF
-    }
-}
-
-impl Peripheral for FlashInterface {
-    fn name(&self) -> &str {
-        "FLASH"
-    }
-
-    fn read_stable_until(&self, _offset: u32, _clock: &Clock) -> u64 {
-        u64::MAX
-    }
-
-    fn read(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
-        let reg = match off & !3 {
-            0x00 => self.acr,
-            0x10 => self.cr,
-            0x14 => self.optcr,
-            0x18 => self.optcr1,
-            _ => 0, // KEYR, OPTKEYR (write-only), SR (no operation in progress)
-        };
-        extract_read(reg, off, size)
-    }
-
-    fn write(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32, value: u32) {
-        match off & !3 {
-            // ICRST/DCRST are self-clearing
-            0x00 => self.acr = merge_write(self.acr, off, size, value) & 0x070F,
-            0x10 => {
-                log::warn!("flash programming (FLASH_CR) is not emulated");
-            }
             _ => {}
         }
     }

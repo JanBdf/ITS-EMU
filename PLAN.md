@@ -9,13 +9,17 @@ process; see README.md for what is emulated and how to use it.
 ```
 apps/its-emu (CLI)        apps/its-emu-gui (egui)
         \                     /
+         stlink     — ST-LINK/V2-1 (debug commands, virtual COM port) on USB/IP
+         usbip      — USB/IP server for one emulated device (vhci-hcd attaches it)
          itsboard   — wiring, ILI9486, XPT2046, LEDs/buttons, fonts.bin
               |
          stm32f429  — memory map, RCC, PWR, FLASH, GPIO, EXTI/SYSCFG, TIM1–14, ADC/DAC,
                       I2C1–3, SPI1–6, U(S)ART1–8, DMA1/2, IWDG, CRC, RNG
               |
          emu-core   — Unicorn CPU, NVIC/SCB/SysTick, exceptions, cycle model,
-                      virtual clock, idle skipping, ELF loader, GDB server
+                      virtual clock, idle skipping, ELF loader, GDB server,
+                      debug architecture (halting debug, FPB, DWT, ROM table),
+                      SW-DP/AHB-AP
 ```
 
 ## Validation
@@ -26,6 +30,13 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
 `tests/hardware`, `crates/itsboard/tests/hardware.rs` compares.
 
 ## Next steps
+
+- USB probe: compare with the board — ROM table/component IDs, FP_CTRL,
+  DWT_CTRL and DBGMCU_IDCODE with HwCheck `rd`; a pyOCD session with
+  `pyocd load -vv` and usbmon against the real ST-LINK (exact command
+  sequence, timing of erase/program). Mass storage (drag-and-drop .bin) and
+  SWO are not there; the flash AND semantics and PGSERR without a fault
+  (see `stm32f429::flash`) neither
 
 - Timers: slave modes with internal triggers (ITR: timer chaining) or ETR,
   complementary outputs and dead time of TIM1/TIM8. On the board, UG while

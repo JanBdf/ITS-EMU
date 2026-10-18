@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ITS-Board Emulator
+Comment=Emulator for the HAW Hamburg ITS-Board, with a USB ST-LINK for pyOCD
+Exec=its-emu-gui %f
+Icon=its-emu-gui
+Terminal=false
+Categories=Development;Electronics;
+Keywords=STM32;Nucleo;ITS-Board;GDB;ST-LINK;pyOCD;
+StartupWMClass=its-emu-gui

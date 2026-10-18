@@ -13,11 +13,12 @@ Status: work in progress — see [PLAN.md](PLAN.md).
 |---|---|
 | CPU | Cortex-M4F (Thumb-2, FPU) via [Unicorn](https://www.unicorn-engine.org/); NVIC, SysTick, exceptions, faults in Rust |
 | Clock | RCC clock tree, virtual time in CPU cycles (16 MHz HSI → 180 MHz PLL); cycle model of the Cortex-M4 (loads, branches, divisions, exceptions, APB wait states) measured on the board |
-| Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (up/down/center-aligned counting, output compare and PWM on the pins, input capture, encoder mode, slave modes reset/gated/trigger/external clock with TI1/TI2, TIM1/8 repetition counter), ADC1–3 (regular group started by TIM2/TIM3/TIM8 TRGO), DAC (timer triggers, noise/triangle waves), I²C1–3 (master; nothing connected answers with NACK), SPI1–6, USART1–6 + UART4/5/7/8 (only USART3 connected), IWDG (watchdog reset, reset flags in RCC_CSR), CRC, RNG, DMA1/2 (direct mode; requests from the ADCs, U(S)ARTs, SPIs and the DAC), PWR, flash interface, bit-banding |
+| Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (up/down/center-aligned counting, output compare and PWM on the pins, input capture, encoder mode, slave modes reset/gated/trigger/external clock with TI1/TI2, TIM1/8 repetition counter), ADC1–3 (regular group started by TIM2/TIM3/TIM8 TRGO), DAC (timer triggers, noise/triangle waves), I²C1–3 (master; nothing connected answers with NACK), SPI1–6, USART1–6 + UART4/5/7/8 (only USART3 connected), IWDG (watchdog reset, reset flags in RCC_CSR), CRC, RNG, DMA1/2 (direct mode; requests from the ADCs, U(S)ARTs, SPIs and the DAC), PWR, flash interface (programming and sector/mass erase with the datasheet's timing), bit-banding |
 | Board | LEDs OUT0–15, buttons S0–S7, INT0–5, Analog header (voltages on the ADC pins, DAC1), Nucleo LEDs and USER button; external devices on any pins: rotary encoder, DS18B20 1-Wire temperature sensors (command line) |
 | Display | ILI9486 480×320 TFT with SPI timing, XPT2046 touch, backlight PWM, tone response of the real panel (GUI; `--ideal-colors` to switch off) |
 | Serial | Virtual COM port (USART3, `printf` / `stdin_getchar`) |
 | Debugging | GDB remote server: breakpoints, single step, watchpoints, registers incl. FPU, memory, `monitor reset halt` |
+| USB (Linux) | The Nucleo's ST-LINK/V2-1 over USB/IP: debug probe for pyOCD (the course's *STLink@pyOCD* configurations, *CMSIS Load*) and OpenOCD, and the virtual COM port (`/dev/ttyACM*`). Behind it the debug port: halting debug (DHCSR, DCRSR/DCRDR, DEMCR, vector catch), FPB breakpoints, DWT watchpoints, ROM table and CoreSight IDs |
 
 Not yet: Ethernet, DMA requests of I²C/timers, devices on the I²C header, timer slave modes with internal triggers, the ADC trigger sources other than timer update events.
 
@@ -71,9 +72,10 @@ code copies them from, and the program misbehaves. Use `monitor load` for
 course programs.
 
 The course's VS Code launch configurations always start pyOCD with
-`--probe stlink:`, which only finds a USB ST-LINK, so the emulator needs its
-own configuration (`.vscode/launch.json` of the course project, CDT GDB
-adapter). It loads the last build of the project that is active in the CMSIS
+`--probe stlink:`, which only finds a USB ST-LINK. On Linux the emulator can
+be one ([below](#the-boards-st-link-on-usb-linux)) and they work unchanged;
+otherwise the emulator needs its own configuration (`.vscode/launch.json` of
+the course project, CDT GDB adapter). It loads the last build of the project that is active in the CMSIS
 extension, resets and stops at `main`, like **STLink@pyOCD (launch)** on the
 board:
 
@@ -109,6 +111,68 @@ Several debuggers may connect at once: the first one controls the core, the
 others (such as the CDT adapter's auxiliary GDB for live watch) read and write
 memory and registers while it runs. Breakpoints do not modify memory, so they
 also work in flash. Watchpoints slow emulation down while they are set.
+
+## The board's ST-LINK on USB (Linux)
+
+The emulator can also be the Nucleo's on-board ST-LINK/V2-1 on the USB of
+your computer, exported over USB/IP and attached with the kernel's
+`vhci-hcd` driver. The computer then sees the same USB device as with the
+real board plugged in: a debug probe (0483:3752, ST-LINK/V2-1 without mass
+storage) and a virtual COM port. The course tools work unchanged — *CMSIS
+Load* flashes with pyOCD and the pack's flash algorithm (which runs on the
+emulated core and programs flash through the emulated FLASH interface),
+*STLink@pyOCD (launch)* debugs through pyOCD's GDB server, and a terminal
+program talks to `/dev/ttyACM0`.
+
+**Arch Linux package** ([below](#arch-linux-package),
+`packaging/arch/build.sh`): installs the GUI with a desktop entry
+(*ITS-Board Emulator* in the app launcher), `its-emu`, and everything the
+ST-LINK needs — `usbip`, `vhci-hcd` loaded at boot, a helper that polkit lets
+the user at the computer run without a password to attach the probe (only
+from 127.0.0.1), and udev access to the probe and its COM port. The package
+file can be installed on other Arch machines as it is
+(`sudo pacman -U its-emu-*.pkg.tar.zst`).
+
+Started from the launcher, the GUI plugs the ST-LINK in by itself: the
+toolbar switch **USB ST-LINK** (remembered in `~/.config/its-emu/gui.conf`,
+on by default) and the status bar show its state (*plugged in*, *in use by a
+debugger*, or why attaching failed). Quitting or switching it off unplugs
+it. The emulator's own GDB server (port 3333, for the *ITS-Board Emulator*
+debug configuration) leaves the port to pyOCD while pyOCD has the ST-LINK in
+debug mode and takes it back afterwards, so both debug configurations work
+without changing anything.
+
+**Without the package**:
+
+```sh
+sudo pacman -S usbip            # Debian: apt install usbip; Ubuntu: linux-tools-generic
+sudo modprobe vhci-hcd          # once per boot (or add it to /etc/modules-load.d)
+
+its-emu-gui                     # attaches with `sudo -n usbip attach` (passwordless sudo)
+its-emu Program.axf --usb --usb-attach
+sudo usbip attach -r 127.0.0.1 -b 1-1    # by hand (its-emu-gui --no-usb-attach, its-emu --usb)
+```
+
+`its-emu-gui --no-usb` / `--usb[=ADDR]` override the switch for one run.
+Without the packaged udev rule, the rules that pyOCD/OpenOCD install for the
+real probe (e.g. `60-openocd.rules`) cover the emulated one too. Other
+machines can attach it as well (`--usb 0.0.0.0:3240`, then
+`usbip attach -r HOST -b 1-1`; on Windows the usbip-win2 client should do the
+same, not tried yet).
+
+While the probe holds the core halted, time goes on for the peripherals and
+the flash interface (as on the chip, where only the core and with it SysTick
+and DWT->CYCCNT stop), so OpenOCD's register-level flash driver works too.
+With the probe plugged in, a BKPT without a debugger is a HardFault as on the
+chip (pyOCD leaves the core on its flash algorithm's BKPT when it detaches).
+
+Known differences: there is no mass storage drive (drag-and-drop flashing) and
+no SWO trace; the virtual COM port ignores the baud rate the host sets;
+programming flash bits that are not erased stores the new value (the chip
+ANDs it); a flash store with a wrong size or without PG faults instead of
+only setting PGPERR/PGSERR. The ROM table and DBGMCU_IDCODE use ST's values
+for the STM32F429 (device 0x419, revision 3); compare with the board using
+HwCheck's `rd`.
 
 ## Comparison with the real board
 
@@ -160,6 +224,24 @@ experimental). It installs `gdb-multiarch` on Linux for the GDB server tests,
 records throughput in the job summary and keeps the binaries as artifacts for
 14 days. The tests that need the personal lab solutions in `tests/fixtures/ac6`
 (not published) skip themselves there.
+
+### Arch Linux package
+
+`packaging/arch/build.sh` builds a pacman package of the current checkout
+into `dist/` (version `0.1.0.r<commits>.g<hash>`, so each new commit is an
+update; uncommitted changes are included but keep the version). It contains
+both programs, a desktop entry with icon, the VS Code extension from
+`tools/vscode-nodebug`, built in to Arch's `code` package (and as `.vsix` in
+`/usr/share/its-emu` for other VS Code builds), and what the USB ST-LINK
+needs ([above](#the-boards-st-link-on-usb-linux)). The emulator writes
+nothing to the home directory except the GUI's toolbar setting
+(`~/.config/its-emu/gui.conf`).
+
+```sh
+packaging/arch/build.sh
+sudo pacman -U dist/its-emu-<version>-x86_64.pkg.tar.zst   # install or update
+sudo pacman -Rns its-emu                                   # remove
+```
 
 Test fixtures in `tests/fixtures/ac6` are rebuilt from a checkout of
 ITS-BRD-VSC with `tools/build-fixtures.sh` (needs the CMSIS-Toolbox and Arm

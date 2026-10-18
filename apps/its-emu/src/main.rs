@@ -1,6 +1,7 @@
 //! Command line front end of the ITS-Board emulator.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -11,9 +12,9 @@ use emu_core::{CoreReg, ElfImage, Machine, StopReason};
 #[derive(Parser, Debug)]
 #[command(version, about = "ITS-Board emulator (STM32F429ZI)")]
 struct Args {
-    /// Firmware image (.axf / .elf). Without one (only with --gdb) the flash is
-    /// empty and the debugger loads the program
-    #[arg(required_unless_present = "gdb")]
+    /// Firmware image (.axf / .elf). Without one (only with --gdb or --usb)
+    /// the flash is empty and the debugger loads the program
+    #[arg(required_unless_present_any = ["gdb", "usb"])]
     firmware: Option<PathBuf>,
 
     /// Font table to flash at 0x0810_0000 instead of the built-in fonts.bin of ITS_BRD_LIB
@@ -77,6 +78,17 @@ struct Args {
     /// debugger before running. Use `--gdb 0.0.0.0:3333` to accept remote clients
     #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:3333")]
     gdb: Option<String>,
+
+    /// Export the board's ST-LINK (debug probe and virtual COM port) over
+    /// USB/IP (default address 127.0.0.1:3240). On Linux,
+    /// `sudo usbip attach -r 127.0.0.1 -b 1-1` plugs it in (vhci-hcd module);
+    /// then pyOCD, OpenOCD and terminal programs use it like the real board's
+    #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:3240")]
+    usb: Option<String>,
+
+    /// With --usb: run `sudo usbip attach` for it
+    #[arg(long, requires = "usb")]
+    usb_attach: bool,
 }
 
 /// Virtual time slice while a debugger is attached (Ctrl-C latency).
@@ -251,12 +263,40 @@ fn main() -> Result<()> {
         }
         None => None,
     };
-    let seconds = args.seconds.unwrap_or(if gdb.is_some() { 0.0 } else { 10.0 });
+    // Requests from the USB host wake the loop while the core is halted.
+    let (wake_tx, wake_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let mut usb = match &args.usb {
+        Some(addr) => {
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                let _ = wake_tx.try_send(());
+            });
+            let probe = stlink::UsbProbe::start(addr, Some(mcu.usart3.clone()), wake)
+                .with_context(|| format!("starting the USB/IP server on {addr}"))?;
+            println!(
+                "ST-LINK exported over USB/IP on {}; attach it with: {}",
+                probe.local_addr(),
+                probe.attach_command()
+            );
+            if args.usb_attach {
+                let _ = stlink::spawn_attach(probe.local_addr());
+            }
+            Some(probe)
+        }
+        None => None,
+    };
+    // Like the board on the desk: in real time while plugged in, and a BKPT
+    // without a debugger is a HardFault (the probe may leave the core on one).
+    let realtime = args.realtime || usb.is_some();
+    machine.system_mut().bkpt_stops = usb.is_none();
+    let seconds = args.seconds.unwrap_or(if gdb.is_some() || usb.is_some() { 0.0 } else { 10.0 });
     let limit_ns = if seconds > 0.0 { (seconds * 1e9) as u64 } else { u64::MAX };
     let mut waiting_for_debugger = gdb.is_some();
     let stdin_rx = args.stdin.then(spawn_stdin_reader);
     let mut inputs = args.input.clone().map(|s| s.0).unwrap_or_default().into_iter().peekable();
     let start = Instant::now();
+    // Real-time pacing reference (wall clock, virtual ns).
+    let mut pace_anchor = (start, 0u64);
+    let mut halted_since: Option<Instant> = None;
     let mut bkpts = 0u32;
     let stop = loop {
         let clock = machine.clock();
@@ -280,14 +320,30 @@ fn main() -> Result<()> {
             }
             None => Execution::Free,
         };
-        if execution == Execution::Halted {
+        if let Some(probe) = &mut usb {
+            probe.poll(&mut machine);
+        }
+        // Halted by the debug probe, held in reset, or locked up until the probe does something.
+        let held = machine.is_halted() || (usb.is_some() && machine.is_locked_up());
+        if execution == Execution::Halted || held {
             forward_serial(&mcu, stdin_rx.as_ref());
-            std::thread::sleep(Duration::from_millis(1));
+            let _ = wake_rx.recv_timeout(Duration::from_millis(1));
+            // While the probe halts the core, the peripherals run on in real time.
+            let now = Instant::now();
+            if let Some(since) = halted_since
+                && execution != Execution::Halted
+            {
+                let cycles = machine.clock().ns_to_cycles((now - since).as_nanos() as u64);
+                machine.advance_halted(cycles);
+            }
+            halted_since = Some(now);
+            pace_anchor = (now, machine.clock().time_ns());
             continue;
         }
+        halted_since = None;
         let clock = machine.clock();
-        let mut slice_ns = if args.realtime { REALTIME_SLICE_NS } else { limit_ns - now_ns }.min(limit_ns - now_ns);
-        if gdb.is_some() {
+        let mut slice_ns = if realtime { REALTIME_SLICE_NS } else { limit_ns - now_ns }.min(limit_ns - now_ns);
+        if gdb.is_some() || usb.is_some() {
             slice_ns = slice_ns.min(GDB_SLICE_NS);
         }
         if let Some(ev) = inputs.peek() {
@@ -303,19 +359,31 @@ fn main() -> Result<()> {
         }
         match result {
             StopReason::Budget => {}
-            // Left over from a detached debugger.
-            StopReason::DebugBreakpoint { .. } | StopReason::Step | StopReason::Watchpoint { .. } => {}
+            // Left over from a detached debugger; halted by the debug probe.
+            StopReason::DebugBreakpoint { .. }
+            | StopReason::Step
+            | StopReason::Watchpoint { .. }
+            | StopReason::Halted { .. } => {}
             StopReason::Breakpoint { pc } if args.continue_on_bkpt && bkpt_imm(&machine, pc) != 0 => {
                 bkpts += 1;
                 report_progress(&machine, &image, start, &format!("BKPT #{bkpts} at {}", describe(&image, pc)));
                 machine.set_reg(CoreReg::Pc, (pc + 2) | 1);
             }
+            // With the probe plugged in the board stays on: a debugger can still connect.
+            StopReason::Lockup { pc, reason } if usb.is_some() => {
+                println!("core locked up at {}: {reason}", describe(&image, pc));
+            }
             other => break Some(other),
         }
-        if args.realtime {
-            let ahead = Duration::from_nanos(machine.clock().time_ns()).saturating_sub(start.elapsed());
-            if !ahead.is_zero() {
-                std::thread::sleep(ahead);
+        if realtime {
+            let (wall0, virt0) = pace_anchor;
+            let virt = Duration::from_nanos(machine.clock().time_ns() - virt0);
+            let wall = wall0.elapsed();
+            if virt > wall {
+                std::thread::sleep(virt - wall);
+            } else if wall - virt > Duration::from_millis(250) {
+                // Too slow (or halted meanwhile): do not catch up later.
+                pace_anchor = (Instant::now(), machine.clock().time_ns());
             }
         }
     };
@@ -325,7 +393,11 @@ fn main() -> Result<()> {
         Some(StopReason::Breakpoint { pc }) => format!("BKPT at {}", describe(&image, pc)),
         Some(StopReason::Lockup { pc, reason }) => format!("LOCKUP at {}: {reason}", describe(&image, pc)),
         Some(
-            StopReason::Budget | StopReason::DebugBreakpoint { .. } | StopReason::Step | StopReason::Watchpoint { .. },
+            StopReason::Budget
+            | StopReason::DebugBreakpoint { .. }
+            | StopReason::Step
+            | StopReason::Watchpoint { .. }
+            | StopReason::Halted { .. },
         ) => {
             unreachable!()
         }

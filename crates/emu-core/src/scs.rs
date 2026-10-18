@@ -1,5 +1,7 @@
 //! Private peripheral bus of the Cortex-M4 (0xE000_0000 – 0xE00F_FFFF):
-//! System Control Space (SCB, NVIC, SysTick, MPU, FPU registers) and DWT.
+//! System Control Space (SCB, NVIC, SysTick, MPU, FPU registers) and DWT
+//! (control, cycle counter). The debug registers (DHCSR, DEMCR, ...) are in
+//! [`crate::debug`].
 
 use crate::bus::{extract_read, merge_write};
 use crate::nvic::{self, NUM_EXCEPTIONS, NUM_IRQS, Nvic};
@@ -23,6 +25,7 @@ pub const CFSR_DACCVIOL: u32 = 1 << 1;
 pub const CFSR_MMARVALID: u32 = 1 << 7;
 // HFSR bits
 pub const HFSR_FORCED: u32 = 1 << 30;
+pub const HFSR_DEBUGEVT: u32 = 1 << 31;
 
 /// Exception number whose priority byte lives at PPB offset `off`
 /// (NVIC_IPRn or SCB_SHPRn), if any.
@@ -63,7 +66,6 @@ pub struct Scs {
     pub fpccr: u32,
     fpcar: u32,
     fpdscr: u32,
-    demcr: u32,
     dwt_ctrl: u32,
     /// CYCCNT = cycles - dwt_cyc_base
     dwt_cyc_base: u64,
@@ -94,7 +96,6 @@ impl Scs {
             fpccr: 0xC000_0000, // ASPEN | LSPEN
             fpcar: 0,
             fpdscr: 0,
-            demcr: 0,
             dwt_ctrl: 0x4000_0000, // NUMCOMP = 4
             dwt_cyc_base: 0,
         }
@@ -102,6 +103,13 @@ impl Scs {
 
     pub fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    /// `cycles` passed while the core was halted (debug state): SysTick and
+    /// DWT_CYCCNT count core cycles and stood still.
+    pub fn core_halted_for(&mut self, cycles: u64) {
+        self.systick.shift(cycles);
+        self.dwt_cyc_base += cycles;
     }
 
     pub fn stkalign(&self) -> bool {
@@ -247,7 +255,6 @@ impl Scs {
             0xED98 => self.mpu_rnr,
             0xED9C | 0xEDA4 | 0xEDAC | 0xEDB4 => self.mpu_rbar[(self.mpu_rnr & 7) as usize] | (self.mpu_rnr & 7),
             0xEDA0 | 0xEDA8 | 0xEDB0 | 0xEDB8 => self.mpu_rasr[(self.mpu_rnr & 7) as usize],
-            0xEDFC => self.demcr,
             0xEF34 => self.fpccr,
             0xEF38 => self.fpcar,
             0xEF3C => self.fpdscr,
@@ -329,7 +336,6 @@ impl Scs {
                 self.mpu_rbar[(self.mpu_rnr & 7) as usize] = v & !0x1F;
             }
             0xEDA0 | 0xEDA8 | 0xEDB0 | 0xEDB8 => self.mpu_rasr[(self.mpu_rnr & 7) as usize] = v,
-            0xEDFC => self.demcr = v,
             0xEF00 => {
                 // STIR
                 nvic.set_pending(nvic::IRQ0 + (v & 0x1FF));
