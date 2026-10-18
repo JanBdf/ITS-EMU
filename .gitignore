@@ -19,3 +19,6 @@
 
 # Linux packages (packaging/arch/build.sh)
 /dist
+
+# Claude Code (worktrees of parallel sessions)
+/.claude/

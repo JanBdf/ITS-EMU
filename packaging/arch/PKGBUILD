@@ -7,7 +7,8 @@ pkgver=0
 pkgrel=1
 pkgdesc='Emulator for the HAW Hamburg ITS-Board (STM32F429 + ITS carrier board + TFT) with a USB ST-LINK for pyOCD'
 arch=(x86_64)
-license=(MIT)
+# MIT; the binaries contain Unicorn (GPL-2.0)
+license=(MIT GPL-2.0-only)
 # The GUI loads the window system, GL/Vulkan and D-Bus (file dialog via the
 # XDG portal) at run time, so ldd does not show them.
 depends=(glibc gcc-libs dbus fontconfig libglvnd vulkan-icd-loader wayland
@@ -38,6 +39,11 @@ package() {
   install -Dm644 packaging/arch/its-emu-gui.desktop -t "$pkgdir/usr/share/applications/"
   install -Dm644 packaging/arch/its-emu-gui.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
   install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname/"
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+  local unicorn
+  unicorn=$(sed -n '/^name = "unicorn-engine-sys"$/{n;s/^version = "\(.*\)"$/\1/p}' Cargo.lock)
+  install -Dm644 "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/unicorn-engine-sys-$unicorn/COPYING \
+    "$pkgdir/usr/share/licenses/$pkgname/COPYING.unicorn"
 
   # The ST-LINK on USB/IP: vhci-hcd at boot, a helper that polkit lets the
   # user at the computer run to attach the probe (from 127.0.0.1 only), and

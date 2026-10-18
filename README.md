@@ -7,6 +7,27 @@ Arm Compiler 6) produces, including the HAL, ITS_BRD_LIB and the display driver.
 
 Status: work in progress — see [PLAN.md](PLAN.md).
 
+> **Disclaimer:** This is an independent, private project. It is **not
+> affiliated with, endorsed by or supported by** the HAW Hamburg, its Labor
+> für technische Informatik or the [ITS-BRD-VSC](https://github.com/Transport-Protocol/ITS-BRD-VSC)
+> project. The names *HAW Hamburg*, *ITS-Board* and *ITS-BRD-VSC* are used
+> only to describe what the emulator is compatible with. The emulator is not a
+> substitute for the real board: results may differ from the hardware, and
+> course or exam requirements always refer to the real ITS-Board. Questions
+> about this emulator go to its issue tracker, not to the course staff.
+
+## Installation
+
+Packages are published on the [Releases](../../releases) page:
+
+| Platform | Package | Install |
+|---|---|---|
+| Arch Linux (x86_64) | `its-emu-<version>-x86_64.pkg.tar.zst` | `sudo pacman -U its-emu-*.pkg.tar.zst` |
+
+Packages for other platforms will follow. Until then, build from source
+([below](#building)); the CI also keeps binaries for Linux, Windows and macOS
+as workflow artifacts for 14 days.
+
 ## What is emulated
 
 | | |
@@ -243,6 +264,20 @@ sudo pacman -U dist/its-emu-<version>-x86_64.pkg.tar.zst   # install or update
 sudo pacman -Rns its-emu                                   # remove
 ```
 
+### Releases
+
+`.github/workflows/release.yml` runs on a tag `v<version>` (the version in
+`Cargo.toml`): it builds the packages and publishes them as a GitHub release
+with generated release notes. Started by hand (*Actions → Release → Run
+workflow*), it only builds them and keeps them as workflow artifacts. Each
+platform is one job that uploads an artifact `package-<platform>`; packages
+for further platforms are added as further jobs of that kind.
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 Test fixtures in `tests/fixtures/ac6` are rebuilt from a checkout of
 ITS-BRD-VSC with `tools/build-fixtures.sh` (needs the CMSIS-Toolbox and Arm
 Compiler 6 as installed by the course's VS Code setup); only the own test
@@ -250,6 +285,22 @@ programs with `tools/build-own.sh [Name]`.
 
 ## License
 
-MIT for the emulator. The firmware images in `tests/fixtures/ac6` and the font
-table are built from course material under the BSD 2-Clause license
-(HAW Hamburg, Labor für technische Informatik); see the README files there.
+The emulator's source code is licensed under the [MIT license](LICENSE).
+
+The binaries (release packages, CI artifacts, own builds) contain
+[Unicorn](https://www.unicorn-engine.org/), linked statically, which is
+licensed under the GPL-2.0; the binaries as a whole are therefore distributed
+under the terms of the GPL-2.0. The Arch package carries both license texts
+(`/usr/share/licenses/its-emu`). The other Rust dependencies use permissive
+licenses (MIT, Apache-2.0, BSD, Zlib, Unicode).
+
+The firmware images in `tests/fixtures/ac6` and the font table
+(`crates/itsboard/assets/fonts.bin`) are built from course material of the
+[ITS-BRD-VSC](https://github.com/Transport-Protocol/ITS-BRD-VSC) project under
+the BSD 2-Clause license (Copyright (c) 2022, HAW Hamburg, Labor für
+technische Informatik), with parts of the STM32CubeF4 HAL (STMicroelectronics,
+BSD 3-Clause) and CMSIS (Arm Limited, Apache-2.0); see the README files there.
+
+All product names and trademarks belong to their owners. Their use does not
+imply any affiliation with or endorsement by them (see the disclaimer at the
+top).
