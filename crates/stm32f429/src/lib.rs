@@ -4,6 +4,7 @@ pub mod adc;
 pub mod crc;
 pub mod dma;
 pub mod exti;
+pub mod flash;
 pub mod gpio;
 pub mod i2c;
 pub mod iwdg;
@@ -16,7 +17,7 @@ use emu_core::{Bus, DebugIds, Machine, MachineConfig, MachineError, MemoryMap};
 
 use dma::DmaLine;
 use gpio::{GPIOA_BASE, GpioPort, NUM_PORTS, PORT_STRIDE, SharedGpio};
-use rcc::{FlashInterface, Pwr, Rcc, SharedClocks};
+use rcc::{Pwr, Rcc, SharedClocks};
 use spi::{Spi, SpiSlot};
 use timer::{ApbBus, ChannelPins, GpTimer, SharedPwm};
 use usart::{SharedSerial, Usart};
@@ -92,6 +93,8 @@ pub struct Stm32f429 {
     pub i2c1: i2c::I2cBus,
     /// DMA controllers; the machine runs them as its second bus master.
     pub dma: dma::SharedDma,
+    /// State of the flash interface (registers and programming side).
+    pub flash: flash::SharedFlash,
 }
 
 /// What an SPI master receives with no device on the bus: the idle level of
@@ -166,8 +169,18 @@ pub fn machine(bus: Bus, mcu: &Stm32f429) -> Result<Machine, MachineError> {
     let mut m = Machine::new(machine_config(), bus)?;
     m.set_bus_master(Box::new(dma::DmaMaster(mcu.dma.clone())));
     m.set_debug_ids(DEBUG_IDS);
+    m.set_flash_controller(Box::new(flash::FlashProgrammer::new(mcu.flash.clone(), mcu.clocks.clone())));
+    // Device electronic signature in system memory (read-only): unique ID
+    // (an arbitrary one) and flash size in KB
+    let mut signature = [0u8; 0x14];
+    signature[..12].copy_from_slice(&[0x2E, 0x00, 0x3A, 0x00, 0x0B, 0x51, 0x33, 0x34, 0x34, 0x33, 0x37, 0x31]);
+    signature[0x12..].copy_from_slice(&((FLASH_SIZE / 1024) as u16).to_le_bytes());
+    m.write_mem(UID_BASE, &signature);
     Ok(m)
 }
+
+/// Unique device ID (96 bits); the flash size register follows at +0x12.
+pub const UID_BASE: u32 = 0x1FFF_7A10;
 
 /// DBGMCU_IDCODE: DEV_ID 0x419 (STM32F42x/43x), REV_ID 0x2001 (revision 3).
 pub const DBGMCU_IDCODE: u32 = 0x2001_6419;
@@ -325,10 +338,11 @@ pub fn build() -> (Bus, Stm32f429) {
     bus.attach(0x4002_6400, 0x400, Box::new(dma::DmaRegs::new(1, dma.clone(), clocks.clone())));
     bus.attach(0x4002_3800, 0x400, Box::new(Rcc::new(clocks.clone())));
     bus.attach(0x5006_0800, 0x400, Box::new(crc::Rng::new(clocks.clone())));
-    bus.attach(0x4002_3C00, 0x400, Box::new(FlashInterface::new()));
+    let flash = flash::SharedFlash::default();
+    bus.attach(0x4002_3C00, 0x400, Box::new(flash::FlashInterface::new(flash.clone())));
     bus.attach(0x4002_8000, 0x1400, Box::new(EthStub));
     bus.set_wait_states(Box::new(bus_wait_states(clocks.clone())));
 
     let tim_pwm: [SharedPwm; 4] = tim_pwm.try_into().unwrap_or_else(|_| unreachable!());
-    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3, analog, i2c1, dma })
+    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3, analog, i2c1, dma, flash })
 }

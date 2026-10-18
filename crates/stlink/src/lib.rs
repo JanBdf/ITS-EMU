@@ -72,6 +72,11 @@ impl UsbProbe {
     pub fn attach_command(&self) -> String {
         attach_command(self.local_addr())
     }
+
+    /// Connects the virtual COM port to another USART (a new board).
+    pub fn set_serial(&mut self, serial: Option<SharedSerial>) {
+        self.device.vcp.set_serial(serial, self.server.is_attached());
+    }
 }
 
 /// `usbip attach` for a probe listening on `addr`.

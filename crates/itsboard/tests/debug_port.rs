@@ -97,6 +97,37 @@ fn reset_with_vector_catch_halts_at_reset_handler() {
 }
 
 #[test]
+fn flash_erase_completes_while_the_core_is_halted() {
+    // OpenOCD erases through the FLASH registers with the core halted and
+    // polls BSY: the flash interface runs on, the core's counters do not.
+    let Some(mut sim) = Sim::boot("TestStdinoutUSART.axf") else { return };
+    sim.run_until_ms(100);
+    let m = &mut sim.machine;
+    m.debug_write(DHCSR, 4, 0xA05F_0003).unwrap();
+    m.debug_write(DEMCR, 4, 1 << 24).unwrap(); // TRCENA
+    let systick = m.debug_read(0xE000_E018, 4).unwrap();
+    let cyccnt = m.debug_read(0xE000_1004, 4).unwrap();
+    m.debug_write(0x4002_3C04, 4, 0x4567_0123).unwrap();
+    m.debug_write(0x4002_3C04, 4, 0xCDEF_89AB).unwrap();
+    // erase sector 1 (0x0800_4000) with x32 parallelism
+    m.debug_write(0x4002_3C10, 4, (2 << 8) | (1 << 3) | 2).unwrap();
+    m.debug_write(0x4002_3C10, 4, (1 << 16) | (2 << 8) | (1 << 3) | 2).unwrap();
+    assert_ne!(m.debug_read(0x4002_3C0C, 4).unwrap() & (1 << 16), 0, "BSY");
+    let ms100 = m.clock().ns_to_cycles(100_000_000);
+    m.advance_halted(ms100);
+    assert_ne!(m.debug_read(0x4002_3C0C, 4).unwrap() & (1 << 16), 0, "still busy after 100 ms");
+    m.advance_halted(2 * ms100);
+    assert_eq!(m.debug_read(0x4002_3C0C, 4).unwrap() & (1 << 16), 0, "erased after 250 ms");
+    let mut sector = vec![0u8; 0x4000];
+    assert!(m.read_mem(0x0800_4000, &mut sector));
+    assert!(sector.iter().all(|&b| b == 0xFF));
+    assert_eq!(m.debug_read(0xE000_E018, 4).unwrap(), systick, "SysTick stood still");
+    assert_eq!(m.debug_read(0xE000_1004, 4).unwrap(), cyccnt, "CYCCNT stood still");
+    // the core was not running
+    assert!(m.is_halted());
+}
+
+#[test]
 fn fpb_breakpoint_halts_at_main() {
     let Some(mut sim) = Sim::boot("TestStdinoutUSART.axf") else { return };
     let main = sim.image.symbol("main").unwrap().addr & !1;

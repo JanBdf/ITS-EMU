@@ -73,6 +73,11 @@ impl SysTick {
         false
     }
 
+    /// `cycles` passed while the core was halted: the counter stood still.
+    pub fn shift(&mut self, cycles: u64) {
+        self.base += cycles;
+    }
+
     /// COUNTFLAG is set (reading CSR clears it).
     pub fn countflag(&self) -> bool {
         self.csr & CSR_COUNTFLAG != 0

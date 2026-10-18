@@ -162,6 +162,11 @@ pub struct System {
     idle: IdleDetector,
     /// Fast-forward idle loops to the next event (disable for debugging).
     pub idle_skipping: bool,
+    /// A BKPT without halting debug ends [`Machine::run`] with
+    /// [`StopReason::Breakpoint`] (default; test programs end that way).
+    /// Otherwise it escalates to HardFault (HFSR.DEBUGEVT) like on the chip,
+    /// where a debug probe may leave the core on a BKPT when it disconnects.
+    pub bkpt_stops: bool,
     /// [`Machine::step`] is executing a single instruction.
     stepping: bool,
     /// A watchpoint (start address, kind) was hit during the current run.
@@ -757,6 +762,7 @@ impl Machine {
             reset_requested: None,
             idle: IdleDetector::default(),
             idle_skipping: true,
+            bkpt_stops: true,
             stepping: false,
             watch_hit: None,
         };
@@ -1160,6 +1166,37 @@ impl Machine {
     pub fn is_halted(&self) -> bool {
         let sys = self.uc.get_data();
         sys.debug.halted() || sys.reset_held
+    }
+
+    /// Lets `cycles` pass while the core is halted by a debug probe or held
+    /// in reset: as on the chip, peripherals and the flash interface run on
+    /// (a probe polls FLASH_SR.BSY with the core halted); SysTick and
+    /// DWT_CYCCNT stand still. Does nothing if the core is not halted.
+    pub fn advance_halted(&mut self, cycles: u64) {
+        if !self.is_halted() {
+            return;
+        }
+        let target = self.clock().cycles() + cycles;
+        loop {
+            let sys = self.uc.get_data_mut();
+            let now = sys.clock.cycles();
+            if now >= target {
+                break;
+            }
+            let step = sys.bus.next_event().map_or(target, |t| t.clamp(now + 1, target)) - now;
+            sys.clock.advance(step);
+            sys.scs.core_halted_for(step);
+            sys.sync_devices();
+            if let Some(kind) = sys.reset_requested.take() {
+                // e.g. the watchdog: debug state survives, the halt only with vector catch
+                self.reset_with(kind);
+                if !self.is_halted() {
+                    break;
+                }
+            }
+        }
+        self.uc.get_data_mut().service_flash();
+        self.take_flash_dirty();
     }
 
     /// The core locked up (until a reset or a debugger halts it).
@@ -1912,8 +1949,12 @@ impl Machine {
                     // Halting debug: the core enters debug state at the BKPT.
                     sys.debug.halt(debug::DFSR_BKPT);
                     sys.stop = Some(StopReason::Halted { pc });
-                } else {
+                } else if sys.bkpt_stops {
                     sys.stop = Some(StopReason::Breakpoint { pc });
+                } else {
+                    sys.scs.hfsr |= scs::HFSR_DEBUGEVT;
+                    Self::raise_fault(uc, nvic::HARD_FAULT, pc);
+                    return;
                 }
                 sys.request_stop();
             }

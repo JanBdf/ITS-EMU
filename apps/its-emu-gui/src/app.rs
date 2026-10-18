@@ -98,10 +98,11 @@ impl App {
         cc: &eframe::CreationContext,
         firmware: Option<PathBuf>,
         gdb_addr: Option<String>,
+        usb: Option<emu::UsbConfig>,
         ideal_colors: bool,
     ) -> Self {
         let ctx = cc.egui_ctx.clone();
-        let emu = emu::spawn(move || ctx.request_repaint(), gdb_addr);
+        let emu = emu::spawn(move || ctx.request_repaint(), gdb_addr, usb);
         if ideal_colors {
             emu.send(Command::IdealColors(true));
         }
@@ -143,7 +144,7 @@ impl eframe::App for App {
 
         // ---- take the latest snapshot
         let mut new_frame = false;
-        let (state, firmware, led_duty, inputs, nucleo_duty, virtual_ns, core_mhz, speed, gdb, dac1) = {
+        let (state, firmware, led_duty, inputs, nucleo_duty, virtual_ns, core_mhz, speed, gdb, usb, dac1) = {
             let mut snap = self.emu.snapshot.lock().unwrap();
             if snap.display_generation != self.display_generation {
                 self.display_generation = snap.display_generation;
@@ -169,6 +170,7 @@ impl eframe::App for App {
                 snap.core_mhz,
                 snap.speed,
                 (snap.gdb.clone(), snap.gdb_attached),
+                (snap.usb.clone(), snap.usb_attached),
                 snap.dac1,
             )
         };
@@ -259,6 +261,23 @@ impl eframe::App for App {
                     (Ok(addr), false) => ui.label(format!("GDB: {addr}")),
                     (Err(e), _) => ui.label(RichText::new(format!("GDB: {e}")).color(ui.visuals().weak_text_color())),
                 };
+                match &usb {
+                    (Ok((addr, _)), true) => {
+                        ui.separator();
+                        ui.label(RichText::new("ST-LINK plugged in (USB/IP)").color(OK_GREEN))
+                            .on_hover_text(format!("exported on {addr}"));
+                    }
+                    (Ok((addr, cmd)), false) => {
+                        ui.separator();
+                        ui.label(format!("ST-LINK: USB/IP {addr}"))
+                            .on_hover_text(format!("plug it in with\n{cmd}\n(needs the vhci-hcd kernel module)"));
+                    }
+                    (Err(e), _) if e != "off" => {
+                        ui.separator();
+                        ui.label(RichText::new(format!("ST-LINK: {e}")).color(ERR_RED));
+                    }
+                    (Err(_), _) => {}
+                }
             });
         });
 

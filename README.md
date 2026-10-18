@@ -13,11 +13,12 @@ Status: work in progress — see [PLAN.md](PLAN.md).
 |---|---|
 | CPU | Cortex-M4F (Thumb-2, FPU) via [Unicorn](https://www.unicorn-engine.org/); NVIC, SysTick, exceptions, faults in Rust |
 | Clock | RCC clock tree, virtual time in CPU cycles (16 MHz HSI → 180 MHz PLL); cycle model of the Cortex-M4 (loads, branches, divisions, exceptions, APB wait states) measured on the board |
-| Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (up/down/center-aligned counting, output compare and PWM on the pins, input capture, encoder mode, slave modes reset/gated/trigger/external clock with TI1/TI2, TIM1/8 repetition counter), ADC1–3 (regular group started by TIM2/TIM3/TIM8 TRGO), DAC (timer triggers, noise/triangle waves), I²C1–3 (master; nothing connected answers with NACK), SPI1–6, USART1–6 + UART4/5/7/8 (only USART3 connected), IWDG (watchdog reset, reset flags in RCC_CSR), CRC, RNG, DMA1/2 (direct mode; requests from the ADCs, U(S)ARTs, SPIs and the DAC), PWR, flash interface, bit-banding |
+| Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (up/down/center-aligned counting, output compare and PWM on the pins, input capture, encoder mode, slave modes reset/gated/trigger/external clock with TI1/TI2, TIM1/8 repetition counter), ADC1–3 (regular group started by TIM2/TIM3/TIM8 TRGO), DAC (timer triggers, noise/triangle waves), I²C1–3 (master; nothing connected answers with NACK), SPI1–6, USART1–6 + UART4/5/7/8 (only USART3 connected), IWDG (watchdog reset, reset flags in RCC_CSR), CRC, RNG, DMA1/2 (direct mode; requests from the ADCs, U(S)ARTs, SPIs and the DAC), PWR, flash interface (programming and sector/mass erase with the datasheet's timing), bit-banding |
 | Board | LEDs OUT0–15, buttons S0–S7, INT0–5, Analog header (voltages on the ADC pins, DAC1), Nucleo LEDs and USER button; external devices on any pins: rotary encoder, DS18B20 1-Wire temperature sensors (command line) |
 | Display | ILI9486 480×320 TFT with SPI timing, XPT2046 touch, backlight PWM, tone response of the real panel (GUI; `--ideal-colors` to switch off) |
 | Serial | Virtual COM port (USART3, `printf` / `stdin_getchar`) |
 | Debugging | GDB remote server: breakpoints, single step, watchpoints, registers incl. FPU, memory, `monitor reset halt` |
+| USB (Linux) | The Nucleo's ST-LINK/V2-1 over USB/IP: debug probe for pyOCD (the course's *STLink@pyOCD* configurations, *CMSIS Load*) and OpenOCD, and the virtual COM port (`/dev/ttyACM*`). Behind it the debug port: halting debug (DHCSR, DCRSR/DCRDR, DEMCR, vector catch), FPB breakpoints, DWT watchpoints, ROM table and CoreSight IDs |
 
 Not yet: Ethernet, DMA requests of I²C/timers, devices on the I²C header, timer slave modes with internal triggers, the ADC trigger sources other than timer update events.
 
@@ -109,6 +110,48 @@ Several debuggers may connect at once: the first one controls the core, the
 others (such as the CDT adapter's auxiliary GDB for live watch) read and write
 memory and registers while it runs. Breakpoints do not modify memory, so they
 also work in flash. Watchpoints slow emulation down while they are set.
+
+## The board's ST-LINK on USB (Linux)
+
+With `--usb` the emulator also exports the Nucleo's on-board ST-LINK/V2-1 over
+USB/IP. Attached with the kernel's `vhci-hcd` driver, the computer sees the
+same USB device as with the real board plugged in: a debug probe
+(0483:3752, ST-LINK/V2-1 without mass storage) and a virtual COM port. The
+course tools then work unchanged — *CMSIS Load* flashes with pyOCD and the
+pack's flash algorithm (which runs on the emulated core and programs flash
+through the emulated FLASH interface), *STLink@pyOCD (launch)* debugs through
+pyOCD's GDB server, and a terminal program talks to `/dev/ttyACM0`.
+
+```sh
+sudo pacman -S usbip            # Debian/Ubuntu: linux-tools-generic (usbip)
+sudo modprobe vhci-hcd          # once per boot (or add it to /etc/modules-load.d)
+
+its-emu-gui --usb               # or: its-emu Program.axf --usb
+sudo usbip attach -r 127.0.0.1 -b 1-1
+```
+
+`--usb-attach` runs the `sudo usbip attach` itself. Quitting the emulator
+unplugs the device. The GUI shows *ST-LINK plugged in* in its status bar;
+its own GDB server then stays off (pyOCD's GDB server takes port 3333) unless
+`--gdb` is given. The udev rules that pyOCD/OpenOCD install for the real probe
+(e.g. `60-openocd.rules`) cover the emulated one, so no root rights are
+needed after attaching. Other machines can attach it too
+(`--usb 0.0.0.0:3240`, then `usbip attach -r HOST -b 1-1`; on Windows the
+usbip-win2 client should do the same, not tried yet).
+
+While the probe holds the core halted, time goes on for the peripherals and
+the flash interface (as on the chip, where only the core and with it SysTick
+and DWT->CYCCNT stop), so OpenOCD's register-level flash driver works too.
+With the probe plugged in, a BKPT without a debugger is a HardFault as on the
+chip (pyOCD leaves the core on its flash algorithm's BKPT when it detaches).
+
+Known differences: there is no mass storage drive (drag-and-drop flashing) and
+no SWO trace; the virtual COM port ignores the baud rate the host sets;
+programming flash bits that are not erased stores the new value (the chip
+ANDs it); a flash store with a wrong size or without PG faults instead of
+only setting PGPERR/PGSERR. The ROM table and DBGMCU_IDCODE use ST's values
+for the STM32F429 (device 0x419, revision 3); compare with the board using
+HwCheck's `rd`.
 
 ## Comparison with the real board
 
