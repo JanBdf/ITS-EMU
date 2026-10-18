@@ -1,7 +1,21 @@
-post_install() {
+load_vhci() {
   # USB/IP host driver for the emulated ST-LINK: loaded at boot from now on
-  # (modules-load.d), here for the running system
-  modprobe vhci-hcd 2>/dev/null || true
+  # (modules-load.d), here for the running system. A kernel update without a
+  # restart since has removed the running kernel's modules.
+  modprobe vhci-hcd 2>/dev/null && return
+  if [ ! -d "/usr/lib/modules/$(uname -r)" ]; then
+    cat <<MSG
+==> WARNING: the running kernel ($(uname -r)) was updated without a restart
+    since, its modules are gone. Restart the computer before using the
+    emulator's USB ST-LINK (the vhci-hcd module cannot be loaded until then).
+MSG
+  else
+    echo "==> WARNING: cannot load the vhci-hcd kernel module (USB ST-LINK of the emulator)"
+  fi
+}
+
+post_install() {
+  load_vhci
   cat <<'MSG'
 ==> ITS-Board emulator: its-emu (command line), its-emu-gui (application menu).
 ==> The VS Code extension "gdbtarget: Run Without Debugging" is built in to
@@ -14,5 +28,5 @@ MSG
 }
 
 post_upgrade() {
-  modprobe vhci-hcd 2>/dev/null || true
+  load_vhci
 }
