@@ -16,3 +16,8 @@
 !/tests/fixtures/ac6/HwCheck.axf
 
 /tools/vscode-nodebug/*.vsix
+
+# makepkg output
+/packaging/arch/src/
+/packaging/arch/pkg/
+/packaging/arch/*.pkg.tar.*

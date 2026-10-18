@@ -8,7 +8,7 @@ use emu_core::dap::{DPIDR, DapError};
 use crate::{PID, Stlink, VID};
 
 pub const MODE_MASS: u8 = 0x01;
-const MODE_DEBUG: u8 = 0x02;
+pub const MODE_DEBUG: u8 = 0x02;
 
 pub const STATUS_OK: u8 = 0x80;
 const STATUS_UNKNOWN_CMD: u8 = 0x42;

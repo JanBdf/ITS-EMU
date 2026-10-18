@@ -1,0 +1,8 @@
+post_install() {
+  # loaded at boot from then on (modules-load.d); now for the current session
+  modprobe vhci-hcd 2>/dev/null || true
+}
+
+post_upgrade() {
+  post_install
+}

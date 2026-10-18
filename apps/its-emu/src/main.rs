@@ -278,7 +278,7 @@ fn main() -> Result<()> {
                 probe.attach_command()
             );
             if args.usb_attach {
-                stlink::spawn_attach(probe.local_addr());
+                let _ = stlink::spawn_attach(probe.local_addr());
             }
             Some(probe)
         }

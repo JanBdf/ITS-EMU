@@ -1,0 +1,59 @@
+# Arch Linux package of the ITS-Board emulator, built from this checkout:
+#
+#   cd packaging/arch && makepkg -si        # build and install here
+#   makepkg && scp its-emu-*.pkg.tar.zst laptop:   # then: sudo pacman -U its-emu-*.pkg.tar.zst
+#
+# Installs the GUI (desktop entry "ITS-Board Emulator"), the command line
+# version, and what the board's ST-LINK on USB/IP needs: the vhci-hcd module
+# at boot, a polkit-authorized helper that runs `usbip attach` (so the GUI
+# plugs the probe in without a terminal) and udev access for the logged-in
+# user to the probe and its virtual COM port.
+
+pkgname=its-emu
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Emulator of the HAW Hamburg ITS-Board (STM32F429) with display, GDB server and a USB ST-LINK for pyOCD"
+arch=('x86_64' 'aarch64')
+license=('MIT')
+# The GUI loads the windowing libraries at run time.
+depends=('glibc' 'gcc-libs' 'libxkbcommon' 'wayland' 'libglvnd' 'usbip' 'polkit' 'hicolor-icon-theme')
+optdepends=(
+  'libx11: X11 sessions'
+  'libxcursor: X11 sessions'
+  'libxrandr: X11 sessions'
+  'libxi: X11 sessions'
+  'xdg-desktop-portal: file dialog'
+  'arm-none-eabi-gdb: debugging through the built-in GDB server'
+)
+makedepends=('cargo' 'cmake' 'clang' 'git')
+install=its-emu.install
+# Unicorn's C code is built by CMake inside cargo; makepkg's LTO flags do not suit it.
+options=('!lto' '!debug')
+
+_root="$(realpath "$startdir/../..")"
+
+pkgver() {
+  cd "$_root"
+  local version
+  version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "$_root"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --locked -p its-emu -p its-emu-gui
+}
+
+package() {
+  install -Dm755 "$srcdir/target/release/its-emu-gui" "$pkgdir/usr/bin/its-emu-gui"
+  install -Dm755 "$srcdir/target/release/its-emu" "$pkgdir/usr/bin/its-emu"
+  cd "$startdir"
+  install -Dm755 usbip-attach "$pkgdir/usr/lib/its-emu/usbip-attach"
+  install -Dm644 its-emu.policy "$pkgdir/usr/share/polkit-1/actions/its-emu.usbip-attach.policy"
+  install -Dm644 vhci-hcd.conf "$pkgdir/usr/lib/modules-load.d/its-emu.conf"
+  install -Dm644 70-its-emu-stlink.rules "$pkgdir/usr/lib/udev/rules.d/70-its-emu-stlink.rules"
+  install -Dm644 its-emu.desktop "$pkgdir/usr/share/applications/its-emu.desktop"
+  install -Dm644 its-emu.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/its-emu.svg"
+  install -Dm644 "$_root/README.md" "$pkgdir/usr/share/doc/its-emu/README.md"
+}
