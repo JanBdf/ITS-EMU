@@ -13,12 +13,12 @@ Status: work in progress — see [PLAN.md](PLAN.md).
 > project. The names *HAW Hamburg*, *ITS-Board* and *ITS-BRD-VSC* are used
 > only to describe what the emulator is compatible with. The emulator is not a
 > substitute for the real board: results may differ from the hardware, and
-> course or exam requirements always refer to the real ITS-Board. Questions
-> about this emulator go to its issue tracker, not to the course staff.
+> course or exam requirements always refer to the real ITS-Board. Please do
+> not contact the course staff about this emulator.
 
 ## Installation
 
-Packages are published on the [Releases](../../releases) page:
+Packages are published on the [Releases](https://github.com/JanBdf/ITS-EMU/releases) page:
 
 | Platform | Package | Install |
 |---|---|---|
