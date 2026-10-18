@@ -63,6 +63,11 @@ impl UsbProbe {
         self.server.is_attached()
     }
 
+    /// A debugger has the probe in debug mode (between JTAG_ENTER and JTAG_EXIT).
+    pub fn debug_active(&self) -> bool {
+        self.server.is_attached() && self.device.mode == commands::MODE_DEBUG
+    }
+
     /// Handles USB requests; returns true if any completed.
     pub fn poll(&mut self, m: &mut Machine) -> bool {
         self.server.poll(&mut self.device, m)
@@ -86,23 +91,46 @@ pub fn attach_command(addr: std::net::SocketAddr) -> String {
     format!("sudo usbip{port} attach -r {host} -b {BUSID}")
 }
 
-/// Runs [`attach_command`] in the background (needs the `vhci-hcd` kernel
-/// module and sudo rights); the result is logged.
-pub fn spawn_attach(addr: std::net::SocketAddr) {
-    let cmd = attach_command(addr);
+/// Helper installed by the package (`packaging/arch`): attaches the probe on
+/// 127.0.0.1 through polkit, so that the GUI needs no terminal for sudo.
+pub const ATTACH_HELPER: &str = "/usr/lib/its-emu/usbip-attach";
+
+/// Plugs the probe listening on `addr` into this Linux host, in the
+/// background: with the packaged helper through `pkexec` if it is installed
+/// (local address), otherwise with `sudo -n usbip attach`. Needs the
+/// `vhci-hcd` kernel module. The outcome arrives on the returned channel
+/// (and is logged).
+pub fn spawn_attach(addr: std::net::SocketAddr) -> std::sync::mpsc::Receiver<Result<(), String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let local = addr.ip().is_loopback() || addr.ip().is_unspecified();
+    let argv: Vec<String> = if local && std::path::Path::new(ATTACH_HELPER).exists() {
+        vec!["pkexec".into(), ATTACH_HELPER.into(), addr.port().to_string()]
+    } else {
+        let cmd = attach_command(addr).replacen("sudo ", "sudo -n ", 1);
+        cmd.split_whitespace().map(String::from).collect()
+    };
     std::thread::spawn(move || {
-        let mut words = cmd.split_whitespace();
-        let program = words.next().unwrap_or("sudo");
-        let result = std::process::Command::new(program).args(words).output();
-        match result {
-            Ok(out) if out.status.success() => log::info!("attached the ST-LINK: {cmd}"),
-            Ok(out) => log::warn!(
-                "`{cmd}` failed: {} (is the vhci-hcd module loaded? `sudo modprobe vhci-hcd`)",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-            Err(e) => log::warn!("cannot run `{cmd}`: {e}"),
+        let shown = argv.join(" ");
+        let result = match std::process::Command::new(&argv[0]).args(&argv[1..]).output() {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+                let hint = if std::path::Path::new("/sys/devices/platform/vhci_hcd.0").exists() {
+                    ""
+                } else {
+                    " — the vhci-hcd kernel module is not loaded (sudo modprobe vhci-hcd)"
+                };
+                Err(format!("{err}{hint}"))
+            }
+            Err(e) => Err(format!("cannot run {}: {e}", argv[0])),
+        };
+        match &result {
+            Ok(()) => log::info!("attached the ST-LINK: {shown}"),
+            Err(e) => log::warn!("`{shown}` failed: {e}"),
         }
+        let _ = tx.send(result);
     });
+    rx
 }
 
 /// The ST-LINK as a USB device. Lives on the emulator thread.

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <!-- The user at the computer may plug the emulated ST-LINK in without a
+       password; it is attached from 127.0.0.1 only (see usbip-attach).
+       To require the admin password, override with a polkit rule, e.g.
+       /etc/polkit-1/rules.d/50-its-emu.rules:
+         polkit.addRule(function(a, s) {
+           if (a.id == "its-emu.usbip-attach") return polkit.Result.AUTH_ADMIN_KEEP;
+         });
+  -->
+  <action id="its-emu.usbip-attach">
+    <description>Plug the ITS-Board emulator's ST-LINK into this computer</description>
+    <message>Authentication is required to attach the emulated ST-LINK (USB/IP)</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/its-emu/usbip-attach</annotate>
+  </action>
+</policyconfig>
