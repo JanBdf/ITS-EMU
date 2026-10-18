@@ -30,8 +30,13 @@ jobs:
   test:
     name: test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
-    # Unicorn has not been tried on Windows on Arm yet.
+    # Unicorn's MSVC build only knows x86 hosts (it hard-codes __x86_64__, the
+    # i386 TCG backend and an x64 MASM setjmp wrapper), so Windows on Arm builds
+    # the x64 binaries and runs them under the system's x64 emulation.
     continue-on-error: ${{ matrix.experimental }}
+    env:
+      TARGET: ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+      BIN: target/${{ matrix.target && format('{0}/', matrix.target) || '' }}release
     strategy:
       fail-fast: false
       matrix:
@@ -39,12 +44,14 @@ jobs:
           - { name: linux-x64, os: ubuntu-24.04, experimental: false }
           - { name: linux-arm64, os: ubuntu-24.04-arm, experimental: false }
           - { name: windows-x64, os: windows-2025, experimental: false }
-          - { name: windows-arm64, os: windows-11-arm, experimental: true }
+          - { name: windows-arm64, os: windows-11-arm, experimental: true, target: x86_64-pc-windows-msvc }
           - { name: macos-arm64, os: macos-15, experimental: false }
           - { name: macos-x64, os: macos-15-intel, experimental: false }
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}
@@ -56,9 +63,9 @@ jobs:
 
       # Release mode: the emulator tests run seconds of virtual time.
       - name: Build
-        run: cargo build --release --workspace --locked
+        run: cargo build --release --workspace --locked ${{ env.TARGET }}
       - name: Test
-        run: cargo test --release --workspace --locked
+        run: cargo test --release --workspace --locked ${{ env.TARGET }}
 
       - name: Throughput
         shell: bash
@@ -67,9 +74,9 @@ jobs:
             echo "### Throughput on ${{ matrix.name }}"
             echo '```'
             echo "bench.elf (compute phase, then MMIO polling phase):"
-            target/release/its-emu tests/fixtures/micro/bench.elf --no-fonts --continue-on-bkpt --seconds 30 2>/dev/null | grep MIPS
+            $BIN/its-emu tests/fixtures/micro/bench.elf --no-fonts --continue-on-bkpt --seconds 30 2>/dev/null | grep MIPS
             echo "TestNewFont.axf (5 s virtual, display output):"
-            target/release/its-emu tests/fixtures/ac6/TestNewFont.axf --seconds 5 2>/dev/null | grep MIPS
+            $BIN/its-emu tests/fixtures/ac6/TestNewFont.axf --seconds 5 2>/dev/null | grep MIPS
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -77,9 +84,9 @@ jobs:
         with:
           name: its-emu-${{ matrix.name }}
           path: |
-            target/release/its-emu
-            target/release/its-emu-gui
-            target/release/its-emu.exe
-            target/release/its-emu-gui.exe
+            ${{ env.BIN }}/its-emu
+            ${{ env.BIN }}/its-emu-gui
+            ${{ env.BIN }}/its-emu.exe
+            ${{ env.BIN }}/its-emu-gui.exe
           if-no-files-found: error
           retention-days: 14
