@@ -124,17 +124,14 @@ emulated core and programs flash through the emulated FLASH interface),
 *STLink@pyOCD (launch)* debugs through pyOCD's GDB server, and a terminal
 program talks to `/dev/ttyACM0`.
 
-**Arch Linux package** (`packaging/arch`): installs the GUI with a desktop
-entry (*ITS-Board Emulator* in the app launcher), `its-emu`, and everything
-the ST-LINK needs — `usbip`, `vhci-hcd` loaded at boot, a helper that polkit
-lets the user at the computer run without a password to attach the probe
-(only from 127.0.0.1), and udev access to the probe and its COM port.
-
-```sh
-cd packaging/arch && makepkg -si                 # build and install
-# or build here and install elsewhere:
-makepkg && sudo pacman -U its-emu-*.pkg.tar.zst
-```
+**Arch Linux package** ([below](#arch-linux-package),
+`packaging/arch/build.sh`): installs the GUI with a desktop entry
+(*ITS-Board Emulator* in the app launcher), `its-emu`, and everything the
+ST-LINK needs — `usbip`, `vhci-hcd` loaded at boot, a helper that polkit lets
+the user at the computer run without a password to attach the probe (only
+from 127.0.0.1), and udev access to the probe and its COM port. The package
+file can be installed on other Arch machines as it is
+(`sudo pacman -U its-emu-*.pkg.tar.zst`).
 
 Started from the launcher, the GUI plugs the ST-LINK in by itself: the
 toolbar switch **USB ST-LINK** (remembered in `~/.config/its-emu/gui.conf`,
@@ -227,6 +224,24 @@ experimental). It installs `gdb-multiarch` on Linux for the GDB server tests,
 records throughput in the job summary and keeps the binaries as artifacts for
 14 days. The tests that need the personal lab solutions in `tests/fixtures/ac6`
 (not published) skip themselves there.
+
+### Arch Linux package
+
+`packaging/arch/build.sh` builds a pacman package of the current checkout
+into `dist/` (version `0.1.0.r<commits>.g<hash>`, so each new commit is an
+update; uncommitted changes are included but keep the version). It contains
+both programs, a desktop entry with icon, the VS Code extension from
+`tools/vscode-nodebug`, built in to Arch's `code` package (and as `.vsix` in
+`/usr/share/its-emu` for other VS Code builds), and what the USB ST-LINK
+needs ([above](#the-boards-st-link-on-usb-linux)). The emulator writes
+nothing to the home directory except the GUI's toolbar setting
+(`~/.config/its-emu/gui.conf`).
+
+```sh
+packaging/arch/build.sh
+sudo pacman -U dist/its-emu-<version>-x86_64.pkg.tar.zst   # install or update
+sudo pacman -Rns its-emu                                   # remove
+```
 
 Test fixtures in `tests/fixtures/ac6` are rebuilt from a checkout of
 ITS-BRD-VSC with `tools/build-fixtures.sh` (needs the CMSIS-Toolbox and Arm

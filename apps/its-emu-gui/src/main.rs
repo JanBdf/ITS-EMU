@@ -53,8 +53,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("ITS-Board Emulator")
-            // Wayland app id = name of the desktop entry (icon in the launcher/task bar)
-            .with_app_id("its-emu")
+            // matches the desktop file of the Linux package (window icon, taskbar grouping)
+            .with_app_id("its-emu-gui")
             .with_inner_size([1280.0, 1000.0])
             .with_drag_and_drop(true),
         // dithering adds noise that makes the small print of the board drawing hard to read
