@@ -243,7 +243,7 @@ impl eframe::App for App {
                 }
                 ui.separator();
                 let mut on = self.usb_on;
-                let switch = ui.toggle_value(&mut on, "🔌 ST-LINK").on_hover_text(usb_hover(&usb));
+                let switch = ui.toggle_value(&mut on, "USB ST-LINK").on_hover_text(usb_hover(&usb));
                 if switch.changed() {
                     self.usb_on = on;
                     self.emu.send(Command::SetUsb(on));

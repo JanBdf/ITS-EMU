@@ -188,6 +188,9 @@ pub fn spawn(repaint: impl Fn() + Send + 'static, gdb_addr: Option<String>, usb:
     EmuHandle { commands: tx, snapshot, thread: Some(thread) }
 }
 
+/// GDB server status while pyOCD (its own GDB server) uses the ST-LINK.
+const PORT_LEFT_TO_PYOCD: &str = "port left to pyOCD (ST-LINK in use)";
+
 /// Virtual time executed between two looks at the command queue / clock.
 const SLICE: Duration = Duration::from_millis(4);
 /// Minimum interval between snapshot updates (UI refresh).
@@ -352,12 +355,14 @@ impl Worker {
     /// the ST-LINK in debug mode (`pyocd gdbserver` listens on the same port).
     fn manage_gdb(&mut self) {
         let Some(addr) = self.gdb_addr.clone() else { return };
-        let probe_busy = self.usb.as_ref().is_some_and(stlink::UsbProbe::debug_active);
+        // pyOCD binds its GDB server right after connecting; one that was
+        // killed leaves the probe in debug mode, but then the port is free.
+        let probe_busy = self.usb.as_ref().is_some_and(|p| p.debug_busy(Duration::from_millis(1500)));
         match &self.gdb {
             Some(server) if probe_busy && !server.has_controller() => {
                 log::info!("GDB server closed: pyOCD uses the ST-LINK");
                 self.gdb = None;
-                self.gdb_status = Err("port left to pyOCD (ST-LINK in use)".to_owned());
+                self.gdb_status = Err(PORT_LEFT_TO_PYOCD.to_owned());
                 self.execution = Execution::Free;
             }
             None if !probe_busy && Instant::now() >= self.gdb_retry_at => match GdbServer::bind(addr.as_str()) {
@@ -369,8 +374,9 @@ impl Worker {
                 }
                 Err(e) => {
                     // e.g. pyOCD's GDB server still holds the port: try again later
-                    let msg = format!("{addr}: {e}");
-                    if self.gdb_status.as_ref().err() != Some(&msg) {
+                    let pyocd = self.usb.as_ref().is_some_and(stlink::UsbProbe::debug_active);
+                    let msg = if pyocd { PORT_LEFT_TO_PYOCD.to_owned() } else { format!("{addr}: {e}") };
+                    if !pyocd && self.gdb_status.as_ref().err() != Some(&msg) {
                         log::warn!("cannot start GDB server on {msg}");
                     }
                     self.gdb_status = Err(msg);

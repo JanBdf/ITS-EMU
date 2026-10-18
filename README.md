@@ -72,9 +72,10 @@ code copies them from, and the program misbehaves. Use `monitor load` for
 course programs.
 
 The course's VS Code launch configurations always start pyOCD with
-`--probe stlink:`, which only finds a USB ST-LINK, so the emulator needs its
-own configuration (`.vscode/launch.json` of the course project, CDT GDB
-adapter). It loads the last build of the project that is active in the CMSIS
+`--probe stlink:`, which only finds a USB ST-LINK. On Linux the emulator can
+be one ([below](#the-boards-st-link-on-usb-linux)) and they work unchanged;
+otherwise the emulator needs its own configuration (`.vscode/launch.json` of
+the course project, CDT GDB adapter). It loads the last build of the project that is active in the CMSIS
 extension, resets and stops at `main`, like **STLink@pyOCD (launch)** on the
 board:
 
@@ -113,31 +114,54 @@ also work in flash. Watchpoints slow emulation down while they are set.
 
 ## The board's ST-LINK on USB (Linux)
 
-With `--usb` the emulator also exports the Nucleo's on-board ST-LINK/V2-1 over
-USB/IP. Attached with the kernel's `vhci-hcd` driver, the computer sees the
-same USB device as with the real board plugged in: a debug probe
-(0483:3752, ST-LINK/V2-1 without mass storage) and a virtual COM port. The
-course tools then work unchanged — *CMSIS Load* flashes with pyOCD and the
-pack's flash algorithm (which runs on the emulated core and programs flash
-through the emulated FLASH interface), *STLink@pyOCD (launch)* debugs through
-pyOCD's GDB server, and a terminal program talks to `/dev/ttyACM0`.
+The emulator can also be the Nucleo's on-board ST-LINK/V2-1 on the USB of
+your computer, exported over USB/IP and attached with the kernel's
+`vhci-hcd` driver. The computer then sees the same USB device as with the
+real board plugged in: a debug probe (0483:3752, ST-LINK/V2-1 without mass
+storage) and a virtual COM port. The course tools work unchanged — *CMSIS
+Load* flashes with pyOCD and the pack's flash algorithm (which runs on the
+emulated core and programs flash through the emulated FLASH interface),
+*STLink@pyOCD (launch)* debugs through pyOCD's GDB server, and a terminal
+program talks to `/dev/ttyACM0`.
+
+**Arch Linux package** (`packaging/arch`): installs the GUI with a desktop
+entry (*ITS-Board Emulator* in the app launcher), `its-emu`, and everything
+the ST-LINK needs — `usbip`, `vhci-hcd` loaded at boot, a helper that polkit
+lets the user at the computer run without a password to attach the probe
+(only from 127.0.0.1), and udev access to the probe and its COM port.
+
+```sh
+cd packaging/arch && makepkg -si                 # build and install
+# or build here and install elsewhere:
+makepkg && sudo pacman -U its-emu-*.pkg.tar.zst
+```
+
+Started from the launcher, the GUI plugs the ST-LINK in by itself: the
+toolbar switch **USB ST-LINK** (remembered in `~/.config/its-emu/gui.conf`,
+on by default) and the status bar show its state (*plugged in*, *in use by a
+debugger*, or why attaching failed). Quitting or switching it off unplugs
+it. The emulator's own GDB server (port 3333, for the *ITS-Board Emulator*
+debug configuration) leaves the port to pyOCD while pyOCD has the ST-LINK in
+debug mode and takes it back afterwards, so both debug configurations work
+without changing anything.
+
+**Without the package**:
 
 ```sh
 sudo pacman -S usbip            # Debian: apt install usbip; Ubuntu: linux-tools-generic
 sudo modprobe vhci-hcd          # once per boot (or add it to /etc/modules-load.d)
 
-its-emu-gui --usb               # or: its-emu Program.axf --usb
-sudo usbip attach -r 127.0.0.1 -b 1-1
+its-emu-gui                     # attaches with `sudo -n usbip attach` (passwordless sudo)
+its-emu Program.axf --usb --usb-attach
+sudo usbip attach -r 127.0.0.1 -b 1-1    # by hand (its-emu-gui --no-usb-attach, its-emu --usb)
 ```
 
-`--usb-attach` runs the `sudo usbip attach` itself. Quitting the emulator
-unplugs the device. The GUI shows *ST-LINK plugged in* in its status bar;
-its own GDB server then stays off (pyOCD's GDB server takes port 3333) unless
-`--gdb` is given. The udev rules that pyOCD/OpenOCD install for the real probe
-(e.g. `60-openocd.rules`) cover the emulated one, so no root rights are
-needed after attaching. Other machines can attach it too
-(`--usb 0.0.0.0:3240`, then `usbip attach -r HOST -b 1-1`; on Windows the
-usbip-win2 client should do the same, not tried yet).
+`its-emu-gui --no-usb` / `--usb[=ADDR]` override the switch for one run.
+Without the packaged udev rule, the rules that pyOCD/OpenOCD install for the
+real probe (e.g. `60-openocd.rules`) cover the emulated one too. Other
+machines can attach it as well (`--usb 0.0.0.0:3240`, then
+`usbip attach -r HOST -b 1-1`; on Windows the usbip-win2 client should do the
+same, not tried yet).
 
 While the probe holds the core halted, time goes on for the peripherals and
 the flash interface (as on the chip, where only the core and with it SysTick

@@ -49,6 +49,7 @@ fn le32(b: &[u8], at: usize) -> u32 {
 impl Stlink {
     /// An OUT transfer on the debug endpoint: a command or write data.
     pub(crate) fn debug_out(&mut self, m: &mut Machine, data: &[u8]) {
+        self.last_command = Some(std::time::Instant::now());
         if let Some(mut w) = self.pending_write.take() {
             let need = w.len - w.data.len();
             w.data.extend_from_slice(&data[..need.min(data.len())]);
