@@ -68,6 +68,12 @@ impl UsbProbe {
         self.server.is_attached() && self.device.mode == commands::MODE_DEBUG
     }
 
+    /// The probe is in debug mode and got a debug command within `recent`.
+    /// (A debugger that was killed never leaves debug mode.)
+    pub fn debug_busy(&self, recent: std::time::Duration) -> bool {
+        self.debug_active() && self.device.last_command.is_some_and(|t| t.elapsed() < recent)
+    }
+
     /// Handles USB requests; returns true if any completed.
     pub fn poll(&mut self, m: &mut Machine) -> bool {
         self.server.poll(&mut self.device, m)
@@ -147,6 +153,8 @@ pub struct Stlink {
     /// Response bytes for the debug IN endpoint.
     response: VecDeque<u8>,
     vcp: vcp::Vcp,
+    /// When the last debug command arrived.
+    last_command: Option<std::time::Instant>,
 }
 
 impl Stlink {
@@ -162,6 +170,7 @@ impl Stlink {
             pending_write: None,
             response: VecDeque::new(),
             vcp: vcp::Vcp::new(serial),
+            last_command: None,
         }
     }
 
