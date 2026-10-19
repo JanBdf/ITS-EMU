@@ -43,7 +43,15 @@ pub struct App {
     /// The toolbar switch of the ST-LINK.
     usb_on: bool,
     settings: Settings,
+    /// Only the display, as large as the window allows (right click on the display).
+    lcd_focus: bool,
+    /// The Nucleo and the display see-through, with this opacity.
+    see_through: Option<f32>,
+    /// Filter the display texture was made with (sharp pixels when it is shown alone).
+    display_options: egui::TextureOptions,
 }
+
+const SEE_THROUGH_DEFAULT: f32 = 0.25;
 
 /// Saves a picture of the own window and quits (`ITS_EMU_GUI_SCREENSHOT=file.png[:seconds]`).
 /// Used for documentation and automated visual checks.
@@ -157,6 +165,12 @@ impl App {
             self_screenshot: SelfScreenshot::from_env(),
             usb_on,
             settings,
+            // ITS_EMU_GUI_VIEW=lcd or see-through: start in that view (documentation, visual checks)
+            lcd_focus: std::env::var("ITS_EMU_GUI_VIEW").is_ok_and(|v| v == "lcd"),
+            see_through: std::env::var("ITS_EMU_GUI_VIEW")
+                .is_ok_and(|v| v == "see-through")
+                .then_some(SEE_THROUGH_DEFAULT),
+            display_options: egui::TextureOptions::LINEAR,
         }
     }
 
@@ -206,11 +220,18 @@ impl eframe::App for App {
             )
         };
 
-        if new_frame {
+        // shown alone and enlarged, the display's pixels stay sharp
+        let options = if self.lcd_focus {
+            egui::TextureOptions { magnification: egui::TextureFilter::Nearest, ..egui::TextureOptions::LINEAR }
+        } else {
+            egui::TextureOptions::LINEAR
+        };
+        if new_frame || options != self.display_options {
+            self.display_options = options;
             let image = egui::ColorImage::from_rgba_unmultiplied([SCREEN_WIDTH, SCREEN_HEIGHT], &self.display_frame);
             match &mut self.display {
-                Some(tex) => tex.set(image, egui::TextureOptions::LINEAR),
-                None => self.display = Some(ctx.load_texture("display", image, egui::TextureOptions::LINEAR)),
+                Some(tex) => tex.set(image, options),
+                None => self.display = Some(ctx.load_texture("display", image, options)),
             }
         }
 
@@ -249,6 +270,25 @@ impl eframe::App for App {
                     self.emu.send(Command::SetUsb(on));
                     self.settings.usb = on;
                     self.settings.save();
+                }
+                ui.separator();
+                ui.toggle_value(&mut self.lcd_focus, "🖵 Display").on_hover_text(
+                    "Only the display, as large as possible (also: right click on the display; Esc returns)",
+                );
+                let mut see = self.see_through.is_some();
+                if ui
+                    .add_enabled(!self.lcd_focus, egui::Button::selectable(see, "👁 See-through"))
+                    .on_hover_text("Show the Nucleo and the display see-through, to see the carrier board under them")
+                    .clicked()
+                {
+                    see = !see;
+                    self.see_through = see.then_some(SEE_THROUGH_DEFAULT);
+                }
+                if let Some(opacity) = &mut self.see_through
+                    && !self.lcd_focus
+                {
+                    ui.add(egui::Slider::new(opacity, 0.0..=1.0).show_value(false))
+                        .on_hover_text("Opacity of the Nucleo and the display");
                 }
                 ui.separator();
                 // The Nucleo user LEDs are hidden under the display on the real board.
@@ -355,28 +395,36 @@ impl eframe::App for App {
 
         // ---- the board
         let typing = ctx.memory(|m| m.focused().is_some());
+        let board_state = BoardState {
+            led_duty: &led_duty,
+            inputs,
+            display: self.display.as_ref(),
+            ints: &self.ints,
+            latched: &self.latched,
+            analog: &self.analog,
+            dac1,
+        };
+        let view = match self.see_through {
+            Some(opacity) => board::View { nucleo_opacity: opacity, shield_opacity: opacity },
+            None => board::View::default(),
+        };
         let input = egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::from_gray(28)).inner_margin(10.0))
             .show(ui, |ui| {
-                ui.centered_and_justified(|ui| {
-                    let tex = self.board.get_or_insert_with(|| board::Textures::load(ui.ctx()));
-                    board::show(
-                        ui,
-                        tex,
-                        &BoardState {
-                            led_duty: &led_duty,
-                            inputs,
-                            display: self.display.as_ref(),
-                            ints: &self.ints,
-                            latched: &self.latched,
-                            analog: &self.analog,
-                            dac1,
-                        },
-                    )
-                })
-                .inner
+                if self.lcd_focus {
+                    board::show_lcd(ui, &board_state)
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        let tex = self.board.get_or_insert_with(|| board::Textures::load(ui.ctx()));
+                        board::show(ui, tex, &board_state, &view)
+                    })
+                    .inner
+                }
             })
             .inner;
+        if input.focus_toggled || (self.lcd_focus && !typing && ctx.input(|i| i.key_pressed(Key::Escape))) {
+            self.lcd_focus = !self.lcd_focus;
+        }
 
         const KEYS: [Key; 8] = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7];
         for (i, key) in KEYS.into_iter().enumerate() {
