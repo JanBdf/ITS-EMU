@@ -23,4 +23,3 @@
 # Claude Code (worktrees of parallel sessions)
 /.claude/
 __pycache__/
-__pycache__/
