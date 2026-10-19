@@ -11804,87 +11804,8 @@ static inline void assert_hflags_rebuild_correctly(CPUARMState *env)
 #endif
 }
 
-void cpu_get_tb_cpu_state(CPUARMState *env, target_ulong *pc,
-                          target_ulong *cs_base, uint32_t *pflags)
-{
-    uint32_t flags = env->hflags;
-    uint32_t pstate_for_ss;
-
-    *cs_base = 0;
-    assert_hflags_rebuild_correctly(env);
-
-    if (FIELD_EX32(flags, TBFLAG_ANY, AARCH64_STATE)) {
-        *pc = env->pc;
-        if (cpu_isar_feature(aa64_bti, env_archcpu(env))) {
-            FIELD_DP32(flags, TBFLAG_A64, BTYPE, env->btype, flags);
-        }
-        pstate_for_ss = env->pstate;
-    } else {
-        *pc = env->regs[15];
-
-        if (arm_feature(env, ARM_FEATURE_M)) {
-            if (arm_feature(env, ARM_FEATURE_M_SECURITY) &&
-                FIELD_EX32(env->v7m.fpccr[M_REG_S], V7M_FPCCR, S)
-                != env->v7m.secure) {
-                FIELD_DP32(flags, TBFLAG_M32, FPCCR_S_WRONG, 1, flags);
-            }
-
-            if ((env->v7m.fpccr[env->v7m.secure] & R_V7M_FPCCR_ASPEN_MASK) &&
-                (!(env->v7m.control[M_REG_S] & R_V7M_CONTROL_FPCA_MASK) ||
-                 (env->v7m.secure &&
-                  !(env->v7m.control[M_REG_S] & R_V7M_CONTROL_SFPA_MASK)))) {
-                /*
-                 * ASPEN is set, but FPCA/SFPA indicate that there is no
-                 * active FP context; we must create a new FP context before
-                 * executing any FP insn.
-                 */
-                FIELD_DP32(flags, TBFLAG_M32, NEW_FP_CTXT_NEEDED, 1, flags);
-            }
-
-            bool is_secure = env->v7m.fpccr[M_REG_S] & R_V7M_FPCCR_S_MASK;
-            if (env->v7m.fpccr[is_secure] & R_V7M_FPCCR_LSPACT_MASK) {
-                FIELD_DP32(flags, TBFLAG_M32, LSPACT, 1, flags);
-            }
-        } else {
-            /*
-             * Note that XSCALE_CPAR shares bits with VECSTRIDE.
-             * Note that VECLEN+VECSTRIDE are RES0 for M-profile.
-             */
-            if (arm_feature(env, ARM_FEATURE_XSCALE)) {
-                FIELD_DP32(flags, TBFLAG_A32,
-                                   XSCALE_CPAR, env->cp15.c15_cpar, flags);
-            } else {
-                FIELD_DP32(flags, TBFLAG_A32, VECLEN,
-                                   env->vfp.vec_len, flags);
-                FIELD_DP32(flags, TBFLAG_A32, VECSTRIDE,
-                                   env->vfp.vec_stride, flags);
-            }
-            if (env->vfp.xregs[ARM_VFP_FPEXC] & (1 << 30)) {
-                FIELD_DP32(flags, TBFLAG_A32, VFPEN, 1, flags);
-            }
-        }
-
-        FIELD_DP32(flags, TBFLAG_AM32, THUMB, env->thumb, flags);
-        FIELD_DP32(flags, TBFLAG_AM32, CONDEXEC, env->condexec_bits, flags);
-        pstate_for_ss = env->uncached_cpsr;
-    }
-
-    /*
-     * The SS_ACTIVE and PSTATE_SS bits correspond to the state machine
-     * states defined in the ARM ARM for software singlestep:
-     *  SS_ACTIVE   PSTATE.SS   State
-     *     0            x       Inactive (the TB flag for SS is always 0)
-     *     1            0       Active-pending
-     *     1            1       Active-not-pending
-     * SS_ACTIVE is set in hflags; PSTATE_SS is computed every TB.
-     */
-    if (FIELD_EX32(flags, TBFLAG_ANY, SS_ACTIVE) &&
-        (pstate_for_ss & PSTATE_SS)) {
-        FIELD_DP32(flags, TBFLAG_ANY, PSTATE_SS, 1, flags);
-    }
-
-    *pflags = flags;
-}
+/* ITS-EMU: cpu_get_tb_cpu_state is static inline in cpu.h (every TB lookup
+ * calls it). */
 
 #ifdef TARGET_AARCH64
 /*
