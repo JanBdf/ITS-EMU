@@ -14,8 +14,13 @@ use eframe::egui::{
     self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2, epaint::Vertex,
 };
 
-pub const BOARD_W: f32 = 1000.0;
-pub const BOARD_H: f32 = 648.55;
+/// The drawing (the board outline) spans `BOARD_W` × `BOARD_H` design units
+/// from `BOARD_ORIGIN`.  The design units were set up on a photo that shows
+/// the board a little cropped, so the board outline reaches slightly into
+/// negative coordinates.  tools/hw/boarddraw.py reads these three constants.
+pub const BOARD_W: f32 = 1010.8;
+pub const BOARD_H: f32 = 658.5;
+const BOARD_ORIGIN: (f32, f32) = (-4.8, -5.5);
 
 /// The layers from the bottom up.
 const LAYERS: [&str; 3] = [
@@ -62,7 +67,8 @@ const GLASS: [(f32, f32); 4] = [(532.1, 86.5), (878.9, 86.5), (878.9, 317.7), (5
 /// One layer of the board drawing and its rendering at the current size.
 struct Layer {
     tree: resvg::usvg::Tree,
-    /// Part of the board the layer covers, in design units.
+    /// Part of the drawing the layer covers, in design units from the top left
+    /// corner of the drawing (`BOARD_ORIGIN`).
     bounds: Rect,
     /// Rendering, the board size in pixels it was made for and where it lies on the board (pixels).
     tex: Option<(TextureHandle, [u32; 2], Rect)>,
@@ -214,7 +220,7 @@ struct Pcb<'a> {
 
 impl Pcb<'_> {
     fn p(&self, x: f32, y: f32) -> Pos2 {
-        self.origin + Vec2::new(x, y) * self.s
+        self.origin + Vec2::new(x - BOARD_ORIGIN.0, y - BOARD_ORIGIN.1) * self.s
     }
     fn r(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
         Rect::from_min_max(self.p(x0, y0), self.p(x1, y1))
@@ -223,26 +229,35 @@ impl Pcb<'_> {
         v * self.s
     }
 
-    /// Adds light: a radial falloff over `rx` × `ry` units, `color` scaled by `k`
-    /// (a fan of rings with vertex colours; alpha 0 makes the colour additive).
-    fn glow(&self, x: f32, y: f32, rx: f32, ry: f32, color: Color32, k: f32) {
-        const RINGS: usize = 12;
+    /// A round light spot of radius `r` units: concentric rings blended over
+    /// the board, colours (with alpha) given at relative radii `stops`
+    /// (increasing, the first at 0, the last at 1).
+    fn light(&self, x: f32, y: f32, r: f32, stops: &[(f32, Color32)]) {
+        const RINGS: usize = 16;
         const SEGMENTS: usize = 48;
-        let k = k.clamp(0.0, 1.0);
-        let light = |d2: f32| {
-            let v = if d2 < 1.0 { (-4.0 * d2).exp() * (1.0 - d2) * k } else { 0.0 };
-            let c = |c: u8| (f32::from(c) * v) as u8;
-            Color32::from_rgba_premultiplied(c(color.r()), c(color.g()), c(color.b()), 0)
+        let at_radius = |t: f32| {
+            let i = stops.iter().rposition(|s| s.0 <= t).unwrap_or(0).min(stops.len() - 2);
+            let ((t0, c0), (t1, c1)) = (stops[i], stops[i + 1]);
+            let u = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
+            let m = |a: u8, b: u8| f32::from(a) + (f32::from(b) - f32::from(a)) * u;
+            // interpolated unmultiplied, then premultiplied for the mesh
+            let alpha = m(c0.a(), c1.a()) / 255.0;
+            let px = |a: u8, b: u8| (m(a, b) * alpha) as u8;
+            Color32::from_rgba_premultiplied(
+                px(c0.r(), c1.r()),
+                px(c0.g(), c1.g()),
+                px(c0.b(), c1.b()),
+                (alpha * 255.0) as u8,
+            )
         };
         let mut mesh = Mesh::default();
-        mesh.vertices.push(Vertex { pos: self.p(x, y), uv: egui::epaint::WHITE_UV, color: light(0.0) });
+        mesh.vertices.push(Vertex { pos: self.p(x, y), uv: egui::epaint::WHITE_UV, color: at_radius(0.0) });
         for ring in 1..=RINGS {
-            // rings closer together near the centre, where the light changes fastest
-            let r = (ring as f32 / RINGS as f32).powf(1.5);
+            let t = ring as f32 / RINGS as f32;
             for seg in 0..SEGMENTS {
                 let a = seg as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
-                let pos = self.p(x + a.cos() * rx * r, y + a.sin() * ry * r);
-                mesh.vertices.push(Vertex { pos, uv: egui::epaint::WHITE_UV, color: light(r * r) });
+                let pos = self.p(x + a.cos() * r * t, y + a.sin() * r * t);
+                mesh.vertices.push(Vertex { pos, uv: egui::epaint::WHITE_UV, color: at_radius(t) });
             }
         }
         let at = |ring: usize, seg: usize| (1 + (ring - 1) * SEGMENTS + seg % SEGMENTS) as u32;
@@ -259,17 +274,27 @@ impl Pcb<'_> {
         self.painter.add(Shape::mesh(mesh));
     }
 
-    /// SMD LED lit with `brightness`: a round glow like the power LEDs D24/D25.
+    /// SMD LED lit with `brightness`: a round glow like the one of the power
+    /// LEDs D24/D25 in the drawing (a white-hot lens fading into the colour).
     fn led(&self, x: f32, y: f32, color: Color32, brightness: f32) {
         let b = brightness.clamp(0.0, 1.0).powf(1.0 / 2.2); // perceived brightness
         if b < 0.01 {
             return;
         }
-        // the lens takes the colour of the light (additive light alone would only whiten it)
-        self.painter.circle_filled(self.p(x, y), self.len(6.0), color.gamma_multiply(0.8 * b));
-        self.glow(x, y, 17.0, 17.0, color, 0.9 * b);
-        self.glow(x, y, 8.0, 8.0, color, b);
-        self.glow(x, y, 4.0, 4.0, lerp(color, Color32::WHITE, 0.7), b);
+        let a = |v: f32| (v * b * 255.0) as u8;
+        let tint = |c: Color32, alpha: u8| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha);
+        self.light(
+            x,
+            y,
+            12.0,
+            &[
+                (0.0, tint(lerp(color, Color32::WHITE, 0.9), a(1.0))),
+                (0.28, tint(lerp(color, Color32::WHITE, 0.6), a(1.0))),
+                (0.45, tint(lerp(color, Color32::WHITE, 0.15), a(0.8))),
+                (0.7, tint(color, a(0.35))),
+                (1.0, tint(color, 0)),
+            ],
+        );
     }
 
     /// Shading of a pressed tact switch / latch marker.
@@ -519,7 +544,7 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
         .interact(glass, ui.scope_id().with("display"), Sense::click_and_drag())
         .on_hover_cursor(egui::CursorIcon::Crosshair);
     let to_px = |p: Pos2| {
-        let (x, y) = glass_pixel((p.x - outer.min.x) / s, (p.y - outer.min.y) / s);
+        let (x, y) = glass_pixel((p.x - outer.min.x) / s + BOARD_ORIGIN.0, (p.y - outer.min.y) / s + BOARD_ORIGIN.1);
         (x.clamp(0.0, 479.99), y.clamp(0.0, 319.99))
     };
     input.touch = (touch.is_pointer_button_down_on() && primary_down(ui))
