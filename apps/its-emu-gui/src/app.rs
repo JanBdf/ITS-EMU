@@ -351,7 +351,7 @@ impl eframe::App for App {
                     ui.add(egui::Slider::new(opacity, 0.0..=1.0).show_value(false))
                         .on_hover_text("Opacity of the Nucleo and the display");
                 }
-                ui.toggle_value(&mut self.show_pins, "🔌 Pins")
+                ui.toggle_value(&mut self.show_pins, "Pins")
                     .on_hover_text("Mode and level of every pin of ports A–G · Ctrl+P");
                 ui.separator();
                 ui.menu_button("☰", |ui| {
