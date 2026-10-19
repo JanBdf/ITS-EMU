@@ -281,8 +281,22 @@ impl System {
     /// events in place, which is much cheaper than ending the Unicorn run.
     /// Returns false if the run has to end (slice limit, interrupt pending).
     fn continue_after_events(&mut self) -> bool {
-        if self.clock.cycles() >= self.slice_limit {
+        let now = self.clock.cycles();
+        if now >= self.slice_limit {
             return false;
+        }
+        let systick = self.scs.systick.next_event();
+        let bus = self.bus.next_event();
+        if [systick, bus].into_iter().flatten().all(|t| t > now) {
+            // The event the slice ended for has already been handled (an
+            // access brought the peripheral past it, e.g. the next SPI frame
+            // started): nothing to update.
+            if self.nvic.any_pending() || self.reset_requested.is_some() {
+                return false;
+            }
+            let next_event = [systick, bus].into_iter().flatten().min();
+            self.slice_end = next_event.map_or(self.slice_limit, |ev| self.slice_limit.min(ev));
+            return true;
         }
         self.sync_devices();
         if self.nvic.any_pending() || self.reset_requested.is_some() {
