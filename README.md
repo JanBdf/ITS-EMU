@@ -65,7 +65,9 @@ returns. *See-through* (Ctrl+T) makes the Nucleo and the display
 transparent (slider: opacity), to see the carrier board under them. When a
 new build replaces the firmware file, the GUI loads it again and restarts
 (not while a debugger is attached; switch off in the ☰ menu, which also
-saves the display as a PNG, Ctrl+S). Ctrl+O opens a file, Ctrl+R resets.
+saves the display as a PNG, Ctrl+S). *Pins* (Ctrl+P) shows the mode and
+level of every pin of ports A–G and what the board connects to it. Ctrl+O
+opens a file (☰ also lists the recent ones), Ctrl+R resets.
 On the command line,
 `--input 2:PC3=1.65` applies 1.65 V to PC3 (`open` disconnects it).
 `--device encoder@PC6,PC7` connects a rotary encoder (contacts to GND,
