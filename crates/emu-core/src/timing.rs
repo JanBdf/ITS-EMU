@@ -320,7 +320,11 @@ fn decode32(hw1: u16, hw2: u16) -> Insn {
         // Load/store single
         let rt = hw2 >> 12;
         if hw1 & 0x0010 == 0 {
-            return i.kind(Kind::Store);
+            // STRT, STRBT, STRHT store with the unprivileged MMU index,
+            // which idle detection's write tracking does not watch.
+            let unprivileged = hw1 & 0xFF80 == 0xF800 && hw2 & 0x0F00 == 0x0E00;
+            let i = i.kind(Kind::Store);
+            return if unprivileged { i.side_effects() } else { i };
         }
         if rt == PC && hw1 & 0x0040 == 0 {
             return i; // PLD/PLI (byte/halfword loads to PC are hints)
@@ -508,6 +512,20 @@ mod tests {
     fn block(words: &[u16]) -> BlockTiming {
         let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         analyze_block(&code, 0x0800_0000, &mut Vec::new())
+    }
+
+    #[test]
+    fn unprivileged_stores_are_side_effects() {
+        // strt r0, [r1] / strbt / strht: idle detection does not track them
+        for hw1 in [0xF841, 0xF801, 0xF821] {
+            let t = block(&[hw1, 0x0E00]);
+            assert!(t.stores && t.side_effects, "{hw1:#x}");
+        }
+        // str r0, [r1, #-4] and str.w r0, [r1, #4]: ordinary stores
+        for words in [[0xF841, 0x0C04], [0xF8C1, 0x0004]] {
+            let t = block(&words);
+            assert!(t.stores && !t.side_effects, "{words:x?}");
+        }
     }
 
     // Loop body of the HwCheck kernels: 10 x body, `subs r0, r0, #1`, `bne`.

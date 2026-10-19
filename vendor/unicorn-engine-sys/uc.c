@@ -683,6 +683,26 @@ uc_err uc_reg_write_batch2(uc_engine *uc, int const *regs,
     return UC_ERR_OK;
 }
 
+// ITS-EMU: write tracking for the emulator's idle detection. `cb` is called
+// with the address of the first store to each RAM page after
+// uc_its_rearm_writes, before the store (and for every store to pages that
+// contain translated code); NULL switches it off.
+UNICORN_EXPORT
+void uc_its_track_writes(uc_engine *uc, void (*cb)(void *opaque, uint64_t paddr),
+                         void *opaque)
+{
+    uc->its_first_write = cb;
+    uc->its_first_write_opaque = opaque;
+}
+
+UNICORN_EXPORT
+void uc_its_rearm_writes(uc_engine *uc)
+{
+    if (uc->init_done && uc->its_rearm_writes) {
+        uc->its_rearm_writes(uc);
+    }
+}
+
 UNICORN_EXPORT
 uc_err uc_reg_read(uc_engine *uc, int regid, void *value)
 {

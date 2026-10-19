@@ -20,10 +20,16 @@
          "cargo:rerun-if-changed={}",
 --- a/include/uc_priv.h
 +++ b/include/uc_priv.h
-@@ -394,6 +394,13 @@
+@@ -394,6 +394,19 @@
      int thumb; // thumb mode for ARM
      MemoryRegion **mapped_blocks;
      uint32_t mapped_block_count;
++    // ITS-EMU: write tracking for idle detection (uc_its_track_writes): the
++    // callback gets the address of the first store to a RAM page after
++    // uc_its_rearm_writes (and of every store to pages with code).
++    void (*its_first_write)(void *opaque, uint64_t paddr);
++    void *its_first_write_opaque;
++    void (*its_rearm_writes)(struct uc_struct *uc);
 +    // ITS-EMU: find_memory_mapping results per 1 KiB page, valid while
 +    // address_space_memory.generation is unchanged.
 +    struct uc_mapping_cache_entry {
@@ -49,7 +55,55 @@
                  case UC_ERR_WRITE_PROT:
 --- a/qemu/accel/tcg/cputlb.c
 +++ b/qemu/accel/tcg/cputlb.c
-@@ -1552,6 +1552,22 @@
+@@ -718,6 +718,34 @@
+     }
+ }
+ 
++/* ITS-EMU: the next store to each RAM page in the TLB of the current MMU
++ * index goes through notdirty_write again (uc_its_rearm_writes). Within one
++ * observation period of the idle detection the index does not change
++ * (exceptions and MSR end it), and the unprivileged stores (STRT, ...),
++ * which use another one, count as side effects there. */
++static void its_rearm_writes(struct uc_struct *uc)
++{
++    CPUState *cpu = uc->cpu;
++    CPUArchState *env = cpu->env_ptr;
++    int mmu_idx = cpu_mmu_index(env, false);
++    unsigned int i;
++    unsigned int n = tlb_n_entries(&env_tlb(env)->f[mmu_idx]);
++
++    for (i = 0; i < n; i++) {
++        tlb_reset_dirty_range_locked(uc, &env_tlb(env)->f[mmu_idx].table[i],
++                                     0, UINTPTR_MAX);
++    }
++    for (i = 0; i < CPU_VTLB_SIZE; i++) {
++        tlb_reset_dirty_range_locked(uc, &env_tlb(env)->d[mmu_idx].vtable[i],
++                                     0, UINTPTR_MAX);
++    }
++}
++
++void its_init_write_tracking(struct uc_struct *uc)
++{
++    uc->its_rearm_writes = its_rearm_writes;
++}
++
+ void tlb_reset_dirty_by_vaddr(CPUState *cpu, target_ulong start1, target_ulong length)
+ {
+     struct uc_struct *uc = cpu->uc;
+@@ -1196,6 +1224,12 @@
+     ram_addr_t ram_addr = mem_vaddr + iotlbentry->addr;
+     MemoryRegion *mr = cpu->uc->memory_mapping(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK));
+ 
++    /* ITS-EMU: before the store changes the page (see uc_its_track_writes) */
++    if (cpu->uc->its_first_write) {
++        cpu->uc->its_first_write(cpu->uc->its_first_write_opaque,
++                                 tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK));
++    }
++
+     if (mr && (mr->perms & UC_PROT_EXEC) != 0) {
+         struct page_collection *pages
+             = page_collection_lock(cpu->uc, ram_addr, ram_addr + size);
+@@ -1552,6 +1586,22 @@
          tlb_addr &= ~TLB_INVALID_MASK;
      }
  
@@ -72,7 +126,7 @@
      paddr = entry->paddr | (addr & ~TARGET_PAGE_MASK);
      mr = uc->memory_mapping(uc, paddr);
  
-@@ -2190,6 +2206,19 @@
+@@ -2190,6 +2240,19 @@
          tlb_addr = tlb_addr_write(entry) & ~TLB_INVALID_MASK;
      }
  
@@ -92,7 +146,7 @@
      // Load the latest memory mapping.
      paddr = entry->paddr | (addr & ~TARGET_PAGE_MASK);
      mr = uc->memory_mapping(uc, paddr);
-@@ -2240,6 +2269,9 @@
+@@ -2240,6 +2303,9 @@
              uc->invalid_error = UC_ERR_WRITE_UNMAPPED;
              // printf("***** Invalid memory write at " TARGET_FMT_lx "\n", addr);
              cpu_exit(uc->cpu);
@@ -102,7 +156,7 @@
              return;
          } else {
              uc->invalid_error = UC_ERR_OK;
-@@ -2259,6 +2291,9 @@
+@@ -2259,6 +2325,9 @@
              if (mr == NULL) {
                  uc->invalid_error = UC_ERR_MAP;
                  cpu_exit(uc->cpu);
@@ -112,7 +166,7 @@
                  return;
              }
          }
-@@ -2305,6 +2340,9 @@
+@@ -2305,6 +2374,9 @@
              uc->invalid_error = UC_ERR_WRITE_PROT;
              // printf("***** Invalid memory write (ro) at " TARGET_FMT_lx "\n", addr);
              cpu_exit(uc->cpu);
@@ -122,7 +176,7 @@
              return;
          }
      }
-@@ -2315,6 +2353,9 @@
+@@ -2315,6 +2387,9 @@
              uc->invalid_addr = paddr;
              uc->invalid_error = UC_ERR_NOMEM;
              cpu_exit(uc->cpu);
@@ -509,6 +563,21 @@
  }
  
  static uc_err read_cp_reg(CPUARMState *env, uc_arm_cp_reg *cp)
+@@ -770,6 +776,8 @@
+     return UC_ERR_OK;
+ }
+ 
++void its_init_write_tracking(struct uc_struct *uc); /* cputlb.c */
++
+ DEFAULT_VISIBILITY
+ void uc_init(struct uc_struct *uc)
+ {
+@@ -788,4 +796,5 @@
+     uc->context_save = uc_arm_context_save;
+     uc->context_restore = uc_arm_context_restore;
+     uc_common_init(uc);
++    its_init_write_tracking(uc);
+ }
 --- a/qemu/tcg/i386/tcg-target.inc.c
 +++ b/qemu/tcg/i386/tcg-target.inc.c
 @@ -1733,6 +1733,16 @@
@@ -612,3 +681,32 @@
  
      if (mr == &uc->io_mem_unassigned) {
          return NULL;
+--- a/uc.c
++++ b/uc.c
+@@ -683,6 +683,26 @@
+     return UC_ERR_OK;
+ }
+ 
++// ITS-EMU: write tracking for the emulator's idle detection. `cb` is called
++// with the address of the first store to each RAM page after
++// uc_its_rearm_writes, before the store (and for every store to pages that
++// contain translated code); NULL switches it off.
++UNICORN_EXPORT
++void uc_its_track_writes(uc_engine *uc, void (*cb)(void *opaque, uint64_t paddr),
++                         void *opaque)
++{
++    uc->its_first_write = cb;
++    uc->its_first_write_opaque = opaque;
++}
++
++UNICORN_EXPORT
++void uc_its_rearm_writes(uc_engine *uc)
++{
++    if (uc->init_done && uc->its_rearm_writes) {
++        uc->its_rearm_writes(uc);
++    }
++}
++
+ UNICORN_EXPORT
+ uc_err uc_reg_read(uc_engine *uc, int regid, void *value)
+ {

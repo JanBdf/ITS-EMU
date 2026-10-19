@@ -37,6 +37,10 @@ crates.io (GPL-2.0, see `unicorn-engine-sys/COPYING`), used through
   `TARGET_PAGE_BITS_FIXED` in `target/arm/cpu-param.h`), not loaded through
   a pointer chain in every TB lookup and TLB access. Setting another page
   size with `UC_CTL_UC_PAGE_SIZE` aborts.
+- Write tracking for the emulator's idle detection: `uc_its_track_writes`
+  registers a callback for the first store to each RAM page (QEMU's
+  "not dirty" slow path, which Unicorn takes once per TLB entry anyway), and
+  `uc_its_rearm_writes` re-arms it for the TLB of the current MMU index.
 - `cpu_get_tb_cpu_state` is inline (`target/arm/cpu.h`): every lookup of the
   next translation block after an indirect branch (function returns) calls it.
 - Only the Arm guest: the other targets' sources are removed (`uc.c` still
