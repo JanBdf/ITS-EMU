@@ -2111,7 +2111,12 @@ ARMCPU *cpu_arm_init(struct uc_struct *uc)
 
 #if !defined(TARGET_AARCH64)
     if (uc->mode & UC_MODE_MCLASS) {
-        uc->cpu_model = UC_CPU_ARM_CORTEX_M33;
+        // ITS-EMU: keep an M-profile model set with UC_CTL_CPU_MODEL instead
+        // of always making a Cortex-M33 (ARMv8-M with Security Extension).
+        if (uc->cpu_model < UC_CPU_ARM_CORTEX_M0 ||
+            uc->cpu_model > UC_CPU_ARM_CORTEX_M33) {
+            uc->cpu_model = UC_CPU_ARM_CORTEX_M33;
+        }
     } else if (uc->mode & UC_MODE_ARM926) {
         uc->cpu_model = UC_CPU_ARM_926;
     } else if (uc->mode & UC_MODE_ARM946) {

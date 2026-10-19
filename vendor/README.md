@@ -14,6 +14,14 @@ crates.io (GPL-2.0, see `unicorn-engine-sys/COPYING`), used through
 - The exit check at the start of each translation block is QEMU's inline
   load and branch instead of the same helper call. The PC is set to the
   block's start in `cpu_tb_exec` also when code hooks exist.
+- A Cortex-M4 when one is asked for (`UC_CTL_CPU_MODEL`). Unicorn made every
+  M-class CPU a Cortex-M33, whose Security Extension sends every function
+  return (BX LR, POP {PC}) out of the JIT to the main loop to check for
+  FNC_RETURN/EXC_RETURN, and whose v8-M stack limit checks run on every SP
+  change.
+- Writing xPSR/IPSR rebuilds the cached TB flags, which include handler mode
+  (the emulator enters and leaves exceptions by writing xPSR); QEMU then
+  recognizes EXC_RETURN only in handler mode, as on the M4.
 - Only the Arm guest: the other targets' sources are removed (`uc.c` still
   includes their `unicorn.h`).
 

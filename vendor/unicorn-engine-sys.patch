@@ -1,8 +1,6 @@
-diff --git a/qemu/accel/tcg/cpu-exec.c b/qemu/accel/tcg/cpu-exec.c
-index 77168f3..e256962 100644
 --- a/qemu/accel/tcg/cpu-exec.c
 +++ b/qemu/accel/tcg/cpu-exec.c
-@@ -75,7 +75,9 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, TranslationBlock *itb)
+@@ -75,7 +75,9 @@
           * of the start of the TB.
           */
          CPUClass *cc = CPU_GET_CLASS(cpu);
@@ -13,11 +11,9 @@ index 77168f3..e256962 100644
              // We should sync pc for R/W error.
              switch (env->uc->invalid_error) {
                  case UC_ERR_WRITE_PROT:
-diff --git a/qemu/accel/tcg/cputlb.c b/qemu/accel/tcg/cputlb.c
-index 3d0bebd..5a93c75 100644
 --- a/qemu/accel/tcg/cputlb.c
 +++ b/qemu/accel/tcg/cputlb.c
-@@ -2240,6 +2240,9 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
+@@ -2240,6 +2240,9 @@
              uc->invalid_error = UC_ERR_WRITE_UNMAPPED;
              // printf("***** Invalid memory write at " TARGET_FMT_lx "\n", addr);
              cpu_exit(uc->cpu);
@@ -27,7 +23,7 @@ index 3d0bebd..5a93c75 100644
              return;
          } else {
              uc->invalid_error = UC_ERR_OK;
-@@ -2259,6 +2262,9 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
+@@ -2259,6 +2262,9 @@
              if (mr == NULL) {
                  uc->invalid_error = UC_ERR_MAP;
                  cpu_exit(uc->cpu);
@@ -37,7 +33,7 @@ index 3d0bebd..5a93c75 100644
                  return;
              }
          }
-@@ -2305,6 +2311,9 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
+@@ -2305,6 +2311,9 @@
              uc->invalid_error = UC_ERR_WRITE_PROT;
              // printf("***** Invalid memory write (ro) at " TARGET_FMT_lx "\n", addr);
              cpu_exit(uc->cpu);
@@ -47,7 +43,7 @@ index 3d0bebd..5a93c75 100644
              return;
          }
      }
-@@ -2315,6 +2324,9 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
+@@ -2315,6 +2324,9 @@
              uc->invalid_addr = paddr;
              uc->invalid_error = UC_ERR_NOMEM;
              cpu_exit(uc->cpu);
@@ -57,11 +53,9 @@ index 3d0bebd..5a93c75 100644
              return;
          }
          /* refill tlb after CoW */
-diff --git a/qemu/include/exec/gen-icount.h b/qemu/include/exec/gen-icount.h
-index 8b484cb..24f8adc 100644
 --- a/qemu/include/exec/gen-icount.h
 +++ b/qemu/include/exec/gen-icount.h
-@@ -32,6 +32,22 @@ static inline void gen_io_end(TCGContext *tcg_ctx)
+@@ -32,6 +32,22 @@
  
  static inline void gen_tb_start(TCGContext *tcg_ctx, TranslationBlock *tb)
  {
@@ -84,7 +78,7 @@ index 8b484cb..24f8adc 100644
      TCGv_ptr puc = tcg_const_ptr(tcg_ctx, tcg_ctx->uc);
      TCGv_i32 tmp = tcg_const_i32(tcg_ctx, 0);
      // Unicorn:
-@@ -57,6 +73,10 @@ static inline void gen_tb_end(TCGContext *tcg_ctx, TranslationBlock *tb, int num
+@@ -57,6 +73,10 @@
          tcg_set_insn_param(tcg_ctx->icount_start_insn, 1, num_insns);
      }
  
@@ -95,11 +89,9 @@ index 8b484cb..24f8adc 100644
      tcg_gen_exit_tb(tcg_ctx, tb, TB_EXIT_REQUESTED);
  }
  
-diff --git a/qemu/include/tcg/tcg.h b/qemu/include/tcg/tcg.h
-index bbeb4b9..cf3d7ef 100644
 --- a/qemu/include/tcg/tcg.h
 +++ b/qemu/include/tcg/tcg.h
-@@ -672,6 +672,8 @@ struct TCGContext {
+@@ -672,6 +672,8 @@
  #endif
  
      TCGv_i32 delay_slot_flag;
@@ -108,11 +100,9 @@ index bbeb4b9..cf3d7ef 100644
  
      TCGTempSet free_temps[TCG_TYPE_COUNT * 2];
      TCGTemp temps[TCG_MAX_TEMPS]; /* globals first, temps after */
-diff --git a/qemu/tcg/tcg-op.c b/qemu/tcg/tcg-op.c
-index d0223ea..ec17dc5 100644
 --- a/qemu/tcg/tcg-op.c
 +++ b/qemu/tcg/tcg-op.c
-@@ -2917,7 +2917,8 @@ void tcg_gen_qemu_ld_i32(TCGContext *tcg_ctx, TCGv_i32 val, TCGv addr, TCGArg id
+@@ -2917,7 +2917,8 @@
          }
      }
  
@@ -122,7 +112,7 @@ index d0223ea..ec17dc5 100644
  }
  
  void tcg_gen_qemu_st_i32(TCGContext *tcg_ctx, TCGv_i32 val, TCGv addr, TCGArg idx, MemOp memop)
-@@ -2952,7 +2953,8 @@ void tcg_gen_qemu_st_i32(TCGContext *tcg_ctx, TCGv_i32 val, TCGv addr, TCGArg id
+@@ -2952,7 +2953,8 @@
          tcg_temp_free_i32(tcg_ctx, swap);
      }
  
@@ -132,7 +122,7 @@ index d0223ea..ec17dc5 100644
  }
  
  void tcg_gen_qemu_ld_i64(TCGContext *tcg_ctx, TCGv_i64 val, TCGv addr, TCGArg idx, MemOp memop)
-@@ -2967,7 +2969,8 @@ void tcg_gen_qemu_ld_i64(TCGContext *tcg_ctx, TCGv_i64 val, TCGv addr, TCGArg id
+@@ -2967,7 +2969,8 @@
          } else {
              tcg_gen_movi_i32(tcg_ctx, TCGV_HIGH(tcg_ctx, val), 0);
          }
@@ -142,7 +132,7 @@ index d0223ea..ec17dc5 100644
          return;
      }
  #endif
-@@ -3009,7 +3012,8 @@ void tcg_gen_qemu_ld_i64(TCGContext *tcg_ctx, TCGv_i64 val, TCGv addr, TCGArg id
+@@ -3009,7 +3012,8 @@
              g_assert_not_reached();
          }
      }
@@ -152,7 +142,7 @@ index d0223ea..ec17dc5 100644
  }
  
  void tcg_gen_qemu_st_i64(TCGContext *tcg_ctx, TCGv_i64 val, TCGv addr, TCGArg idx, MemOp memop)
-@@ -3019,7 +3023,8 @@ void tcg_gen_qemu_st_i64(TCGContext *tcg_ctx, TCGv_i64 val, TCGv addr, TCGArg id
+@@ -3019,7 +3023,8 @@
  #if TCG_TARGET_REG_BITS == 32
      if ((memop & MO_SIZE) < MO_64) {
          tcg_gen_qemu_st_i32(tcg_ctx, TCGV_LOW(tcg_ctx, val), addr, idx, memop);
@@ -162,7 +152,7 @@ index d0223ea..ec17dc5 100644
          return;
      }
  #endif
-@@ -3055,7 +3060,8 @@ void tcg_gen_qemu_st_i64(TCGContext *tcg_ctx, TCGv_i64 val, TCGv addr, TCGArg id
+@@ -3055,7 +3060,8 @@
      if (swap) {
          tcg_temp_free_i64(tcg_ctx, swap);
      }
@@ -172,3 +162,34 @@ index d0223ea..ec17dc5 100644
  }
  
  static void tcg_gen_ext_i32(TCGContext *tcg_ctx, TCGv_i32 ret, TCGv_i32 val, MemOp opc)
+--- a/qemu/target/arm/cpu.c
++++ b/qemu/target/arm/cpu.c
+@@ -2111,7 +2111,12 @@
+ 
+ #if !defined(TARGET_AARCH64)
+     if (uc->mode & UC_MODE_MCLASS) {
+-        uc->cpu_model = UC_CPU_ARM_CORTEX_M33;
++        // ITS-EMU: keep an M-profile model set with UC_CTL_CPU_MODEL instead
++        // of always making a Cortex-M33 (ARMv8-M with Security Extension).
++        if (uc->cpu_model < UC_CPU_ARM_CORTEX_M0 ||
++            uc->cpu_model > UC_CPU_ARM_CORTEX_M33) {
++            uc->cpu_model = UC_CPU_ARM_CORTEX_M33;
++        }
+     } else if (uc->mode & UC_MODE_ARM926) {
+         uc->cpu_model = UC_CPU_ARM_926;
+     } else if (uc->mode & UC_MODE_ARM946) {
+--- a/qemu/target/arm/unicorn_arm.c
++++ b/qemu/target/arm/unicorn_arm.c
+@@ -154,6 +154,12 @@
+     }
+ 
+     xpsr_write(env, val, xpsrmask);
++    // ITS-EMU: the cached TB flags include handler mode (IPSR != 0). Stale,
++    // thread mode code was translated as handler code, whose returns
++    // (BX LR, POP {PC}) leave the JIT for the exception return check.
++    if (reg & 1) {
++        arm_rebuild_hflags(env);
++    }
+ }
+ 
+ static uc_err read_cp_reg(CPUARMState *env, uc_arm_cp_reg *cp)
