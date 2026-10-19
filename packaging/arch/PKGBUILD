@@ -9,9 +9,9 @@ pkgdesc='Emulator for the HAW Hamburg ITS-Board (STM32F429 + ITS carrier board +
 arch=(x86_64)
 # MIT; the binaries contain Unicorn (GPL-2.0)
 license=(MIT GPL-2.0-only)
-# The GUI loads the window system, GL/Vulkan and D-Bus (file dialog via the
+# The GUI loads the window system, OpenGL and D-Bus (file dialog via the
 # XDG portal) at run time, so ldd does not show them.
-depends=(glibc gcc-libs dbus fontconfig libglvnd vulkan-icd-loader wayland
+depends=(glibc gcc-libs dbus fontconfig libglvnd wayland
          libx11 libxcb libxcursor libxi libxkbcommon libxkbcommon-x11 hicolor-icon-theme
          # the board's ST-LINK on USB/IP: usbip attach through a polkit helper
          usbip polkit)
