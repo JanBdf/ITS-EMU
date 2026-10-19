@@ -90,7 +90,82 @@
  void tlb_reset_dirty_by_vaddr(CPUState *cpu, target_ulong start1, target_ulong length)
  {
      struct uc_struct *uc = cpu->uc;
-@@ -1196,6 +1224,12 @@
+@@ -1013,19 +1041,19 @@
+ #endif
+ }
+ 
+-static uint64_t io_readx(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
+-                         int mmu_idx, target_ulong addr, uintptr_t retaddr,
+-                         MMUAccessType access_type, MemOp op)
++/* ITS-EMU: io_readx with the section already looked up */
++static uint64_t io_readx_section(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
++                                 MemoryRegionSection *section,
++                                 int mmu_idx, target_ulong addr, uintptr_t retaddr,
++                                 MMUAccessType access_type, MemOp op)
+ {
+     CPUState *cpu = env_cpu(env);
+     struct uc_struct *uc = cpu->uc;
+     hwaddr mr_offset;
+-    MemoryRegionSection *section;
+     MemoryRegion *mr;
+     uint64_t val;
+     MemTxResult r;
+ 
+-    section = iotlb_to_section(cpu, iotlbentry->addr, iotlbentry->attrs);
+     mr = section->mr;
+     mr_offset = (iotlbentry->addr & TARGET_PAGE_MASK) + addr;
+     cpu->mem_io_pc = retaddr;
+@@ -1048,18 +1076,28 @@
+     return val;
+ }
+ 
+-static void io_writex(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
+-                      int mmu_idx, uint64_t val, target_ulong addr,
+-                      uintptr_t retaddr, MemOp op)
++static uint64_t io_readx(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
++                         int mmu_idx, target_ulong addr, uintptr_t retaddr,
++                         MMUAccessType access_type, MemOp op)
++{
++    MemoryRegionSection *section =
++        iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
++    return io_readx_section(env, iotlbentry, section, mmu_idx, addr, retaddr,
++                            access_type, op);
++}
++
++/* ITS-EMU: io_writex with the section already looked up */
++static void io_writex_section(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
++                              MemoryRegionSection *section,
++                              int mmu_idx, uint64_t val, target_ulong addr,
++                              uintptr_t retaddr, MemOp op)
+ {
+     CPUState *cpu = env_cpu(env);
+     struct uc_struct *uc = env->uc;
+     hwaddr mr_offset;
+-    MemoryRegionSection *section;
+     MemoryRegion *mr;
+     MemTxResult r;
+ 
+-    section = iotlb_to_section(cpu, iotlbentry->addr, iotlbentry->attrs);
+     mr = section->mr;
+     mr_offset = (iotlbentry->addr & TARGET_PAGE_MASK) + addr;
+     if (!cpu->can_do_io) {
+@@ -1081,6 +1119,15 @@
+     }
+ }
+ 
++static void io_writex(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
++                      int mmu_idx, uint64_t val, target_ulong addr,
++                      uintptr_t retaddr, MemOp op)
++{
++    MemoryRegionSection *section =
++        iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
++    io_writex_section(env, iotlbentry, section, mmu_idx, val, addr, retaddr, op);
++}
++
+ static inline target_ulong tlb_read_ofs(CPUTLBEntry *entry, size_t ofs)
+ {
+ #if TCG_OVERSIZED_GUEST
+@@ -1196,6 +1243,12 @@
      ram_addr_t ram_addr = mem_vaddr + iotlbentry->addr;
      MemoryRegion *mr = cpu->uc->memory_mapping(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK));
  
@@ -103,7 +178,7 @@
      if (mr && (mr->perms & UC_PROT_EXEC) != 0) {
          struct page_collection *pages
              = page_collection_lock(cpu->uc, ram_addr, ram_addr + size);
-@@ -1552,6 +1586,22 @@
+@@ -1552,6 +1605,22 @@
          tlb_addr &= ~TLB_INVALID_MASK;
      }
  
@@ -118,15 +193,15 @@
 +        MemoryRegionSection *section =
 +            iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
 +        if (section->mr->perms & UC_PROT_READ) {
-+            return io_readx(env, iotlbentry, mmu_idx, addr, retaddr,
-+                            access_type, op);
++            return io_readx_section(env, iotlbentry, section, mmu_idx, addr,
++                                    retaddr, access_type, op);
 +        }
 +    }
 +
      paddr = entry->paddr | (addr & ~TARGET_PAGE_MASK);
      mr = uc->memory_mapping(uc, paddr);
  
-@@ -2190,6 +2240,19 @@
+@@ -2190,6 +2259,20 @@
          tlb_addr = tlb_addr_write(entry) & ~TLB_INVALID_MASK;
      }
  
@@ -138,7 +213,8 @@
 +        MemoryRegionSection *section =
 +            iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
 +        if ((section->mr->perms & UC_PROT_WRITE) && !section->mr->ram) {
-+            io_writex(env, iotlbentry, mmu_idx, val, addr, retaddr, op);
++            io_writex_section(env, iotlbentry, section, mmu_idx, val, addr,
++                              retaddr, op);
 +            return;
 +        }
 +    }
@@ -146,7 +222,7 @@
      // Load the latest memory mapping.
      paddr = entry->paddr | (addr & ~TARGET_PAGE_MASK);
      mr = uc->memory_mapping(uc, paddr);
-@@ -2240,6 +2303,9 @@
+@@ -2240,6 +2323,9 @@
              uc->invalid_error = UC_ERR_WRITE_UNMAPPED;
              // printf("***** Invalid memory write at " TARGET_FMT_lx "\n", addr);
              cpu_exit(uc->cpu);
@@ -156,7 +232,7 @@
              return;
          } else {
              uc->invalid_error = UC_ERR_OK;
-@@ -2259,6 +2325,9 @@
+@@ -2259,6 +2345,9 @@
              if (mr == NULL) {
                  uc->invalid_error = UC_ERR_MAP;
                  cpu_exit(uc->cpu);
@@ -166,7 +242,7 @@
                  return;
              }
          }
-@@ -2305,6 +2374,9 @@
+@@ -2305,6 +2394,9 @@
              uc->invalid_error = UC_ERR_WRITE_PROT;
              // printf("***** Invalid memory write (ro) at " TARGET_FMT_lx "\n", addr);
              cpu_exit(uc->cpu);
@@ -176,7 +252,7 @@
              return;
          }
      }
-@@ -2315,6 +2387,9 @@
+@@ -2315,6 +2407,9 @@
              uc->invalid_addr = paddr;
              uc->invalid_error = UC_ERR_NOMEM;
              cpu_exit(uc->cpu);

@@ -1041,19 +1041,19 @@ static void tlb_fill(CPUState *cpu, target_ulong addr, int size,
 #endif
 }
 
-static uint64_t io_readx(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
-                         int mmu_idx, target_ulong addr, uintptr_t retaddr,
-                         MMUAccessType access_type, MemOp op)
+/* ITS-EMU: io_readx with the section already looked up */
+static uint64_t io_readx_section(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
+                                 MemoryRegionSection *section,
+                                 int mmu_idx, target_ulong addr, uintptr_t retaddr,
+                                 MMUAccessType access_type, MemOp op)
 {
     CPUState *cpu = env_cpu(env);
     struct uc_struct *uc = cpu->uc;
     hwaddr mr_offset;
-    MemoryRegionSection *section;
     MemoryRegion *mr;
     uint64_t val;
     MemTxResult r;
 
-    section = iotlb_to_section(cpu, iotlbentry->addr, iotlbentry->attrs);
     mr = section->mr;
     mr_offset = (iotlbentry->addr & TARGET_PAGE_MASK) + addr;
     cpu->mem_io_pc = retaddr;
@@ -1076,18 +1076,28 @@ static uint64_t io_readx(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
     return val;
 }
 
-static void io_writex(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
-                      int mmu_idx, uint64_t val, target_ulong addr,
-                      uintptr_t retaddr, MemOp op)
+static uint64_t io_readx(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
+                         int mmu_idx, target_ulong addr, uintptr_t retaddr,
+                         MMUAccessType access_type, MemOp op)
+{
+    MemoryRegionSection *section =
+        iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
+    return io_readx_section(env, iotlbentry, section, mmu_idx, addr, retaddr,
+                            access_type, op);
+}
+
+/* ITS-EMU: io_writex with the section already looked up */
+static void io_writex_section(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
+                              MemoryRegionSection *section,
+                              int mmu_idx, uint64_t val, target_ulong addr,
+                              uintptr_t retaddr, MemOp op)
 {
     CPUState *cpu = env_cpu(env);
     struct uc_struct *uc = env->uc;
     hwaddr mr_offset;
-    MemoryRegionSection *section;
     MemoryRegion *mr;
     MemTxResult r;
 
-    section = iotlb_to_section(cpu, iotlbentry->addr, iotlbentry->attrs);
     mr = section->mr;
     mr_offset = (iotlbentry->addr & TARGET_PAGE_MASK) + addr;
     if (!cpu->can_do_io) {
@@ -1107,6 +1117,15 @@ static void io_writex(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
                                retaddr);
 #endif
     }
+}
+
+static void io_writex(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
+                      int mmu_idx, uint64_t val, target_ulong addr,
+                      uintptr_t retaddr, MemOp op)
+{
+    MemoryRegionSection *section =
+        iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
+    io_writex_section(env, iotlbentry, section, mmu_idx, val, addr, retaddr, op);
 }
 
 static inline target_ulong tlb_read_ofs(CPUTLBEntry *entry, size_t ofs)
@@ -1597,8 +1616,8 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
         MemoryRegionSection *section =
             iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
         if (section->mr->perms & UC_PROT_READ) {
-            return io_readx(env, iotlbentry, mmu_idx, addr, retaddr,
-                            access_type, op);
+            return io_readx_section(env, iotlbentry, section, mmu_idx, addr,
+                                    retaddr, access_type, op);
         }
     }
 
@@ -2248,7 +2267,8 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
         MemoryRegionSection *section =
             iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
         if ((section->mr->perms & UC_PROT_WRITE) && !section->mr->ram) {
-            io_writex(env, iotlbentry, mmu_idx, val, addr, retaddr, op);
+            io_writex_section(env, iotlbentry, section, mmu_idx, val, addr,
+                              retaddr, op);
             return;
         }
     }
