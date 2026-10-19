@@ -54,6 +54,16 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   peripheral accesses see the end of their translated block, and interrupts
   pended by a write are taken only at the end of the block (`irqlat` without
   masking: the emulator is late by the rest of the block)
-- Speed: most time goes to Unicorn's per-block hook and MMIO callbacks
-  (measured; the models themselves are cheap)
+- Speed: Unicorn is vendored with patches (`vendor/README.md`). What is
+  left in busy programs: the per-block hook (~20–30 %), the lookup of the
+  next block after indirect branches (function returns, up to 25 %), the MMIO
+  path through QEMU's memory API (~20 % while polling a peripheral) and, at
+  every peripheral event, a sweep over all ~55 peripherals (`update`,
+  `next_event`; ~15 % while the display is drawn). A per-peripheral cache of
+  the next event would cut the sweeps, but `update` re-asserts interrupt
+  levels (which re-pends them) and some `next_event`s read shared state, so
+  it needs an audit of every model. The CPU stays on one thread (one
+  deterministic, cycle-counted core); the GUI renders the display on its own
+  thread. `--no-idle-skip` benchmarks are sensitive to code layout (±10 % with
+  identical instruction counts)
 - Release builds for students (cargo-dist)
