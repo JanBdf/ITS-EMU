@@ -30,10 +30,17 @@ crates.io (GPL-2.0, see `unicorn-engine-sys/COPYING`), used through
   evicted each other and all took the slow path.
 - `find_memory_mapping`, asked on every slow-path access (all MMIO), caches
   its answer per 1 KiB page until the memory map changes.
+- Aligned MMIO reads and writes without memory hooks go straight to the
+  device (`io_readx`/`io_writex`) instead of first looking up the region and
+  scanning the empty hook lists.
 - `cpu_get_tb_cpu_state` is inline (`target/arm/cpu.h`): every lookup of the
   next translation block after an indirect branch (function returns) calls it.
 - Only the Arm guest: the other targets' sources are removed (`uc.c` still
   includes their `unicorn.h`).
+
+Build: `build.rs` watches the crate's own sources (the original watches
+paths of the Unicorn repository, which do not exist in the crate, so the
+build script and everything above it were rebuilt on every `cargo build`).
 
 To update: unpack the new crate here, remove `qemu/target/*` except `arm`
 (keeping each `unicorn.h`) and apply the patch.
