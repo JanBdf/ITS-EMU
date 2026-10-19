@@ -74,6 +74,13 @@ void finalize_target_page_bits(struct uc_struct *uc)
     }
     uc->init_target_page->mask = ((target_ulong)-1) << uc->init_target_page->bits;
     uc->init_target_page->decided = true;
+#ifdef TARGET_PAGE_BITS_FIXED
+    if (uc->init_target_page->bits != TARGET_PAGE_BITS_FIXED) {
+        fprintf(stderr, "unicorn: page size fixed at %d bits in this build\n",
+                TARGET_PAGE_BITS_FIXED);
+        abort();
+    }
+#endif
 
     /*
      * For the benefit of an -flto build, prevent the compiler from
