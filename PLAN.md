@@ -67,6 +67,11 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   thread. Idle detection tracks the RAM pages a loop stores to through
   Unicorn's first-write path instead of copying RAM. `tools/perf/bench.sh` times the fixtures, `tools/perf/same-cycles.sh`
   checks that a change leaves every fixture's cycles and output unchanged.
+  Busy-wait delay loops (`for (i = 0; i < N; i++);`) are the common case
+  that idle detection cannot skip (the counter changes): they run at about
+  1.5-2x real time, one block hook per iteration. Skipping them would need
+  the loop's exit condition (e.g. recognising counter loops in
+  `timing::analyze_block` and computing the remaining iterations).
   `--no-idle-skip` benchmarks are sensitive to code layout (±10 % with
   identical instruction counts): compare `perf stat` instruction counts
 - Release builds for students (cargo-dist)
