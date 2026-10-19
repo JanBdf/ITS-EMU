@@ -93,13 +93,13 @@ def ortho(x, y, m):
 
 
 # ---- colours
-MASK = '#294f7d'          # solder mask over bare laminate
-MASK_CU = '#2f5786'       # solder mask over copper (traces, planes)
-MASK_EDGE = '#203f66'
-SILK = '#e3eaef'
-GOLD = '#e2b35a'
+MASK = '#1f4271'          # solder mask over bare laminate
+MASK_CU = '#26497a'       # solder mask over copper (traces, planes)
+SILK = '#dde4ea'
+GOLD = '#d6a54e'
+PLATING = '#a8894f'       # plated wall/rim of a hole
 HOLE = '#16193a'
-TIN = '#d9d6cf'
+TIN = '#cdcac2'
 LED_BODY = '#f3ecd9'
 HEADER = '#1c1c1e'
 NUCLEO = '#e3e3dd'
@@ -363,26 +363,27 @@ def ftext(x, y, s, fontname, cap, anchor='l', fill=SILK, rot=0, track=0.0, extra
 HOLES = []
 
 
-def pad(x, y, r=7.6, hole=4.9, square=False, color=GOLD):
-    """Plated through hole with annular ring."""
+def pad(x, y, r=6.9, hole=5.0, square=False, color=GOLD):
+    """Plated through hole with annular ring (measured: ring from r 5.0 to 6.9)."""
     HOLES.append((x, y, hole))
     out = []
     if square:
         out.append(rect(x - r, y - r, x + r, y + r, color))
     else:
         out.append(circle(x, y, r, color))
-    out.append(ring(x, y, hole + 0.3, '#b88a3c', 0.6))
+    out.append(ring(x, y, hole + 0.25, PLATING, 0.5))
     return '\n'.join(out)
 
 
-def small_pad(x, y, r=3.0, hole=1.5, square=False):
+def small_pad(x, y, r=2.6, hole=1.5, square=False):
     HOLES.append((x, y, hole))
     return rect(x - r, y - r, x + r, y + r, GOLD) if square else circle(x, y, r, GOLD)
 
 
 def mount_hole(x, y, r=6.2):
+    """Mounting hole: cut out of the board (the background shows), thin plated rim."""
     HOLES.append((x, y, r))
-    return ring(x, y, r + 0.35, MASK_EDGE, 0.7)
+    return ring(x, y, r + 0.4, PLATING, 0.8)
 
 
 def led_smd(x, y):
@@ -395,7 +396,6 @@ def led_smd(x, y):
         circle(x - 0.2, y - 0.2, 4.6, '#efe3c4'),                       # lens
         circle(x - 0.2, y - 0.2, 4.6, 'none', ' stroke="#d8c9a6" stroke-width="0.5"'),
         rect(x - 1.6, y - 1.9, x + 1.2, y + 1.5, '#cdb68a', 0.3),        # die
-        circle(x + 7.8, y, 1.0, '#1d2333'),                              # polarity notch
     ]
     return '\n'.join(out)
 
@@ -498,6 +498,8 @@ FELT_TOP = (349.5, 37.0, 720.5, 66.0)
 FELT_BOTTOM = (349.5, 347.0, 720.5, 376.0)
 # J1 (DE-9, its flange is 7.7 mm above the board): centre of the flange
 DSUB = (223.5, 38.0)
+# J3 (footprint of an I2C module): centre line
+J3_X = 65.4
 
 
 
@@ -743,7 +745,8 @@ def carrier():
         out.append(rect_stroke(*bx, SILK, sw))
         out.append(circle(*dot, 0.7, SILK))
     # J3 (I2C module footprint), header brackets
-    out.append(rect_stroke(32.2, 316.9, 98.5, 379.3, SILK, sw))
+    # (outline, holes and the pin group are symmetric about x = J3_X)
+    out.append(rect_stroke(J3_X - 33.5, 316.9, J3_X + 33.5, 379.3, SILK, sw))
     out.append(line(129.4, 332.6, 129.4, 375.4, SILK, sw))
     out.append(line(129.4, 405.8, 129.4, 449.6, SILK, sw))
     out.append(line(319.0, 385.0, 319.0, 449.0, SILK, sw))
@@ -754,18 +757,19 @@ def carrier():
 
     # ---- holes and pads
     for x, y in [(15.4, 15.4), (316.5, 16.5), (708.2, 14.0), (985.2, 13.3), (985.2, 75.9), (985.2, 209.2),
-                 (16.3, 326.4), (15.1, 633.3), (623.7, 633.2), (985.0, 633.8), (38.8, 338.2), (91.9, 338.2)]:
+                 (16.3, 326.4), (15.1, 633.3), (623.7, 633.2), (985.0, 633.8), (J3_X - 27.45, 338.0),
+                 (J3_X + 27.45, 338.0)]:
         out.append(mount_hole(x, y))
     for x in TIM_PADS:
         out.append(pad(x, TIM_Y))
     for x in (33.6, 137.9):
-        out.append(pad(x, 37.9, 10.0, 6.3))
+        out.append(pad(x, 37.9, 9.2, 6.4))
     for i, x in enumerate([68.3, 79.9, 91.4, 102.9]):
         out.append(small_pad(x, 31.9))
     for i, x in enumerate([62.5, 73.9, 85.5, 97.2, 108.9]):
         out.append(small_pad(x, 43.6, square=(i == 4)))
-    for (x, y), sq in [((59.6, 348.9), 0), ((68.1, 348.9), 0), ((76.5, 348.9), 0), ((54.6, 356.2), 1),
-                       ((63.6, 356.2), 0), ((72.0, 356.2), 0)]:
+    for (x, y), sq in [((J3_X - 6.8, 348.9), 0), ((J3_X + 2.2, 348.9), 0), ((J3_X + 11.2, 348.9), 0),
+                       ((J3_X - 11.3, 356.2), 1), ((J3_X - 2.3, 356.2), 0), ((J3_X + 6.7, 356.2), 0)]:
         out.append(small_pad(x, y, 3.0, 1.4, sq))
     for x, sq in [(111.1, 0), (122.0, 1), (143.5, 0), (154.1, 1)]:
         out.append(small_pad(x, 90.3, 3.6, 1.6, sq))
@@ -811,11 +815,13 @@ def carrier():
     return '\n'.join(out)
 
 
-def d_shape(cx, cy, top, bottom, h, r):
-    """D-sub outline: trapezoid (half widths `top` and `bottom`, half height `h`) with rounded corners."""
+def d_shape(cx, cy, top, bottom, h, rt, rb):
+    """D-sub outline: trapezoid (half widths `top` and `bottom`, half height `h`)
+    with corner radii `rt` at the top and `rb` at the bottom."""
     pts = [(cx - top, cy - h), (cx + top, cy - h), (cx + bottom, cy + h), (cx - bottom, cy + h)]
     d = ''
     for i in range(4):
+        r = rt if i < 2 else rb
         p0, p1, p2 = pts[i - 1], pts[i], pts[(i + 1) % 4]
         a = (p0[0] - p1[0], p0[1] - p1[1])
         b = (p2[0] - p1[0], p2[1] - p1[1])
@@ -826,8 +832,34 @@ def d_shape(cx, cy, top, bottom, h, r):
     return d + 'Z'
 
 
+def shade(color, k):
+    """`color` lighter (k > 0) or darker (k < 0)."""
+    c = [int(color[i:i + 2], 16) for i in (1, 3, 5)]
+    c = [v + (255 - v) * k if k > 0 else v * (1 + k) for v in c]
+    return '#' + ''.join(f'{int(round(min(max(v, 0), 255))):02x}' for v in c)
+
+
+def hex_standoff(x, y, af=19.6, metal='#c4bfb3'):
+    """Hex standoff (screw lock of the D-sub) from above: chamfered top face
+    with the threaded hole; `af` = width across flats.  Light from the top left."""
+    R = af / 2 / math.cos(math.radians(30))
+    outer = [(x + R * math.cos(math.radians(a)), y + R * math.sin(math.radians(a))) for a in range(0, 360, 60)]
+    inner = [(x + 0.8 * (px - x), y + 0.8 * (py - y)) for px, py in outer]
+    out = [poly(outer, shade(metal, -0.35))]
+    for i in range(6):                    # chamfer facets, lit by their direction
+        a = math.radians(30 + 60 * i)
+        lit = -(math.cos(a) + math.sin(a)) / math.sqrt(2)
+        out.append(poly([outer[i], outer[(i + 1) % 6], inner[(i + 1) % 6], inner[i]],
+                        shade(metal, 0.3 * lit if lit > 0 else 0.3 * lit)))
+    out.append(poly(inner, metal))
+    out.append(circle(x, y, 5.4, '#4a4740'))                 # threaded hole
+    out.append(ring(x, y, 4.3, '#6b675d', 0.7))
+    out.append(circle(x, y, 3.2, '#1a1917'))
+    return '\n'.join(out)
+
+
 def rs232():
-    """J1 (female DE-9 with standoffs, from above) and U5 (MAX3232, wide SOIC-16)."""
+    """J1 (female DE-9 with hex standoffs, from above) and U5 (MAX3232, wide SOIC-16)."""
     out = []
     # U5, pin 1 at the bottom left
     for i in range(8):
@@ -839,24 +871,24 @@ def rs232():
     for x, s, cap in [(273.4, 'MAXIM', 4.0), (280.6, 'MAX3232ECWE', 2.5), (286.2, '1936', 2.5)]:
         out.append(ftext(x, 102.3, s, 'LiberationSans-Bold.ttf' if cap > 3 else 'LiberationSans-Regular.ttf', cap,
                          'c', '#727270', -90, mid=True))
-    # J1: flange, D shell, insulator with the contacts, standoffs
+    # J1: flange, D shell, insulator with the contacts, standoffs.  The narrow
+    # side of the D (4 contacts) is at the top; the D tapers by 10° and its
+    # corners on the narrow side are rounder.
     cx, cy = DSUB
-    out.append(rect(cx - 63.5, cy - 25.5, cx + 63.5, cy + 25.5, '#d4d0c6', 5.0))
-    out.append(rect_stroke(cx - 63.5, cy - 25.5, cx + 63.5, cy + 25.5, '#a19c90', 0.7, 5.0))
-    # the short side of the D (4 contacts) is at the top
-    out.append(path(d_shape(cx, cy, 30.0, 34.5, 18.5, 9.0), '#bcb8ad'))
-    out.append(path(d_shape(cx, cy, 28.5, 33.0, 17.0, 8.0), '#e6e2d8', ' stroke="#a8a397" stroke-width="0.6"'))
-    out.append(path(d_shape(cx, cy, 26.0, 30.0, 14.0, 6.5), '#46463f'))
+    metal = '#c4bfb3'
+    out.append(rect(cx - 63.5, cy - 25.5, cx + 63.5, cy + 25.5, metal, 7.5,
+                    f' stroke="{shade(metal, -0.3)}" stroke-width="0.8"'))
+    out.append(rect_stroke(cx - 62.0, cy - 24.0, cx + 62.0, cy + 24.0, shade(metal, 0.25), 0.7, 6.2))
+    out.append(path(d_shape(cx, cy + 0.4, 31.8, 36.8, 19.6, 10.0, 7.0), shade(metal, -0.22)))    # flank
+    out.append(path(d_shape(cx, cy, 29.6, 34.6, 17.6, 9.0, 6.2), shade(metal, 0.2),
+                    f' stroke="{shade(metal, -0.15)}" stroke-width="0.5"'))                   # rim
+    out.append(path(d_shape(cx, cy, 26.6, 31.6, 14.8, 7.5, 5.0), '#36352f'))                  # insulator
     for i in range(4):
-        out.append(circle(cx - 17.25 + i * 11.5, cy - 6.0, 2.9, '#0c0c0c'))
+        out.append(circle(cx - 17.25 + i * 11.5, cy - 6.0, 2.7, '#0b0b0a', ' stroke="#57554c" stroke-width="0.5"'))
     for i in range(5):
-        out.append(circle(cx - 23.0 + i * 11.5, cy + 6.0, 2.9, '#0c0c0c'))
-    for dx in (-51.9, 51.9):                         # hex standoffs (screw locks)
-        x = cx + dx
-        hexagon = [(x + 9.8 * math.cos(math.radians(a)), cy + 9.8 * math.sin(math.radians(a))) for a in range(0, 360, 60)]
-        out.append(poly(hexagon, '#cfcabe', ' stroke="#9d978a" stroke-width="0.7" stroke-linejoin="round"'))
-        out.append(ring(x, cy, 5.6, '#b3ad9f', 0.8))
-        out.append(circle(x, cy, 2.8, '#4d4a43'))
+        out.append(circle(cx - 23.0 + i * 11.5, cy + 6.0, 2.7, '#0b0b0a', ' stroke="#57554c" stroke-width="0.5"'))
+    for dx in (-51.9, 51.9):
+        out.append(hex_standoff(cx + dx, cy, metal=metal))
     return '\n'.join(out)
 
 
