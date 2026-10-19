@@ -51,6 +51,13 @@ impl Ram {
         })
     }
 
+    /// `len` bytes at `addr`, if they lie in one writable region.
+    pub fn writable_bytes(&self, addr: u32, len: u32) -> Option<&[u8]> {
+        let (p, writable) = self.locate(addr, len)?;
+        // SAFETY: `locate` checked the bounds; valid while the `Ram` is used (see `add`)
+        writable.then(|| unsafe { std::slice::from_raw_parts(p, len as usize) })
+    }
+
     /// Reads `size` bytes (1, 2, 4), little endian.
     pub fn read(&self, addr: u32, size: u32) -> Option<u32> {
         let (p, _) = self.locate(addr, size)?;

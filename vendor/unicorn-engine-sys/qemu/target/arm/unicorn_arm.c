@@ -776,6 +776,8 @@ static uc_err uc_arm_context_restore(struct uc_struct *uc, uc_context *context)
     return UC_ERR_OK;
 }
 
+void its_init_write_tracking(struct uc_struct *uc); /* cputlb.c */
+
 DEFAULT_VISIBILITY
 void uc_init(struct uc_struct *uc)
 {
@@ -794,4 +796,5 @@ void uc_init(struct uc_struct *uc)
     uc->context_save = uc_arm_context_save;
     uc->context_restore = uc_arm_context_restore;
     uc_common_init(uc);
+    its_init_write_tracking(uc);
 }

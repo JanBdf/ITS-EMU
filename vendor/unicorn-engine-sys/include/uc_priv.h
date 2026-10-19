@@ -394,6 +394,12 @@ struct uc_struct {
     int thumb; // thumb mode for ARM
     MemoryRegion **mapped_blocks;
     uint32_t mapped_block_count;
+    // ITS-EMU: write tracking for idle detection (uc_its_track_writes): the
+    // callback gets the address of the first store to a RAM page after
+    // uc_its_rearm_writes (and of every store to pages with code).
+    void (*its_first_write)(void *opaque, uint64_t paddr);
+    void *its_first_write_opaque;
+    void (*its_rearm_writes)(struct uc_struct *uc);
     // ITS-EMU: find_memory_mapping results per 1 KiB page, valid while
     // address_space_memory.generation is unchanged.
     struct uc_mapping_cache_entry {

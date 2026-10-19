@@ -718,6 +718,34 @@ void tlb_reset_dirty(CPUState *cpu, ram_addr_t start1, ram_addr_t length)
     }
 }
 
+/* ITS-EMU: the next store to each RAM page in the TLB of the current MMU
+ * index goes through notdirty_write again (uc_its_rearm_writes). Within one
+ * observation period of the idle detection the index does not change
+ * (exceptions and MSR end it), and the unprivileged stores (STRT, ...),
+ * which use another one, count as side effects there. */
+static void its_rearm_writes(struct uc_struct *uc)
+{
+    CPUState *cpu = uc->cpu;
+    CPUArchState *env = cpu->env_ptr;
+    int mmu_idx = cpu_mmu_index(env, false);
+    unsigned int i;
+    unsigned int n = tlb_n_entries(&env_tlb(env)->f[mmu_idx]);
+
+    for (i = 0; i < n; i++) {
+        tlb_reset_dirty_range_locked(uc, &env_tlb(env)->f[mmu_idx].table[i],
+                                     0, UINTPTR_MAX);
+    }
+    for (i = 0; i < CPU_VTLB_SIZE; i++) {
+        tlb_reset_dirty_range_locked(uc, &env_tlb(env)->d[mmu_idx].vtable[i],
+                                     0, UINTPTR_MAX);
+    }
+}
+
+void its_init_write_tracking(struct uc_struct *uc)
+{
+    uc->its_rearm_writes = its_rearm_writes;
+}
+
 void tlb_reset_dirty_by_vaddr(CPUState *cpu, target_ulong start1, target_ulong length)
 {
     struct uc_struct *uc = cpu->uc;
@@ -1195,6 +1223,12 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
 #endif
     ram_addr_t ram_addr = mem_vaddr + iotlbentry->addr;
     MemoryRegion *mr = cpu->uc->memory_mapping(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK));
+
+    /* ITS-EMU: before the store changes the page (see uc_its_track_writes) */
+    if (cpu->uc->its_first_write) {
+        cpu->uc->its_first_write(cpu->uc->its_first_write_opaque,
+                                 tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK));
+    }
 
     if (mr && (mr->perms & UC_PROT_EXEC) != 0) {
         struct page_collection *pages

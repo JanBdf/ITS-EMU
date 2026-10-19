@@ -237,6 +237,8 @@ impl System {
             if !master.wants_service() {
                 return;
             }
+            // writes RAM past Unicorn (see `IdleDetector::saved_pages`)
+            self.idle.dirty();
             let mut ctx = DeviceCtx { clock: &mut self.clock, nvic: &mut self.nvic };
             master.service(&mut ctx, &mut self.bus, &mut self.ram);
         }
@@ -436,6 +438,7 @@ impl CoreAccess for UcCore<'_, '_> {
     fn write_u32(&mut self, addr: u32, v: u32) -> Result<(), AccessError> {
         // Through Unicorn into RAM that code runs from: it drops translations.
         let sys = self.0.get_data_mut();
+        sys.idle.dirty();
         if sys.ram_region(addr).is_some_and(|i| !sys.ram_exec[i]) && sys.ram.write(addr, 4, v) {
             return Ok(());
         }
@@ -496,9 +499,11 @@ struct IdleDetector {
     prev_block: u64,
     /// Snapshot taken at a visit of `head`.
     snapshot: Option<Snapshot>,
-    /// Reused buffer for RAM snapshots (allocating a fresh 256 KiB buffer
-    /// each time costs a page fault per 4 KiB).
-    ram_spare: Vec<u8>,
+    /// With a snapshot that includes RAM: the pages (1 KiB) stored to since,
+    /// with their contents at the snapshot (copied by Unicorn's first-write
+    /// callback, `first_write`, before the store). Unwritten pages are
+    /// unchanged; RAM written in other ways ends the period (`dirty`).
+    saved_pages: Vec<(u32, [u8; RAM_PAGE])>,
     /// Nothing outside registers/RAM happened since the snapshot.
     clean: bool,
     /// RAM may have been written since the snapshot.
@@ -517,8 +522,30 @@ struct Snapshot {
     /// Cycle count when the snapshot was taken.
     at: u64,
     regs: [u32; IDLE_REGS.len()],
-    /// RAM contents, taken once the registers repeat in a loop that stores.
-    ram: Option<Vec<u8>>,
+    /// RAM is tracked (`saved_pages`), once the registers repeat in a loop
+    /// that stores.
+    ram: bool,
+}
+
+/// Granularity of the RAM write tracking: Unicorn's page size.
+const RAM_PAGE: usize = 1024;
+
+unsafe extern "C" {
+    // vendor/unicorn-engine-sys (ITS-EMU write tracking)
+    fn uc_its_track_writes(
+        uc: *mut std::ffi::c_void,
+        cb: Option<unsafe extern "C" fn(opaque: *mut std::ffi::c_void, paddr: u64)>,
+        opaque: *mut std::ffi::c_void,
+    );
+    fn uc_its_rearm_writes(uc: *mut std::ffi::c_void);
+}
+
+/// Unicorn's first store to a RAM page since `uc_its_rearm_writes`.
+unsafe extern "C" fn first_write(opaque: *mut std::ffi::c_void, paddr: u64) {
+    // SAFETY: `opaque` is the machine's `System` (see `Machine::new`); Unicorn
+    // calls this from a store while it runs, like the other hooks.
+    let sys = unsafe { &mut *opaque.cast::<System>() };
+    sys.idle.note_first_write(paddr as u32, &sys.ram);
 }
 
 /// The registers compared by idle detection. The others (PRIMASK, BASEPRI,
@@ -562,9 +589,8 @@ impl IdleDetector {
 
     /// Starts a new observation period.
     fn restart(&mut self) {
-        if let Some(ram) = self.snapshot.take().and_then(|s| s.ram) {
-            self.ram_spare = ram;
-        }
+        self.snapshot = None;
+        self.drop_saved_pages();
         self.clean = true;
         self.stored = false;
         self.stable_until = u64::MAX;
@@ -582,39 +608,47 @@ impl IdleDetector {
         r
     }
 
-    /// Compares RAM with the snapshot's copy.
-    fn ram_unchanged(sys: &System) -> bool {
-        let Some(copy) = sys.idle.snapshot.as_ref().and_then(|s| s.ram.as_deref()) else { return false };
-        let mut rest = copy;
-        for region in sys.ram.writable() {
-            let Some((head, tail)) = rest.split_at_checked(region.len()) else { return false };
-            if head != region {
-                return false;
-            }
-            rest = tail;
+    fn drop_saved_pages(&mut self) {
+        self.saved_pages.clear();
+    }
+
+    /// Saves the page of `addr` before its first store since the snapshot.
+    fn note_first_write(&mut self, addr: u32, ram: &Ram) {
+        if !self.snapshot.as_ref().is_some_and(|s| s.ram) {
+            return;
         }
-        rest.is_empty()
+        let page = addr & !(RAM_PAGE as u32 - 1);
+        if self.saved_pages.iter().any(|&(p, _)| p == page) {
+            return;
+        }
+        let Some(bytes) = ram.writable_bytes(page, RAM_PAGE as u32) else { return };
+        let mut copy = [0; RAM_PAGE];
+        copy.copy_from_slice(bytes);
+        self.saved_pages.push((page, copy));
+    }
+
+    /// Compares the RAM pages stored to since the snapshot with their contents then.
+    fn ram_unchanged(sys: &System) -> bool {
+        if !sys.idle.snapshot.as_ref().is_some_and(|s| s.ram) {
+            return false;
+        }
+        sys.idle
+            .saved_pages
+            .iter()
+            .all(|(page, copy)| sys.ram.writable_bytes(*page, RAM_PAGE as u32) == Some(&copy[..]))
     }
 
     fn take_snapshot(uc: &mut Unicorn<System>, with_ram: bool) {
         let regs = Self::read_regs(uc);
+        if with_ram {
+            // The next store to each RAM page calls `first_write` again.
+            // SAFETY: the engine of this machine, not running another call.
+            unsafe { uc_its_rearm_writes(uc.get_handle().cast()) };
+        }
         let sys = uc.get_data_mut();
         let d = &mut sys.idle;
-        let ram = with_ram.then(|| {
-            let mut buf = match d.snapshot.take().and_then(|s| s.ram) {
-                Some(old) => old,
-                None => std::mem::take(&mut d.ram_spare),
-            };
-            buf.clear();
-            for region in sys.ram.writable() {
-                buf.extend_from_slice(region);
-            }
-            buf
-        });
-        if let Some(old) = d.snapshot.take().and_then(|s| s.ram) {
-            d.ram_spare = old;
-        }
-        d.snapshot = Some(Snapshot { at: sys.clock.cycles(), regs, ram });
+        d.drop_saved_pages();
+        d.snapshot = Some(Snapshot { at: sys.clock.cycles(), regs, ram: with_ram });
         d.restart_period();
     }
 
@@ -705,7 +739,7 @@ impl IdleDetector {
                 let d = &sys.idle;
                 let snap = d.snapshot.as_ref().expect("snapshot present");
                 let regs_same = regs == snap.regs;
-                if regs_same && d.stored && snap.ram.is_none() {
+                if regs_same && d.stored && !snap.ram {
                     // The loop stores: compare RAM from the next visit on.
                     Self::take_snapshot(uc, true);
                     None
@@ -949,6 +983,8 @@ impl Machine {
                     u64::from((b[0] >> bit) & 1)
                 }),
                 Some(move |uc: &mut Unicorn<System>, off: u64, _size: usize, value: u64| {
+                    // writes RAM past the write tracking of idle detection
+                    uc.get_data_mut().idle.dirty();
                     let (byte, bit) = target(off);
                     let mut b = [0u8];
                     if uc.mem_read(u64::from(byte), &mut b).is_ok() {
@@ -1046,6 +1082,12 @@ impl Machine {
         })?;
 
         uc.add_intr_hook(Self::on_cpu_exception)?;
+
+        // Write tracking for idle detection (`IdleDetector::saved_pages`).
+        let sys: *mut System = uc.get_data_mut();
+        // SAFETY: `System` lives in the engine's heap allocation as long as the
+        // engine, which calls `first_write` only while it runs.
+        unsafe { uc_its_track_writes(uc.get_handle().cast(), Some(first_write), sys.cast()) };
 
         // Page rights come from `page_perms` instead of the CPU's MPU model
         // (the PPB, where the MPU registers are, is modelled here anyway).
@@ -1193,6 +1235,8 @@ impl Machine {
         if ok {
             self.invalidate_code(addr, data.len() as u32);
         }
+        // RAM written past the write tracking of idle detection
+        self.uc.get_data_mut().idle.dirty();
         ok
     }
 
