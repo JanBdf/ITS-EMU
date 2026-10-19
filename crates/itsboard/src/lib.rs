@@ -344,49 +344,75 @@ impl ItsBoard {
     /// Renders the display as seen on the board into `rgba`
     /// (`SCREEN_WIDTH * SCREEN_HEIGHT * 4` bytes), including backlight.
     pub fn render_display(&self, rgba: &mut [u8]) {
-        assert_eq!(rgba.len(), SCREEN_WIDTH * SCREEN_HEIGHT * 4);
-        let lcd = self.lcd.borrow();
-        // Perceived brightness of an LED backlight is far from linear in the
-        // PWM duty cycle (80 % looks almost fully bright).
-        let bl = self.backlight().powf(1.0 / 2.2);
-        for vy in 0..SCREEN_HEIGHT {
-            for vx in 0..SCREEN_WIDTH {
-                let (px, py) = screen_to_panel(vx, vy);
-                let c = lcd.panel_pixel(px, py);
-                let i = 4 * (vy * SCREEN_WIDTH + vx);
-                rgba[i] = ((c >> 16) as u8 as f32 * bl) as u8;
-                rgba[i + 1] = ((c >> 8) as u8 as f32 * bl) as u8;
-                rgba[i + 2] = (c as u8 as f32 * bl) as u8;
-                rgba[i + 3] = 0xFF;
-            }
-        }
+        let mut frame = DisplayFrame::default();
+        self.capture_display(&mut frame);
+        frame.render(rgba);
     }
 
     /// Like [`Self::render_display`], but with the tone response and black
     /// level measured on the real panel: what the display looks like on the
     /// board rather than the ideal colours of the frame buffer.
     pub fn render_display_as_seen(&self, rgba: &mut [u8]) {
-        assert_eq!(rgba.len(), SCREEN_WIDTH * SCREEN_HEIGHT * 4);
-        let lcd = self.lcd.borrow();
-        // The backlight's luminance is linear in the PWM duty cycle (measured).
-        let bl = self.backlight();
-        let lut: Vec<u8> = (0..=255u8).map(|v| panel_channel(v, bl)).collect();
-        let dark = lcd.is_dark();
-        for vy in 0..SCREEN_HEIGHT {
-            for vx in 0..SCREEN_WIDTH {
-                let i = 4 * (vy * SCREEN_WIDTH + vx);
-                if dark {
-                    rgba[i..i + 4].copy_from_slice(&[0, 0, 0, 0xFF]);
-                    continue;
-                }
-                let (px, py) = screen_to_panel(vx, vy);
-                let c = lcd.panel_pixel(px, py);
-                rgba[i] = lut[(c >> 16) as u8 as usize];
-                rgba[i + 1] = lut[(c >> 8) as u8 as usize];
-                rgba[i + 2] = lut[c as u8 as usize];
-                rgba[i + 3] = 0xFF;
-            }
+        let mut frame = DisplayFrame::default();
+        self.capture_display(&mut frame);
+        frame.render_as_seen(rgba);
+    }
+
+    /// Copies the display's content and backlight into `frame` (reusing its
+    /// buffer): cheap, the colours are computed by [`DisplayFrame::render`]
+    /// (possibly on another thread).
+    pub fn capture_display(&self, frame: &mut DisplayFrame) {
+        self.lcd.borrow().capture(&mut frame.panel);
+        frame.backlight = self.backlight();
+    }
+}
+
+/// The display at one moment (see [`ItsBoard::capture_display`]).
+#[derive(Clone, Debug, Default)]
+pub struct DisplayFrame {
+    panel: ili9486::PanelFrame,
+    backlight: f32,
+}
+
+impl DisplayFrame {
+    /// See [`ItsBoard::render_display`].
+    pub fn render(&self, rgba: &mut [u8]) {
+        // Perceived brightness of an LED backlight is far from linear in the
+        // PWM duty cycle (80 % looks almost fully bright).
+        let bl = self.backlight.powf(1.0 / 2.2);
+        self.render_with(rgba, |c| (f32::from(c) * bl) as u8);
+    }
+
+    /// See [`ItsBoard::render_display_as_seen`].
+    pub fn render_as_seen(&self, rgba: &mut [u8]) {
+        if self.panel.is_dark() {
+            rgba.as_chunks_mut::<4>().0.fill([0, 0, 0, 0xFF]);
+            return;
         }
+        // The backlight's luminance is linear in the PWM duty cycle (measured).
+        let bl = self.backlight;
+        self.render_with(rgba, |c| panel_channel(c, bl));
+    }
+
+    /// Renders with `channel` mapping an 8-bit colour component to the output.
+    fn render_with(&self, rgba: &mut [u8], channel: impl Fn(u8) -> u8) {
+        assert_eq!(rgba.len(), SCREEN_WIDTH * SCREEN_HEIGHT * 4);
+        if self.panel.is_dark() {
+            // black before the backlight: what `channel` makes of 0
+            let black = channel(0);
+            rgba.as_chunks_mut::<4>().0.fill([black, black, black, 0xFF]);
+            return;
+        }
+        // The 5- and 6-bit levels expanded to 8 bits as the panel model does.
+        let lut5: [u8; 32] = std::array::from_fn(|v| channel((v * 255 / 31) as u8));
+        let lut6: [u8; 64] = std::array::from_fn(|v| channel((v * 255 / 63) as u8));
+        let positions = (0..SCREEN_HEIGHT).flat_map(|vy| (0..SCREEN_WIDTH).map(move |vx| screen_to_panel(vx, vy)));
+        let mut out = rgba.as_chunks_mut::<4>().0.iter_mut();
+        self.panel.for_each_rgb565(positions, |r, g, b| {
+            if let Some(px) = out.next() {
+                *px = [lut5[usize::from(r)], lut6[usize::from(g)], lut5[usize::from(b)], 0xFF];
+            }
+        });
     }
 }
 

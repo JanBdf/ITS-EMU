@@ -13,6 +13,8 @@ use emu_core::{ElfImage, StopReason};
 use itsboard::sim::DEFAULT_FONTS;
 use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH, Simulator};
 
+use crate::render::Renderer;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Speed {
     /// Virtual time runs at wall-clock speed times this factor.
@@ -168,7 +170,7 @@ impl Drop for EmuHandle {
 /// Starts the emulator thread. `repaint` is called whenever the snapshot
 /// changed. With `gdb_addr`, a GDB server listens there (except while
 /// pyOCD uses the ST-LINK: its own GDB server takes the port).
-pub fn spawn(repaint: impl Fn() + Send + 'static, gdb_addr: Option<String>, usb: UsbConfig) -> EmuHandle {
+pub fn spawn(repaint: impl Fn() + Send + Sync + 'static, gdb_addr: Option<String>, usb: UsbConfig) -> EmuHandle {
     let (tx, rx) = channel();
     let snapshot = SharedSnapshot::default();
     let shared = snapshot.clone();
@@ -183,7 +185,7 @@ pub fn spawn(repaint: impl Fn() + Send + 'static, gdb_addr: Option<String>, usb:
     });
     let thread = std::thread::Builder::new()
         .name("emulator".into())
-        .spawn(move || Worker::new(rx, shared, Box::new(repaint), gdb_addr, usb, wake, pending).run())
+        .spawn(move || Worker::new(rx, shared, Arc::new(repaint), gdb_addr, usb, wake, pending).run())
         .expect("spawn emulator thread");
     EmuHandle { commands: tx, snapshot, thread: Some(thread) }
 }
@@ -199,7 +201,7 @@ const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 struct Worker {
     commands: Receiver<Command>,
     snapshot: SharedSnapshot,
-    repaint: Box<dyn Fn() + Send>,
+    repaint: Arc<dyn Fn() + Send + Sync>,
     sim: Option<Simulator>,
     firmware: Option<PathBuf>,
     /// A debugger has written flash since the last load (`firmware` is stale).
@@ -212,9 +214,8 @@ struct Worker {
     rate_sample: (Instant, u64),
     measured_speed: f64,
     published_generation: u64,
-    /// The next display frame, rendered outside the snapshot lock and then
-    /// swapped in.
-    display: Vec<u8>,
+    /// Turns captured display frames into pixels (own thread).
+    renderer: Renderer,
     ideal_colors: bool,
     /// External inputs, re-applied when new firmware is loaded.
     buttons: [bool; 8],
@@ -250,7 +251,7 @@ impl Worker {
     fn new(
         commands: Receiver<Command>,
         snapshot: SharedSnapshot,
-        repaint: Box<dyn Fn() + Send>,
+        repaint: Arc<dyn Fn() + Send + Sync>,
         gdb_addr: Option<String>,
         usb_config: UsbConfig,
         wake: Arc<dyn Fn() + Send + Sync>,
@@ -259,6 +260,7 @@ impl Worker {
         let now = Instant::now();
         let mut w = Self {
             commands,
+            renderer: Renderer::spawn(snapshot.clone(), repaint.clone()),
             snapshot,
             repaint,
             // Like a board with empty flash: a debugger can attach and load a program.
@@ -272,7 +274,6 @@ impl Worker {
             rate_sample: (now, 0),
             measured_speed: 0.0,
             published_generation: u64::MAX,
-            display: vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * 4],
             ideal_colors: false,
             buttons: [false; 8],
             ints: [None; 6],
@@ -715,20 +716,20 @@ impl Worker {
             self.rate_sample = (now, virt);
         }
 
-        // Render outside the lock: the UI thread waits for it.
-        let new_frame = self.sim.as_ref().and_then(|sim| {
+        // Only a copy of the frame buffer here; the display thread computes
+        // the pixels and puts them into the snapshot.
+        if let Some(sim) = &self.sim {
             let b = &sim.board;
             let generation = b.display_generation() ^ (b.backlight().to_bits() as u64);
-            if generation == self.published_generation {
-                return None;
+            if generation != self.published_generation {
+                let mut frame = self.renderer.frame();
+                b.capture_display(&mut frame);
+                // Busy with earlier frames: try again at the next publish.
+                if self.renderer.submit(frame, self.ideal_colors) {
+                    self.published_generation = generation;
+                }
             }
-            if self.ideal_colors {
-                b.render_display(&mut self.display);
-            } else {
-                b.render_display_as_seen(&mut self.display);
-            }
-            Some(generation)
-        });
+        }
 
         let mut snap = self.snapshot.lock().unwrap();
         snap.firmware = if self.uploaded {
@@ -744,11 +745,6 @@ impl Worker {
         snap.usb = self.usb_status();
         if let Some(sim) = &self.sim {
             let b = &sim.board;
-            if let Some(generation) = new_frame {
-                std::mem::swap(&mut snap.display, &mut self.display);
-                snap.display_generation = snap.display_generation.wrapping_add(1);
-                self.published_generation = generation;
-            }
             snap.leds = b.leds();
             snap.dac1 = sim.board.dac1();
             let duty = sim.take_led_duty();
