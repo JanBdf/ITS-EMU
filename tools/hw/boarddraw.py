@@ -2,7 +2,13 @@
 """Draws the ITS-Board (Rev 02 with NUCLEO-F429ZI and the Waveshare 4" shield)
 as a vector image for the GUI.
 
-    boarddraw.py [OUT.svg]        (default: apps/its-emu-gui/assets/board.svg)
+    boarddraw.py [OUT_DIR]        (default: apps/its-emu-gui/assets)
+
+The board is drawn in three layers, one SVG each with the same view box, so
+that the GUI can show the parts stacked on the carrier see-through:
+board-carrier.svg (the ITS-Board with everything soldered to it, including
+what the Nucleo and the display hide), board-nucleo.svg (the NUCLEO-F429ZI
+with its Morpho pins) and board-shield.svg (the display module).
 
 Everything is drawn from shapes and fonts; there are no bitmaps in the
 output.  Positions are GUI design units (the board is 1000 units wide,
@@ -1099,7 +1105,7 @@ def nucleo_top_right():
 
 
 def morpho_pins():
-    """The grey sockets beside the Nucleo and the Morpho pins, bent outwards into them."""
+    """The Morpho pins of the Nucleo, bent outwards into the grey sockets."""
     out = []
     for (x0, y0, x1, y1), rows in [(FELT_TOP, MORPHO_ROWS[:2]), (FELT_BOTTOM, MORPHO_ROWS[2:])]:
         top = y1 < 200
@@ -1107,6 +1113,13 @@ def morpho_pins():
             x, yi = ortho(xp, rows[1] if top else rows[0], M_NUCLEO)        # inner row
             out.append(line(x, yi, x, y1 if top else y0, '#c99a43', 2.3, cap='butt'))
             out.append(line(x - 0.35, yi, x - 0.35, y1 if top else y0, '#f0cd7a', 0.8, cap='butt'))
+    return '\n'.join(out)
+
+
+def morpho_sockets():
+    """The grey sockets on the carrier beside the Nucleo."""
+    out = []
+    for x0, y0, x1, y1 in (FELT_TOP, FELT_BOTTOM):
         out.append(rect(x0, y0, x1, y1, FELT, 1.5))
         out.append(rect_stroke(x0, y0, x1, y1, '#4e4e48', 0.8, 1.5))
     return '\n'.join(out)
@@ -1131,25 +1144,21 @@ def shield():
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), '..', '..', 'apps',
-                                                              'its-emu-gui', 'assets', 'board.svg')
+                                                              'its-emu-gui', 'assets')
     board = carrier()
     board_clip()
-    svg.add('<g clip-path="url(#board)">')
-    svg.add(board)
-    svg.add('</g>')
-    svg.add(f'<g transform="{layer(M_NUCLEO)}">')
-    svg.add(nucleo())
-    svg.add('</g>')
-    svg.add(nucleo_top_right())
-    svg.add(nucleo_caps())
-    svg.add(morpho_pins())
-    svg.add(f'<g transform="{layer(M_SHIELD)}">')
-    svg.add(shield())
-    svg.add('</g>')
-    svg.add(poly(GLASS, '#08090a'))
-    with open(out, 'w') as fh:
-        fh.write(svg.text())
-    print(out, os.path.getsize(out) // 1024, 'KiB')
+    layers = {
+        'carrier': ['<g clip-path="url(#board)">', board, '</g>', morpho_sockets()],
+        'nucleo': [f'<g transform="{layer(M_NUCLEO)}">', nucleo(), '</g>', nucleo_top_right(), nucleo_caps(),
+                   morpho_pins()],
+        'shield': [f'<g transform="{layer(M_SHIELD)}">', shield(), '</g>', poly(GLASS, '#08090a')],
+    }
+    for name, body in layers.items():
+        svg.body = body
+        file = os.path.join(out, f'board-{name}.svg')
+        with open(file, 'w') as fh:
+            fh.write(svg.text())
+        print(file, os.path.getsize(file) // 1024, 'KiB')
 
 
 if __name__ == '__main__':

@@ -1,8 +1,10 @@
 //! Drawing of the ITS-Board and its interactive parts.
 //!
 //! The board (Rev 02, 15.12.2020, with the Nucleo and the display shield) is a
-//! vector drawing, assets/board.svg, made by tools/hw/boarddraw.py after a
-//! photo of the real board.  It is rendered at the size it is shown at.
+//! vector drawing in three layers, assets/board-{carrier,nucleo,shield}.svg,
+//! made by tools/hw/boarddraw.py after photos of the real board.  Each layer is
+//! rendered at the size it is shown at; the Nucleo and the display can be
+//! shown see-through.
 //! LEDs, pressed buttons and the display are drawn on top of it.  Positions are
 //! in design units (the board is 1000 units wide); the drawing is an
 //! orthographic top view, the parts on the Nucleo and the display were moved
@@ -15,7 +17,14 @@ use eframe::egui::{
 pub const BOARD_W: f32 = 1000.0;
 pub const BOARD_H: f32 = 648.55;
 
-const SVG: &str = include_str!("../assets/board.svg");
+/// The layers from the bottom up.
+const LAYERS: [&str; 3] = [
+    include_str!("../assets/board-carrier.svg"),
+    include_str!("../assets/board-nucleo.svg"),
+    include_str!("../assets/board-shield.svg"),
+];
+const NUCLEO: usize = 1;
+const SHIELD: usize = 2;
 /// A new size is rendered once the board has kept it for this long (seconds).
 const RESIZE_SETTLE: f64 = 0.15;
 
@@ -50,24 +59,43 @@ const RESET: (f32, f32) = (321.2, 318.3);
 /// above, so this is a rectangle.
 const GLASS: [(f32, f32); 4] = [(532.1, 86.5), (878.9, 86.5), (878.9, 317.7), (532.1, 317.7)];
 
+/// One layer of the board drawing and its rendering at the current size.
+struct Layer {
+    tree: resvg::usvg::Tree,
+    /// Part of the board the layer covers, in design units.
+    bounds: Rect,
+    /// Rendering, the board size in pixels it was made for and where it lies on the board (pixels).
+    tex: Option<(TextureHandle, [u32; 2], Rect)>,
+}
+
 /// The board drawing and its rendering at the current size.
 pub struct Textures {
-    tree: resvg::usvg::Tree,
-    board: Option<(TextureHandle, [u32; 2])>,
+    layers: Vec<Layer>,
     /// Size the board is shown at that differs from the rendered one, since when.
     pending: Option<([u32; 2], f64)>,
 }
 
 impl Textures {
     pub fn load(_ctx: &egui::Context) -> Self {
-        let tree = resvg::usvg::Tree::from_str(SVG, &resvg::usvg::Options::default()).expect("board drawing");
-        Self { tree, board: None, pending: None }
+        let layers = LAYERS
+            .iter()
+            .map(|svg| {
+                let tree = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default()).expect("board drawing");
+                let b = tree.root().abs_layer_bounding_box();
+                let bounds = Rect::from_min_max(Pos2::new(b.left(), b.top()), Pos2::new(b.right(), b.bottom()))
+                    .intersect(Rect::from_min_size(Pos2::ZERO, Vec2::new(BOARD_W, BOARD_H)));
+                Layer { tree, bounds, tex: None }
+            })
+            .collect();
+        Self { layers, pending: None }
     }
 
-    /// The board rendered at `size` pixels, re-rendered when the size has settled.
-    fn board(&mut self, ctx: &egui::Context, size: [u32; 2]) -> &TextureHandle {
+    /// The layers rendered for a board of `size` pixels (texture and its pixel
+    /// rectangle), re-rendered when the size has settled.
+    fn layers(&mut self, ctx: &egui::Context, size: [u32; 2]) -> Vec<(egui::TextureId, Rect)> {
         let now = ctx.input(|i| i.time);
-        let rendered = self.board.as_ref().map(|b| b.1);
+        let rendered = self.layers[0].tex.as_ref().map(|t| t.1);
+        let mut stale = rendered.is_none();
         if rendered == Some(size) {
             self.pending = None;
         } else if rendered.is_some() {
@@ -76,7 +104,7 @@ impl Textures {
                     if now - since < RESIZE_SETTLE {
                         ctx.request_repaint_after(std::time::Duration::from_secs_f64(RESIZE_SETTLE));
                     } else {
-                        self.board = None;
+                        stale = true;
                     }
                 }
                 _ => {
@@ -85,22 +113,63 @@ impl Textures {
                 }
             }
         }
-        if self.board.is_none() {
+        if stale {
             self.pending = None;
-            let image = self.render(size);
-            self.board = Some((ctx.load_texture("board", image, TextureOptions::LINEAR), size));
+            for (n, layer) in self.layers.iter_mut().enumerate() {
+                let (image, at) = layer.render(size);
+                layer.tex = Some((ctx.load_texture(format!("board{n}"), image, TextureOptions::LINEAR), size, at));
+            }
         }
-        &self.board.as_ref().unwrap().0
+        // until the new size has settled, the old rendering is stretched
+        let [w, h] = self.layers[0].tex.as_ref().unwrap().1;
+        let k = Vec2::new(size[0] as f32 / w as f32, size[1] as f32 / h as f32);
+        self.layers
+            .iter()
+            .map(|l| {
+                let (tex, _, at) = l.tex.as_ref().unwrap();
+                (tex.id(), Rect::from_min_max((at.min.to_vec2() * k).to_pos2(), (at.max.to_vec2() * k).to_pos2()))
+            })
+            .collect()
     }
+}
 
-    fn render(&self, [w, h]: [u32; 2]) -> egui::ColorImage {
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).expect("board size");
+impl Layer {
+    /// Renders the part of the layer that has content, for a board of `w` × `h`
+    /// pixels; also returns where that part lies (pixels).
+    fn render(&self, [w, h]: [u32; 2]) -> (egui::ColorImage, Rect) {
+        let k = Vec2::new(w as f32 / BOARD_W, h as f32 / BOARD_H);
+        let min = (self.bounds.min.to_vec2() * k).floor();
+        let max = (self.bounds.max.to_vec2() * k).ceil().min(Vec2::new(w as f32, h as f32));
+        let px = (max - min).max(Vec2::splat(1.0));
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(px.x as u32, px.y as u32).expect("board size");
         let tree_size = self.tree.size();
-        let transform =
-            resvg::tiny_skia::Transform::from_scale(w as f32 / tree_size.width(), h as f32 / tree_size.height());
+        let transform = resvg::tiny_skia::Transform::from_row(
+            w as f32 / tree_size.width(),
+            0.0,
+            0.0,
+            h as f32 / tree_size.height(),
+            -min.x,
+            -min.y,
+        );
         resvg::render(&self.tree, transform, &mut pixmap.as_mut());
         // tiny-skia gives premultiplied RGBA, as egui wants it
-        egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], pixmap.data())
+        let image = egui::ColorImage::from_rgba_premultiplied([px.x as usize, px.y as usize], pixmap.data());
+        (image, Rect::from_min_size(min.to_pos2(), px))
+    }
+}
+
+/// How the board is shown.
+#[derive(Clone, Copy, PartialEq)]
+pub struct View {
+    /// Opacity of the Nucleo (1: as on the real board).
+    pub nucleo_opacity: f32,
+    /// Opacity of the display module including its picture.
+    pub shield_opacity: f32,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self { nucleo_opacity: 1.0, shield_opacity: 1.0 }
     }
 }
 
@@ -132,6 +201,8 @@ pub struct BoardInput {
     pub int_clicked: Option<usize>,
     /// New voltage for a pad of the Analog header (`None`: open).
     pub analog: Option<(usize, Option<f32>)>,
+    /// The display was right-clicked (switch between the board and the display alone).
+    pub focus_toggled: bool,
 }
 
 /// Maps design units to screen coordinates.
@@ -234,7 +305,7 @@ fn glass_pixel(x: f32, y: f32) -> (f32, f32) {
     (u * 480.0, v * 320.0)
 }
 
-pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState) -> BoardInput {
+pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &View) -> BoardInput {
     let avail = ui.available_size();
     let s = (avail.x / BOARD_W).min(avail.y / BOARD_H).max(0.4);
     let (outer, _) = ui.allocate_exact_size(Vec2::new(BOARD_W, BOARD_H) * s, Sense::hover());
@@ -252,7 +323,17 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState) -> BoardI
     let mut input = BoardInput::default();
 
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-    painter.image(tex.board(ui.ctx(), size).id(), outer, uv, Color32::WHITE);
+    for (n, (id, at)) in tex.layers(ui.ctx(), size).into_iter().enumerate() {
+        let alpha = match n {
+            NUCLEO => view.nucleo_opacity,
+            SHIELD => view.shield_opacity,
+            _ => 1.0,
+        };
+        if alpha > 0.0 {
+            let at = Rect::from_min_max(outer.min + at.min.to_vec2() / ppp, outer.min + at.max.to_vec2() / ppp);
+            painter.image(id, at, uv, Color32::WHITE.gamma_multiply(alpha));
+        }
+    }
 
     // ---- display
     let quad = GLASS.map(|(x, y)| pcb.p(x, y));
@@ -261,6 +342,7 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState) -> BoardI
         None => Mesh::default(),
     };
     let color = if state.display.is_some() { Color32::WHITE } else { Color32::from_rgb(8, 9, 10) };
+    let color = color.gamma_multiply(view.shield_opacity);
     for (p, uv) in quad.iter().zip([(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]) {
         mesh.vertices.push(egui::epaint::Vertex { pos: *p, uv: Pos2::new(uv.0, uv.1), color });
     }
@@ -299,7 +381,7 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState) -> BoardI
                 Sense::click_and_drag(),
             )
             .on_hover_text(format!("S{bit} → IN{bit} (PF{bit}) · key {bit} · right click latches"));
-        let held = resp.is_pointer_button_down_on();
+        let held = resp.is_pointer_button_down_on() && primary_down(ui);
         input.buttons[bit] = held;
         input.latch_toggled[bit] = resp.secondary_clicked();
         if held || state.latched[bit] || !high {
@@ -440,14 +522,130 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState) -> BoardI
         let (x, y) = glass_pixel((p.x - outer.min.x) / s, (p.y - outer.min.y) / s);
         (x.clamp(0.0, 479.99), y.clamp(0.0, 319.99))
     };
-    input.touch = touch
-        .is_pointer_button_down_on()
+    input.touch = (touch.is_pointer_button_down_on() && primary_down(ui))
         .then(|| touch.interact_pointer_pos())
         .flatten()
         .filter(|p| glass.contains(*p))
         .map(to_px);
+    input.focus_toggled = touch.secondary_clicked();
     if let Some((x, y)) = input.touch.or_else(|| touch.hover_pos().map(to_px)) {
-        touch.on_hover_text_at_pointer(format!("x = {:.0}, y = {:.0}", x.floor(), y.floor()));
+        touch.on_hover_text_at_pointer(format!(
+            "x = {:.0}, y = {:.0} · right click: display alone",
+            x.floor(),
+            y.floor()
+        ));
     }
     input
+}
+
+fn primary_down(ui: &egui::Ui) -> bool {
+    ui.input(|i| i.pointer.primary_down())
+}
+
+/// The display alone, as large as it fits, with the LEDs and buttons of the
+/// board in a row below it.
+pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
+    let mut input = BoardInput::default();
+    const STRIP: f32 = 46.0;
+    let avail = ui.available_rect_before_wrap();
+    let rim = 0.035; // black border of the panel around the active area, relative to its width
+    let area = Vec2::new(avail.width(), (avail.height() - STRIP).max(40.0));
+    let s = (area.x / (480.0 * (1.0 + 2.0 * rim))).min(area.y / (320.0 + 2.0 * 480.0 * rim)).max(0.1);
+    // whole physical pixels, so that the pixels of the display stay sharp
+    let ppp = ui.ctx().pixels_per_point();
+    let size = (Vec2::new(480.0, 320.0) * s * ppp).floor() / ppp;
+    let center = Pos2::new(avail.center().x, avail.top() + area.y / 2.0);
+    let glass = Rect::from_center_size(((center.to_vec2() * ppp).round() / ppp).to_pos2(), size);
+    let glass = Rect::from_min_size(((glass.min.to_vec2() * ppp).round() / ppp).to_pos2(), size);
+    let painter = ui.painter_at(avail);
+    let frame = glass.expand(480.0 * rim * s);
+    painter.rect_filled(frame.expand(2.0), 6.0, Color32::from_rgb(0x3a, 0x3d, 0x40));
+    painter.rect_filled(frame, 3.0, Color32::from_rgb(0x1f, 0x25, 0x28));
+    match state.display {
+        Some(t) => {
+            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+            painter.image(t.id(), glass, uv, Color32::WHITE);
+        }
+        None => {
+            painter.rect_filled(glass, 0.0, Color32::from_rgb(8, 9, 10));
+        }
+    }
+    let touch = ui
+        .interact(glass, ui.scope_id().with("lcd"), Sense::click_and_drag())
+        .on_hover_cursor(egui::CursorIcon::Crosshair);
+    let to_px = |p: Pos2| {
+        let v = (p - glass.min) / glass.size();
+        ((v.x * 480.0).clamp(0.0, 479.99), (v.y * 320.0).clamp(0.0, 319.99))
+    };
+    input.touch = (touch.is_pointer_button_down_on() && primary_down(ui))
+        .then(|| touch.interact_pointer_pos())
+        .flatten()
+        .filter(|p| glass.contains(*p))
+        .map(to_px);
+    input.focus_toggled = touch.secondary_clicked();
+    if let Some((x, y)) = input.touch.or_else(|| touch.hover_pos().map(to_px)) {
+        touch.on_hover_text_at_pointer(format!(
+            "x = {:.0}, y = {:.0} · right click: back to the board",
+            x.floor(),
+            y.floor()
+        ));
+    }
+
+    // ---- LEDs and buttons below: OUT15..OUT0, then IN7..IN0 with S7..S0
+    let d = 16.0_f32.min(frame.width() / 34.0);
+    let y = (frame.bottom() + 8.0 + STRIP / 2.0).min(avail.bottom() - STRIP / 2.0);
+    let width = 24.0 * d + 3.0 * d;
+    let x0 = avail.center().x - width / 2.0 + d / 2.0;
+    for bit in (0..16).rev() {
+        let x = x0 + (15 - bit) as f32 * d;
+        let color = if bit >= 8 { LED_YELLOW } else { LED_BLUE };
+        let duty = state.led_duty[bit];
+        strip_led(&painter, Pos2::new(x, y - d * 0.45), d, color, duty);
+        let r = Rect::from_center_size(Pos2::new(x, y), Vec2::new(d, 2.0 * d));
+        ui.interact(r, ui.scope_id().with(("lcd-out", bit)), Sense::hover())
+            .on_hover_text(format!("OUT{bit}: {:.0} %", duty * 100.0));
+        painter.text(
+            Pos2::new(x, y + d * 0.45),
+            egui::Align2::CENTER_CENTER,
+            bit.to_string(),
+            egui::FontId::proportional(d * 0.55),
+            Color32::from_gray(150),
+        );
+    }
+    let x1 = x0 + 19.0 * d;
+    for bit in (0..8).rev() {
+        let x = x1 + (7 - bit) as f32 * d;
+        let high = state.inputs & (1 << bit) != 0;
+        strip_led(&painter, Pos2::new(x, y - d * 0.45), d, LED_RED, if high { 1.0 } else { 0.0 });
+        let c = Pos2::new(x, y + d * 0.45);
+        let resp = ui
+            .interact(
+                Rect::from_center_size(c, Vec2::splat(d)),
+                ui.scope_id().with(("lcd-button", bit)),
+                Sense::click_and_drag(),
+            )
+            .on_hover_text(format!("S{bit} → IN{bit} (PF{bit}) · key {bit} · right click latches"));
+        let held = resp.is_pointer_button_down_on() && primary_down(ui);
+        input.buttons[bit] = held;
+        input.latch_toggled[bit] = resp.secondary_clicked();
+        let down = held || state.latched[bit] || !high;
+        painter.circle_filled(
+            c,
+            d * 0.36,
+            if down { Color32::from_rgb(0x8a, 0x26, 0x2c) } else { Color32::from_rgb(0xd9, 0x43, 0x4b) },
+        );
+        if state.latched[bit] {
+            painter.circle_stroke(c, d * 0.48, Stroke::new(1.5, Color32::from_rgb(0xFF, 0xE0, 0x40)));
+        }
+    }
+    input
+}
+
+/// A lit LED of the row below the display alone.
+fn strip_led(painter: &egui::Painter, c: Pos2, d: f32, color: Color32, duty: f32) {
+    let b = duty.clamp(0.0, 1.0).powf(1.0 / 2.2);
+    painter.circle_filled(c, d * 0.3, lerp(Color32::from_gray(55), color, b));
+    if b > 0.01 {
+        painter.circle_filled(c, d * 0.5, color.gamma_multiply(0.25 * b));
+    }
 }
