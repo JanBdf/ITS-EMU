@@ -121,10 +121,44 @@ impl Textures {
         }
         if stale {
             self.pending = None;
-            for (n, layer) in self.layers.iter_mut().enumerate() {
-                let (image, at) = layer.render(size);
+            let t0 = std::time::Instant::now();
+            // in bands of rows, on all cores
+            let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16) as f32;
+            let areas: Vec<Rect> = self.layers.iter().map(|l| l.area(size)).collect();
+            let total: f32 = areas.iter().map(|a| a.area()).sum();
+            let bands: Vec<(usize, std::ops::Range<u32>)> = areas
+                .iter()
+                .enumerate()
+                .flat_map(|(n, a)| {
+                    let rows = a.height() as u32;
+                    let count = ((a.area() / total * threads).ceil() as u32).clamp(1, rows);
+                    let step = rows.div_ceil(count);
+                    (0..rows).step_by(step as usize).map(move |r| (n, r..(r + step).min(rows)))
+                })
+                .collect();
+            let layers = &self.layers;
+            let pixels: Vec<Vec<u8>> = std::thread::scope(|scope| {
+                let jobs: Vec<_> = bands
+                    .iter()
+                    .map(|(n, rows)| {
+                        let area = areas[*n];
+                        scope.spawn(move || layers[*n].render_rows(size, area, rows.clone()))
+                    })
+                    .collect();
+                jobs.into_iter().map(|job| job.join().expect("board rendering")).collect()
+            });
+            let mut images: Vec<Vec<u8>> = vec![Vec::new(); self.layers.len()];
+            for ((n, _), band) in bands.iter().zip(pixels) {
+                images[*n].extend_from_slice(&band);
+            }
+            for (n, (layer, rgba)) in self.layers.iter_mut().zip(images).enumerate() {
+                let at = areas[n];
+                // tiny-skia gives premultiplied RGBA, as egui wants it
+                let image =
+                    egui::ColorImage::from_rgba_premultiplied([at.width() as usize, at.height() as usize], &rgba);
                 layer.tex = Some((ctx.load_texture(format!("board{n}"), image, TextureOptions::LINEAR), size, at));
             }
+            log::debug!("board rendered at {size:?} in {:?}", t0.elapsed());
         }
         // until the new size has settled, the old rendering is stretched
         let [w, h] = self.layers[0].tex.as_ref().unwrap().1;
@@ -140,27 +174,29 @@ impl Textures {
 }
 
 impl Layer {
-    /// Renders the part of the layer that has content, for a board of `w` × `h`
-    /// pixels; also returns where that part lies (pixels).
-    fn render(&self, [w, h]: [u32; 2]) -> (egui::ColorImage, Rect) {
+    /// The part of the layer that has content, for a board of `w` × `h`
+    /// pixels (whole pixels).
+    fn area(&self, [w, h]: [u32; 2]) -> Rect {
         let k = Vec2::new(w as f32 / BOARD_W, h as f32 / BOARD_H);
         let min = (self.bounds.min.to_vec2() * k).floor();
         let max = (self.bounds.max.to_vec2() * k).ceil().min(Vec2::new(w as f32, h as f32));
-        let px = (max - min).max(Vec2::splat(1.0));
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(px.x as u32, px.y as u32).expect("board size");
+        Rect::from_min_size(min.to_pos2(), (max - min).max(Vec2::splat(1.0)))
+    }
+
+    /// Renders rows `rows` of `area` (premultiplied RGBA).
+    fn render_rows(&self, [w, h]: [u32; 2], area: Rect, rows: std::ops::Range<u32>) -> Vec<u8> {
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(area.width() as u32, rows.len() as u32).expect("board size");
         let tree_size = self.tree.size();
         let transform = resvg::tiny_skia::Transform::from_row(
             w as f32 / tree_size.width(),
             0.0,
             0.0,
             h as f32 / tree_size.height(),
-            -min.x,
-            -min.y,
+            -area.min.x,
+            -area.min.y - rows.start as f32,
         );
         resvg::render(&self.tree, transform, &mut pixmap.as_mut());
-        // tiny-skia gives premultiplied RGBA, as egui wants it
-        let image = egui::ColorImage::from_rgba_premultiplied([px.x as usize, px.y as usize], pixmap.data());
-        (image, Rect::from_min_size(min.to_pos2(), px))
+        pixmap.take()
     }
 }
 
