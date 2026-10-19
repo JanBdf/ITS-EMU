@@ -8,12 +8,14 @@ use std::path::PathBuf;
 pub struct Settings {
     /// The ST-LINK is plugged in (USB/IP) at start.
     pub usb: bool,
+    /// The firmware file is loaded again when a new build replaces it.
+    pub auto_reload: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         // Like the real board: the probe is there when the emulator runs.
-        Self { usb: cfg!(target_os = "linux") }
+        Self { usb: cfg!(target_os = "linux"), auto_reload: true }
     }
 }
 
@@ -38,15 +40,17 @@ impl Settings {
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else { continue };
             let on = matches!(value.trim(), "true" | "1" | "yes" | "on");
-            if key.trim() == "usb" {
-                self.usb = on;
+            match key.trim() {
+                "usb" => self.usb = on,
+                "auto_reload" => self.auto_reload = on,
+                _ => {}
             }
         }
     }
 
     pub fn save(&self) {
         let Some(path) = Self::path() else { return };
-        let text = format!("# ITS-Board emulator (GUI)\nusb = {}\n", self.usb);
+        let text = format!("# ITS-Board emulator (GUI)\nusb = {}\nauto_reload = {}\n", self.usb, self.auto_reload);
         let result = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, text));
         if let Err(e) = result {
             log::warn!("cannot save settings to {}: {e}", path.display());
@@ -60,9 +64,10 @@ mod tests {
 
     #[test]
     fn parses_switch() {
-        let mut s = Settings { usb: true };
-        s.parse("# comment\nusb = false\nother = 3\n");
+        let mut s = Settings { usb: true, auto_reload: true };
+        s.parse("# comment\nusb = false\nother = 3\nauto_reload = no\n");
         assert!(!s.usb);
+        assert!(!s.auto_reload);
         s.parse("usb=on");
         assert!(s.usb);
     }
