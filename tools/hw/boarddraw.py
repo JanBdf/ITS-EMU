@@ -739,7 +739,10 @@ def traces():
     if not os.path.exists(TRACES):
         return ''
     d = ''.join(f'M{f(x0)},{f(y0)}L{f(x1)},{f(y1)}' for x0, y0, x1, y1 in json.load(open(TRACES)))
-    return path(d, extra=' stroke="#1c3c64" stroke-width="0.45" stroke-linecap="round"')
+    # copper under the mask: a slightly lighter band with darker edges
+    svg.defs.append(f'<path id="traces" d="{d}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>')
+    return ('<use href="#traces" stroke="#132d52" stroke-width="1.4"/>\n'
+            '<use href="#traces" stroke="#23467a" stroke-width="0.7"/>')
 
 
 def logo():
@@ -1523,30 +1526,36 @@ def morpho_sockets():
 
 def shield():
     """The display module (photo coordinates, drawn inside layer(M_SHIELD))."""
-    out = [rect(475.5, 50.6, 908.6, 330.8, '#3a3d40', 1.2, ' stroke="#6e6d69" stroke-width="0.5"'),  # glass rim
-           rect_stroke(478.4, 53.5, 905.7, 327.9, '#9b9890', 2.2, 0.8),    # frame line of the touch panel
-           rect(479.6, 54.7, 904.5, 326.7, '#1f2528', 0.5)]                # border of the LCD
-    out.append(rect(479.8, 150.0, 491.6, 327.5, '#141414', 1.0))           # FPC tape
-    out.append(nt(485.7, 293.5, 'H1043  5 2', 3.6, 90, '#d9d9d9'))
-    out.append(rect(481.5, 52.5, 489.5, 148.0, '#f1ede2', 0.8))            # FPC clamp
-    out.append(rect(472.5, 96.0, 482.0, 145.0, '#e9a73e', 1.5, ' opacity="0.85"'))
+    out = [rect(475.5, 50.6, 908.6, 330.8, '#1c1e20', 1.0, ' stroke="#4a4945" stroke-width="0.4"'),  # glass rim
+           rect_stroke(477.4, 52.5, 906.7, 328.9, '#85827a', 1.0, 0.6),    # edge of the touch panel
+           rect(478.6, 53.7, 905.5, 327.7, '#15191b', 0.4)]                # border of the LCD
+    out.append(rect(479.8, 150.0, 488.6, 327.0, '#101112', 0.8))           # FPC tape
+    out.append(nt(484.2, 293.5, 'H1043  5 2', 3.2, 90, '#9a9a96'))
+    # the folded FPC of the touch panel along the left edge
+    out.append(line(480.6, 53.5, 480.6, 148.0, '#8d897f', 0.8, cap='butt'))
+    out.append(line(484.0, 56.0, 484.0, 148.0, '#77746c', 0.6, cap='butt'))
+    out.append(rect(472.5, 96.0, 481.0, 145.0, '#d9952e', 1.2, ' opacity="0.8"'))
     return '\n'.join(out)
 
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), '..', '..', 'apps',
                                                               'its-emu-gui', 'assets')
-    board = carrier()
-    board_clip()
+    def carrier_layer():
+        board = carrier()
+        board_clip()
+        return ['<g clip-path="url(#board)">', board, '</g>']
+
     layers = {
-        'carrier': ['<g clip-path="url(#board)">', board, '</g>'],
+        'carrier': carrier_layer,
         # the grey sockets sit on the Nucleo's bent Morpho pins
-        'nucleo': [morpho_sockets(), f'<g transform="{layer(M_NUCLEO)}">', nucleo(), '</g>', nucleo_top_right(), nucleo_caps(),
-                   morpho_pins()],
-        'shield': [f'<g transform="{layer(M_SHIELD)}">', shield(), '</g>', poly(GLASS, '#08090a')],
+        'nucleo': lambda: [morpho_sockets(), f'<g transform="{layer(M_NUCLEO)}">', nucleo(), '</g>',
+                           nucleo_top_right(), nucleo_caps(), morpho_pins()],
+        'shield': lambda: [f'<g transform="{layer(M_SHIELD)}">', shield(), '</g>', poly(GLASS, '#08090a')],
     }
-    for name, body in layers.items():
-        svg.body = body
+    for name, make in layers.items():
+        svg.defs = []                     # each layer has its own definitions
+        svg.body = make()
         file = os.path.join(out, f'board-{name}.svg')
         with open(file, 'w') as fh:
             fh.write(svg.text())
