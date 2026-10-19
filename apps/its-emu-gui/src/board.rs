@@ -546,7 +546,7 @@ fn primary_down(ui: &egui::Ui) -> bool {
 /// board in a row below it.
 pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
     let mut input = BoardInput::default();
-    const STRIP: f32 = 46.0;
+    const STRIP: f32 = 58.0;
     let avail = ui.available_rect_before_wrap();
     let rim = 0.035; // black border of the panel around the active area, relative to its width
     let area = Vec2::new(avail.width(), (avail.height() - STRIP).max(40.0));
@@ -591,11 +591,19 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
         ));
     }
 
-    // ---- LEDs and buttons below: OUT15..OUT0, then IN7..IN0 with S7..S0
-    let d = 16.0_f32.min(frame.width() / 34.0);
-    let y = (frame.bottom() + 8.0 + STRIP / 2.0).min(avail.bottom() - STRIP / 2.0);
-    let width = 24.0 * d + 3.0 * d;
-    let x0 = avail.center().x - width / 2.0 + d / 2.0;
+    // ---- LEDs and buttons below: OUT15..OUT0, IN7..IN0 with S7..S0, USER
+    let d = 16.0_f32.min(frame.width() / 30.0);
+    let y = (frame.bottom() + 6.0 + STRIP / 2.0).min(avail.bottom() - STRIP / 2.0) - d * 0.4;
+    let x0 = avail.center().x - 29.0 * d / 2.0 + d / 2.0;
+    let label = |x: f32, text: &str| {
+        painter.text(
+            Pos2::new(x, y + d * 1.35),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(d * 0.62),
+            Color32::from_gray(120),
+        );
+    };
     for bit in (0..16).rev() {
         let x = x0 + (15 - bit) as f32 * d;
         let color = if bit >= 8 { LED_YELLOW } else { LED_BLUE };
@@ -612,7 +620,8 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
             Color32::from_gray(150),
         );
     }
-    let x1 = x0 + 19.0 * d;
+    label(x0 + 7.5 * d, "Out 15–0");
+    let x1 = x0 + 18.0 * d;
     for bit in (0..8).rev() {
         let x = x1 + (7 - bit) as f32 * d;
         let high = state.inputs & (1 << bit) != 0;
@@ -629,16 +638,29 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
         input.buttons[bit] = held;
         input.latch_toggled[bit] = resp.secondary_clicked();
         let down = held || state.latched[bit] || !high;
-        painter.circle_filled(
-            c,
-            d * 0.36,
-            if down { Color32::from_rgb(0x8a, 0x26, 0x2c) } else { Color32::from_rgb(0xd9, 0x43, 0x4b) },
-        );
+        strip_button(&painter, c, d, Color32::from_rgb(0xd9, 0x43, 0x4b), down);
         if state.latched[bit] {
             painter.circle_stroke(c, d * 0.48, Stroke::new(1.5, Color32::from_rgb(0xFF, 0xE0, 0x40)));
         }
     }
+    label(x1 + 3.5 * d, "In 7–0 · S7–S0");
+    let c = Pos2::new(x1 + 10.0 * d, y + d * 0.45);
+    let user = ui
+        .interact(
+            Rect::from_center_size(c, Vec2::splat(d * 1.2)),
+            ui.scope_id().with("lcd-user"),
+            Sense::click_and_drag(),
+        )
+        .on_hover_text("USER button B1 (PC13)");
+    input.user = user.is_pointer_button_down_on() && primary_down(ui);
+    strip_button(&painter, c, d * 1.15, Color32::from_rgb(0x2a, 0x8b, 0xd8), input.user);
+    label(c.x, "User");
     input
+}
+
+/// A push button of the row below the display alone.
+fn strip_button(painter: &egui::Painter, c: Pos2, d: f32, color: Color32, down: bool) {
+    painter.circle_filled(c, d * 0.36, if down { lerp(color, Color32::BLACK, 0.45) } else { color });
 }
 
 /// A lit LED of the row below the display alone.

@@ -272,7 +272,7 @@ impl eframe::App for App {
 
         // ---- toolbar
         egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("📂 Open…").on_hover_text("Open a firmware file (.axf) · Ctrl+O").clicked() {
                     self.open_dialog();
                 }
@@ -384,7 +384,7 @@ impl eframe::App for App {
 
         // ---- status bar
         egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let (text, color) = match &state {
                     RunState::NoFirmware => (
                         "flash empty — open an .axf file or load one with the debugger".to_owned(),
