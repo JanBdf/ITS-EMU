@@ -3,6 +3,7 @@
 mod app;
 mod board;
 mod emu;
+mod render;
 mod settings;
 
 use std::path::PathBuf;
