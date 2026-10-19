@@ -49,6 +49,8 @@ pub struct App {
     see_through: Option<f32>,
     /// Filter the display texture was made with (sharp pixels when it is shown alone).
     display_options: egui::TextureOptions,
+    /// The display shows the frame buffer's colours instead of the real panel's look.
+    ideal_colors: bool,
 }
 
 const SEE_THROUGH_DEFAULT: f32 = 0.25;
@@ -143,6 +145,9 @@ impl App {
         if ideal_colors {
             emu.send(Command::IdealColors(true));
         }
+        if !settings.auto_reload {
+            emu.send(Command::SetAutoReload(false));
+        }
         if let Some(path) = firmware {
             emu.send(Command::Load(path));
         }
@@ -171,6 +176,18 @@ impl App {
                 .is_ok_and(|v| v == "see-through")
                 .then_some(SEE_THROUGH_DEFAULT),
             display_options: egui::TextureOptions::LINEAR,
+            ideal_colors,
+        }
+    }
+
+    /// Saves the display as it is shown (480 × 320 pixels) to a PNG file the user picks.
+    fn save_display_dialog(&self) {
+        let file = rfd::FileDialog::new().add_filter("PNG image", &["png"]).set_file_name("display.png").save_file();
+        if let Some(path) = file {
+            let img = egui::ColorImage::from_rgba_unmultiplied([SCREEN_WIDTH, SCREEN_HEIGHT], &self.display_frame);
+            if let Err(e) = save_png(&path, &img) {
+                log::error!("cannot save {}: {e}", path.display());
+            }
         }
     }
 
@@ -235,13 +252,31 @@ impl eframe::App for App {
             }
         }
 
+        // ---- keyboard shortcuts
+        let shortcut = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
+        if shortcut(Key::O) {
+            self.open_dialog();
+        }
+        if shortcut(Key::R) {
+            self.emu.send(Command::Reset);
+        }
+        if shortcut(Key::S) {
+            self.save_display_dialog();
+        }
+        if shortcut(Key::D) {
+            self.lcd_focus = !self.lcd_focus;
+        }
+        if shortcut(Key::T) {
+            self.see_through = self.see_through.is_none().then_some(SEE_THROUGH_DEFAULT);
+        }
+
         // ---- toolbar
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("📂 Open…").clicked() {
+                if ui.button("📂 Open…").on_hover_text("Open a firmware file (.axf) · Ctrl+O").clicked() {
                     self.open_dialog();
                 }
-                if ui.button("⟲ Reset").on_hover_text("RESET button of the Nucleo board").clicked() {
+                if ui.button("⟲ Reset").on_hover_text("RESET button of the Nucleo board · Ctrl+R").clicked() {
                     self.emu.send(Command::Reset);
                 }
                 let pause_label = if self.paused { "▶ Run" } else { "⏸ Pause" };
@@ -273,12 +308,14 @@ impl eframe::App for App {
                 }
                 ui.separator();
                 ui.toggle_value(&mut self.lcd_focus, "🖵 Display").on_hover_text(
-                    "Only the display, as large as possible (also: right click on the display; Esc returns)",
+                    "Only the display, as large as possible · Ctrl+D, or right click on the display; Esc returns",
                 );
                 let mut see = self.see_through.is_some();
                 if ui
                     .add_enabled(!self.lcd_focus, egui::Button::selectable(see, "👁 See-through"))
-                    .on_hover_text("Show the Nucleo and the display see-through, to see the carrier board under them")
+                    .on_hover_text(
+                        "Show the Nucleo and the display see-through, to see the carrier board under them · Ctrl+T",
+                    )
                     .clicked()
                 {
                     see = !see;
@@ -290,6 +327,41 @@ impl eframe::App for App {
                     ui.add(egui::Slider::new(opacity, 0.0..=1.0).show_value(false))
                         .on_hover_text("Opacity of the Nucleo and the display");
                 }
+                ui.separator();
+                ui.menu_button("☰", |ui| {
+                    let mut auto = self.settings.auto_reload;
+                    if ui
+                        .checkbox(&mut auto, "Reload the firmware when it is rebuilt")
+                        .on_hover_text(
+                            "Load the .axf file again (and restart) when a new build replaces it — \
+                             not while a debugger is attached",
+                        )
+                        .changed()
+                    {
+                        self.settings.auto_reload = auto;
+                        self.settings.save();
+                        self.emu.send(Command::SetAutoReload(auto));
+                    }
+                    let mut real = !self.ideal_colors;
+                    if ui
+                        .checkbox(&mut real, "Display colours as on the real panel")
+                        .on_hover_text(
+                            "The measured tone response of the board's display (darker mid tones, grey black); \
+                             off: the frame buffer's colours",
+                        )
+                        .changed()
+                    {
+                        self.ideal_colors = !real;
+                        self.emu.send(Command::IdealColors(self.ideal_colors));
+                    }
+                    ui.separator();
+                    if ui.button("📷 Save display as PNG…  Ctrl+S").clicked() {
+                        ui.close();
+                        self.save_display_dialog();
+                    }
+                })
+                .response
+                .on_hover_text("Options");
                 ui.separator();
                 // The Nucleo user LEDs are hidden under the display on the real board.
                 for (i, (name, pin, color)) in

@@ -40,6 +40,8 @@ pub enum Command {
     IdealColors(bool),
     /// Plug the board's ST-LINK in (USB/IP) or unplug it.
     SetUsb(bool),
+    /// Load the firmware file again when it changes on disk (a new build).
+    SetAutoReload(bool),
     /// A USB request arrived.
     Wake,
     Quit,
@@ -244,7 +246,28 @@ struct Worker {
     seen_flash_writes: u64,
     /// The probe has held the core halted since this instant (time passes for the peripherals).
     halted_since: Option<Instant>,
+    /// Load the firmware file again when it changes.
+    auto_reload: bool,
+    /// Modification time and size of the firmware file when it was loaded
+    /// (or last looked at), a changed stamp and since when it has stayed so,
+    /// and when to look next.
+    file_stamp: Option<FileStamp>,
+    file_changed: Option<(FileStamp, Instant)>,
+    file_check_at: Instant,
 }
+
+/// Modification time and size of a file.
+type FileStamp = (std::time::SystemTime, u64);
+
+fn file_stamp(path: &std::path::Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// How often the firmware file is looked at, and how long a change has to
+/// stay before the file is loaded (the build may still be writing it).
+const FILE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+const FILE_SETTLE: Duration = Duration::from_millis(400);
 
 impl Worker {
     fn new(
@@ -292,6 +315,10 @@ impl Worker {
             core_halted: false,
             seen_flash_writes: 0,
             halted_since: None,
+            auto_reload: true,
+            file_stamp: None,
+            file_changed: None,
+            file_check_at: now,
         };
         w.manage_gdb();
         if usb_config.enabled {
@@ -431,6 +458,7 @@ impl Worker {
             }
             self.poll_gdb();
             self.poll_usb();
+            self.poll_firmware_file();
             self.manage_gdb();
             self.advance_halted();
             if self.state == RunState::Running {
@@ -498,6 +526,11 @@ impl Worker {
                 self.published_generation = u64::MAX;
             }
             Command::SetUsb(on) => self.set_usb(on),
+            Command::SetAutoReload(on) => {
+                self.auto_reload = on;
+                self.file_stamp = self.firmware.as_deref().and_then(file_stamp);
+                self.file_changed = None;
+            }
             Command::Wake | Command::Quit => {}
         }
         self.publish(true);
@@ -520,6 +553,8 @@ impl Worker {
                 // `monitor load FILE`: as if the file had been opened.
                 Some((path, image)) => {
                     sim.image = image;
+                    self.file_stamp = file_stamp(&path);
+                    self.file_changed = None;
                     self.firmware = Some(path);
                     self.uploaded = false;
                 }
@@ -652,10 +687,39 @@ impl Worker {
         self.adopt_sim();
         self.core_halted = false;
         self.restore_inputs();
+        self.file_stamp = file_stamp(&path);
+        self.file_changed = None;
         self.firmware = Some(path);
         self.uploaded = false;
         self.published_generation = u64::MAX;
         self.reanchor();
+    }
+
+    /// Loads the firmware file again once a new build of it has been written,
+    /// unless a debugger is in charge (it loads programs itself).
+    fn poll_firmware_file(&mut self) {
+        let now = Instant::now();
+        if !self.auto_reload || self.uploaded || now < self.file_check_at {
+            return;
+        }
+        self.file_check_at = now + FILE_CHECK_INTERVAL;
+        let Some(path) = &self.firmware else { return };
+        let stamp = file_stamp(path);
+        if stamp.is_none() || stamp == self.file_stamp {
+            self.file_changed = None;
+            return;
+        }
+        let debugging = self.execution != Execution::Free
+            || matches!(self.usb_status(), UsbStatus::PluggedIn { debugging: true, .. });
+        match self.file_changed {
+            Some((s, since)) if Some(s) == stamp => {
+                if now.duration_since(since) >= FILE_SETTLE && !debugging {
+                    log::info!("{} changed: loading it again", path.display());
+                    self.load(path.clone());
+                }
+            }
+            _ => self.file_changed = stamp.map(|s| (s, now)),
+        }
     }
 
     /// Runs one slice and keeps virtual time in step with the wall clock.
