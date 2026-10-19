@@ -64,10 +64,8 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   levels (which re-pends them) and some `next_event`s read shared state, so
   it needs an audit of every model. The CPU stays on one thread (one
   deterministic, cycle-counted core); the GUI renders the display on its own
-  thread. Waiting programs spend most of the rest copying and comparing the
-  256 KiB of RAM for idle detection after every SysTick interrupt (cheap in
-  real time; exact alternatives such as write-protecting RAM pages cost as
-  much). `tools/perf/bench.sh` times the fixtures, `tools/perf/same-cycles.sh`
+  thread. Idle detection tracks the RAM pages a loop stores to through
+  Unicorn's first-write path instead of copying RAM. `tools/perf/bench.sh` times the fixtures, `tools/perf/same-cycles.sh`
   checks that a change leaves every fixture's cycles and output unchanged.
   `--no-idle-skip` benchmarks are sensitive to code layout (±10 % with
   identical instruction counts): compare `perf stat` instruction counts
