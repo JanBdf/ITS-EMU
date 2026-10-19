@@ -197,6 +197,8 @@ const PORT_LEFT_TO_PYOCD: &str = "port left to pyOCD (ST-LINK in use)";
 const SLICE: Duration = Duration::from_millis(4);
 /// Minimum interval between snapshot updates (UI refresh).
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
+/// Interval of repaints for the virtual time alone, when nothing else changed.
+const CLOCK_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 
 struct Worker {
     commands: Receiver<Command>,
@@ -211,6 +213,7 @@ struct Worker {
     /// Pacing reference: (wall instant, virtual ns) at the last speed change/resume.
     anchor: (Instant, u64),
     last_publish: Instant,
+    last_repaint: Instant,
     rate_sample: (Instant, u64),
     measured_speed: f64,
     published_generation: u64,
@@ -271,6 +274,7 @@ impl Worker {
             speed: Speed::Factor(1.0),
             anchor: (now, 0),
             last_publish: now,
+            last_repaint: now,
             rate_sample: (now, 0),
             measured_speed: 0.0,
             published_generation: u64::MAX,
@@ -731,34 +735,47 @@ impl Worker {
             }
         }
 
+        // Repaint when something visible changed; the virtual time alone
+        // only every CLOCK_REPAINT_INTERVAL (a repaint draws the whole board).
+        fn set<T: PartialEq>(field: &mut T, value: T) -> bool {
+            let changed = *field != value;
+            *field = value;
+            changed
+        }
         let mut snap = self.snapshot.lock().unwrap();
-        snap.firmware = if self.uploaded {
+        let firmware = if self.uploaded {
             Some("uploaded by debugger".to_owned())
         } else {
             self.firmware.as_ref().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
         };
-        snap.state = self.state.clone();
+        let mut changed = set(&mut snap.firmware, firmware);
+        changed |= set(&mut snap.state, self.state.clone());
         snap.virtual_ns = virt;
-        snap.speed = if self.state == RunState::Running { self.measured_speed } else { 0.0 };
-        snap.gdb = self.gdb_status.clone();
-        snap.gdb_attached = self.gdb.as_ref().is_some_and(GdbServer::has_controller);
-        snap.usb = self.usb_status();
+        let speed = if self.state == RunState::Running { self.measured_speed } else { 0.0 };
+        changed |= set(&mut snap.speed, speed);
+        changed |= set(&mut snap.gdb, self.gdb_status.clone());
+        changed |= set(&mut snap.gdb_attached, self.gdb.as_ref().is_some_and(GdbServer::has_controller));
+        changed |= set(&mut snap.usb, self.usb_status());
         if let Some(sim) = &self.sim {
             let b = &sim.board;
-            snap.leds = b.leds();
-            snap.dac1 = sim.board.dac1();
+            changed |= set(&mut snap.leds, b.leds());
+            changed |= set(&mut snap.dac1, sim.board.dac1());
             let duty = sim.take_led_duty();
-            snap.led_duty = duty.out;
-            snap.nucleo_duty = duty.nucleo;
-            snap.inputs = b.inputs();
-            snap.nucleo_leds = b.nucleo_leds();
-            snap.backlight = b.backlight();
-            snap.core_mhz = b.mcu().clocks.get().hclk / 1_000_000;
+            changed |= set(&mut snap.led_duty, duty.out);
+            changed |= set(&mut snap.nucleo_duty, duty.nucleo);
+            changed |= set(&mut snap.inputs, b.inputs());
+            changed |= set(&mut snap.nucleo_leds, b.nucleo_leds());
+            changed |= set(&mut snap.backlight, b.backlight());
+            changed |= set(&mut snap.core_mhz, b.mcu().clocks.get().hclk / 1_000_000);
             let out = b.mcu().usart3.borrow_mut().take_output();
+            changed |= !out.is_empty();
             snap.serial.extend(out);
         }
         drop(snap);
-        (self.repaint)();
+        if changed || force || now - self.last_repaint >= CLOCK_REPAINT_INTERVAL {
+            self.last_repaint = now;
+            (self.repaint)();
+        }
     }
 }
 
