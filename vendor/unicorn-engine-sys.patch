@@ -1,105 +1,59 @@
---- a/qemu/accel/tcg/cpu-exec.c
-+++ b/qemu/accel/tcg/cpu-exec.c
-@@ -75,7 +75,9 @@
-          * of the start of the TB.
-          */
-         CPUClass *cc = CPU_GET_CLASS(cpu);
--        if (!HOOK_EXISTS(env->uc, UC_HOOK_CODE)) {
-+        // ITS-EMU: TB_EXIT_REQUESTED comes from the exit check at the start
-+        // of the TB (gen_tb_start), before any instruction synced the PC.
-+        if (tb_exit == TB_EXIT_REQUESTED || !HOOK_EXISTS(env->uc, UC_HOOK_CODE)) {
-             // We should sync pc for R/W error.
-             switch (env->uc->invalid_error) {
-                 case UC_ERR_WRITE_PROT:
---- a/qemu/accel/tcg/cputlb.c
-+++ b/qemu/accel/tcg/cputlb.c
-@@ -2240,6 +2240,9 @@
-             uc->invalid_error = UC_ERR_WRITE_UNMAPPED;
-             // printf("***** Invalid memory write at " TARGET_FMT_lx "\n", addr);
-             cpu_exit(uc->cpu);
-+            if (uc->nested_level > 0 && !uc->cpu->stopped) {
-+                cpu_loop_exit_restore(uc->cpu, retaddr);
-+            }
-             return;
-         } else {
-             uc->invalid_error = UC_ERR_OK;
-@@ -2259,6 +2262,9 @@
-             if (mr == NULL) {
-                 uc->invalid_error = UC_ERR_MAP;
-                 cpu_exit(uc->cpu);
-+                if (uc->nested_level > 0 && !uc->cpu->stopped) {
-+                    cpu_loop_exit_restore(uc->cpu, retaddr);
-+                }
-                 return;
-             }
-         }
-@@ -2305,6 +2311,9 @@
-             uc->invalid_error = UC_ERR_WRITE_PROT;
-             // printf("***** Invalid memory write (ro) at " TARGET_FMT_lx "\n", addr);
-             cpu_exit(uc->cpu);
-+            if (uc->nested_level > 0 && !uc->cpu->stopped) {
-+                cpu_loop_exit_restore(uc->cpu, retaddr);
-+            }
-             return;
-         }
-     }
-@@ -2315,6 +2324,9 @@
-             uc->invalid_addr = paddr;
-             uc->invalid_error = UC_ERR_NOMEM;
-             cpu_exit(uc->cpu);
-+            if (uc->nested_level > 0 && !uc->cpu->stopped) {
-+                cpu_loop_exit_restore(uc->cpu, retaddr);
-+            }
-             return;
-         }
-         /* refill tlb after CoW */
---- a/qemu/include/exec/gen-icount.h
-+++ b/qemu/include/exec/gen-icount.h
-@@ -32,6 +32,22 @@
- 
- static inline void gen_tb_start(TCGContext *tcg_ctx, TranslationBlock *tb)
+--- a/qemu/unicorn_common.h
++++ b/qemu/unicorn_common.h
+@@ -176,7 +176,19 @@
  {
-+    // ITS-EMU: without a delay slot, test the exit request inline as QEMU
-+    // does instead of calling a helper (which syncs all globals) per TB.
-+    // An exit leaves before the first instruction with TB_EXIT_REQUESTED;
-+    // cpu_tb_exec then sets the PC to the TB's start.
-+    if (tcg_ctx->delay_slot_flag == NULL) {
-+        TCGv_i32 count = tcg_temp_new_i32(tcg_ctx);
-+        tcg_gen_ld_i32(tcg_ctx, count, tcg_ctx->cpu_env,
-+                       offsetof(ArchCPU, neg.icount_decr.u32) -
-+                       offsetof(ArchCPU, env));
-+        tcg_ctx->exitreq_label = gen_new_label(tcg_ctx);
-+        tcg_gen_brcondi_i32(tcg_ctx, TCG_COND_LT, count, 0, tcg_ctx->exitreq_label);
-+        tcg_temp_free_i32(tcg_ctx, count);
-+        return;
+     hwaddr xlat = 0;
+     hwaddr len = 1;
++    // ITS-EMU: every slow-path access (MMIO) asks; mappings are aligned to
++    // the target page (at least 1 KiB), so the answer holds for the page.
++    uint64_t page = address >> 10;
++    unsigned generation = uc->address_space_memory.generation;
++    // flash, SRAM and peripherals are at multiples of large powers of two
++    __typeof__(uc->mapping_cache[0]) *c = &uc->mapping_cache[(page ^ (page >> 8) ^ (page >> 16)) & 255];
++    if (c->mr && c->page == page && c->generation == generation) {
++        return c->mr == &uc->io_mem_unassigned ? NULL : c->mr;
 +    }
-+    tcg_ctx->exitreq_label = NULL;
-+
-     TCGv_ptr puc = tcg_const_ptr(tcg_ctx, tcg_ctx->uc);
-     TCGv_i32 tmp = tcg_const_i32(tcg_ctx, 0);
-     // Unicorn:
-@@ -57,6 +73,10 @@
-         tcg_set_insn_param(tcg_ctx->icount_start_insn, 1, num_insns);
+     MemoryRegion *mr = address_space_translate(&uc->address_space_memory, address, &xlat, &len, false, MEMTXATTRS_UNSPECIFIED);
++    c->page = page;
++    c->generation = generation;
++    c->mr = mr;
+ 
+     if (mr == &uc->io_mem_unassigned) {
+         return NULL;
+--- a/include/uc_priv.h
++++ b/include/uc_priv.h
+@@ -394,6 +394,13 @@
+     int thumb; // thumb mode for ARM
+     MemoryRegion **mapped_blocks;
+     uint32_t mapped_block_count;
++    // ITS-EMU: find_memory_mapping results per 1 KiB page, valid while
++    // address_space_memory.generation is unchanged.
++    struct {
++        uint64_t page;
++        unsigned generation;
++        MemoryRegion *mr;
++    } mapping_cache[256];
+     uint32_t mapped_block_cache_index;
+     void *qemu_thread_data; // to support cross compile to Windows
+                             // (qemu-thread-win32.c)
+--- a/qemu/softmmu/memory.c
++++ b/qemu/softmmu/memory.c
+@@ -1041,6 +1041,7 @@
      }
  
-+    if (tcg_ctx->exitreq_label) {
-+        gen_set_label(tcg_ctx, tcg_ctx->exitreq_label);
-+        tcg_ctx->exitreq_label = NULL;
-+    }
-     tcg_gen_exit_tb(tcg_ctx, tb, TB_EXIT_REQUESTED);
- }
- 
---- a/qemu/include/tcg/tcg.h
-+++ b/qemu/include/tcg/tcg.h
-@@ -672,6 +672,8 @@
- #endif
- 
-     TCGv_i32 delay_slot_flag;
-+    /* ITS-EMU: target of the exit request check at the start of a TB. */
-+    TCGLabel *exitreq_label;
- 
-     TCGTempSet free_temps[TCG_TYPE_COUNT * 2];
-     TCGTemp temps[TCG_MAX_TEMPS]; /* globals first, temps after */
+     as->current_map = new_view;
++    as->generation++;
+     if (old_view) {
+         flatview_unref(old_view);
+     }
+@@ -1531,6 +1532,7 @@
+     as->uc = uc;
+     as->root = root;
+     as->current_map = NULL;
++    as->generation++;
+     QTAILQ_INIT(&as->listeners);
+     QTAILQ_INSERT_TAIL(&uc->address_spaces, as, address_spaces_link);
+     address_space_update_topology(as);
 --- a/qemu/tcg/tcg-op.c
 +++ b/qemu/tcg/tcg-op.c
 @@ -2917,7 +2917,8 @@
@@ -162,6 +116,76 @@
  }
  
  static void tcg_gen_ext_i32(TCGContext *tcg_ctx, TCGv_i32 ret, TCGv_i32 val, MemOp opc)
+--- a/qemu/accel/tcg/cputlb.c
++++ b/qemu/accel/tcg/cputlb.c
+@@ -2240,6 +2240,9 @@
+             uc->invalid_error = UC_ERR_WRITE_UNMAPPED;
+             // printf("***** Invalid memory write at " TARGET_FMT_lx "\n", addr);
+             cpu_exit(uc->cpu);
++            if (uc->nested_level > 0 && !uc->cpu->stopped) {
++                cpu_loop_exit_restore(uc->cpu, retaddr);
++            }
+             return;
+         } else {
+             uc->invalid_error = UC_ERR_OK;
+@@ -2259,6 +2262,9 @@
+             if (mr == NULL) {
+                 uc->invalid_error = UC_ERR_MAP;
+                 cpu_exit(uc->cpu);
++                if (uc->nested_level > 0 && !uc->cpu->stopped) {
++                    cpu_loop_exit_restore(uc->cpu, retaddr);
++                }
+                 return;
+             }
+         }
+@@ -2305,6 +2311,9 @@
+             uc->invalid_error = UC_ERR_WRITE_PROT;
+             // printf("***** Invalid memory write (ro) at " TARGET_FMT_lx "\n", addr);
+             cpu_exit(uc->cpu);
++            if (uc->nested_level > 0 && !uc->cpu->stopped) {
++                cpu_loop_exit_restore(uc->cpu, retaddr);
++            }
+             return;
+         }
+     }
+@@ -2315,6 +2324,9 @@
+             uc->invalid_addr = paddr;
+             uc->invalid_error = UC_ERR_NOMEM;
+             cpu_exit(uc->cpu);
++            if (uc->nested_level > 0 && !uc->cpu->stopped) {
++                cpu_loop_exit_restore(uc->cpu, retaddr);
++            }
+             return;
+         }
+         /* refill tlb after CoW */
+--- a/qemu/accel/tcg/cpu-exec.c
++++ b/qemu/accel/tcg/cpu-exec.c
+@@ -75,7 +75,9 @@
+          * of the start of the TB.
+          */
+         CPUClass *cc = CPU_GET_CLASS(cpu);
+-        if (!HOOK_EXISTS(env->uc, UC_HOOK_CODE)) {
++        // ITS-EMU: TB_EXIT_REQUESTED comes from the exit check at the start
++        // of the TB (gen_tb_start), before any instruction synced the PC.
++        if (tb_exit == TB_EXIT_REQUESTED || !HOOK_EXISTS(env->uc, UC_HOOK_CODE)) {
+             // We should sync pc for R/W error.
+             switch (env->uc->invalid_error) {
+                 case UC_ERR_WRITE_PROT:
+--- a/qemu/target/arm/unicorn_arm.c
++++ b/qemu/target/arm/unicorn_arm.c
+@@ -154,6 +154,12 @@
+     }
+ 
+     xpsr_write(env, val, xpsrmask);
++    // ITS-EMU: the cached TB flags include handler mode (IPSR != 0). Stale,
++    // thread mode code was translated as handler code, whose returns
++    // (BX LR, POP {PC}) leave the JIT for the exception return check.
++    if (reg & 1) {
++        arm_rebuild_hflags(env);
++    }
+ }
+ 
+ static uc_err read_cp_reg(CPUARMState *env, uc_arm_cp_reg *cp)
 --- a/qemu/target/arm/cpu.c
 +++ b/qemu/target/arm/cpu.c
 @@ -2111,7 +2111,12 @@
@@ -178,18 +202,114 @@
      } else if (uc->mode & UC_MODE_ARM926) {
          uc->cpu_model = UC_CPU_ARM_926;
      } else if (uc->mode & UC_MODE_ARM946) {
---- a/qemu/target/arm/unicorn_arm.c
-+++ b/qemu/target/arm/unicorn_arm.c
-@@ -154,6 +154,12 @@
+--- a/qemu/tcg/i386/tcg-target.inc.c
++++ b/qemu/tcg/i386/tcg-target.inc.c
+@@ -1733,6 +1733,16 @@
      }
  
-     xpsr_write(env, val, xpsrmask);
-+    // ITS-EMU: the cached TB flags include handler mode (IPSR != 0). Stale,
-+    // thread mode code was translated as handler code, whose returns
-+    // (BX LR, POP {PC}) leave the JIT for the exception return check.
-+    if (reg & 1) {
-+        arm_rebuild_hflags(env);
-+    }
+     tcg_out_mov(s, tlbtype, r0, addrlo);
++#if (defined(__x86_64__) || defined(_M_X64)) && !defined(TLB_INDEX_FOLD)
++#error "TLB_INDEX_FOLD (exec/cpu-defs.h) must be visible: tlb_index() uses it"
++#endif
++#ifdef TLB_INDEX_FOLD
++    /* ITS-EMU: index of tlb_index(): addr ^ (addr >> TLB_INDEX_FOLD).
++       L1 is free until it gets the address below. */
++    tcg_out_mov(s, tlbtype, r1, addrlo);
++    tcg_out_shifti(s, SHIFT_SHR + tlbrexw, r1, TLB_INDEX_FOLD);
++    tgen_arithr(s, ARITH_XOR + tlbrexw, r0, r1);
++#endif
+     tcg_out_shifti(s, SHIFT_SHR + tlbrexw, r0,
+                    TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
+ 
+--- a/qemu/include/tcg/tcg.h
++++ b/qemu/include/tcg/tcg.h
+@@ -672,6 +672,8 @@
+ #endif
+ 
+     TCGv_i32 delay_slot_flag;
++    /* ITS-EMU: target of the exit request check at the start of a TB. */
++    TCGLabel *exitreq_label;
+ 
+     TCGTempSet free_temps[TCG_TYPE_COUNT * 2];
+     TCGTemp temps[TCG_MAX_TEMPS]; /* globals first, temps after */
+--- a/qemu/include/exec/cpu_ldst.h
++++ b/qemu/include/exec/cpu_ldst.h
+@@ -103,6 +103,10 @@
+ #endif
+     uintptr_t size_mask = env_tlb(env)->f[mmu_idx].mask >> CPU_TLB_ENTRY_BITS;
+ 
++#ifdef TLB_INDEX_FOLD
++    /* ITS-EMU: see TLB_INDEX_FOLD */
++    addr ^= addr >> TLB_INDEX_FOLD;
++#endif
+     return (addr >> TARGET_PAGE_BITS) & size_mask;
  }
  
- static uc_err read_cp_reg(CPUARMState *env, uc_arm_cp_reg *cp)
+--- a/qemu/include/exec/gen-icount.h
++++ b/qemu/include/exec/gen-icount.h
+@@ -32,6 +32,22 @@
+ 
+ static inline void gen_tb_start(TCGContext *tcg_ctx, TranslationBlock *tb)
+ {
++    // ITS-EMU: without a delay slot, test the exit request inline as QEMU
++    // does instead of calling a helper (which syncs all globals) per TB.
++    // An exit leaves before the first instruction with TB_EXIT_REQUESTED;
++    // cpu_tb_exec then sets the PC to the TB's start.
++    if (tcg_ctx->delay_slot_flag == NULL) {
++        TCGv_i32 count = tcg_temp_new_i32(tcg_ctx);
++        tcg_gen_ld_i32(tcg_ctx, count, tcg_ctx->cpu_env,
++                       offsetof(ArchCPU, neg.icount_decr.u32) -
++                       offsetof(ArchCPU, env));
++        tcg_ctx->exitreq_label = gen_new_label(tcg_ctx);
++        tcg_gen_brcondi_i32(tcg_ctx, TCG_COND_LT, count, 0, tcg_ctx->exitreq_label);
++        tcg_temp_free_i32(tcg_ctx, count);
++        return;
++    }
++    tcg_ctx->exitreq_label = NULL;
++
+     TCGv_ptr puc = tcg_const_ptr(tcg_ctx, tcg_ctx->uc);
+     TCGv_i32 tmp = tcg_const_i32(tcg_ctx, 0);
+     // Unicorn:
+@@ -57,6 +73,10 @@
+         tcg_set_insn_param(tcg_ctx->icount_start_insn, 1, num_insns);
+     }
+ 
++    if (tcg_ctx->exitreq_label) {
++        gen_set_label(tcg_ctx, tcg_ctx->exitreq_label);
++        tcg_ctx->exitreq_label = NULL;
++    }
+     tcg_gen_exit_tb(tcg_ctx, tb, TB_EXIT_REQUESTED);
+ }
+ 
+--- a/qemu/include/exec/cpu-defs.h
++++ b/qemu/include/exec/cpu-defs.h
+@@ -85,6 +85,18 @@
+ #define CPU_TLB_DYN_MIN_BITS 6
+ #define CPU_TLB_DYN_DEFAULT_BITS 8
+ 
++/*
++ * ITS-EMU: the TLB is direct mapped; with the plain page number as index,
++ * the first pages of flash (0x0800_0000), SRAM (0x2000_0000) and the
++ * peripherals share entries and evict each other on every alternating
++ * access (both then take the slow path). Folding higher address bits into
++ * the index separates them. Only for 64-bit x86 hosts, whose TCG backend
++ * computes the index the same way (tcg_out_tlb_load).
++ */
++#if defined(__x86_64__) || defined(_M_X64)
++#define TLB_INDEX_FOLD 14
++#endif
++
+ # if HOST_LONG_BITS == 32
+ /* Make sure we do not require a double-word shift for the TLB load */
+ #  define CPU_TLB_DYN_MAX_BITS (32 - TARGET_PAGE_BITS)
+--- a/qemu/include/exec/memory.h
++++ b/qemu/include/exec/memory.h
+@@ -425,6 +425,8 @@
+ 
+     /* Accessed via RCU.  */
+     struct FlatView *current_map;
++    /* ITS-EMU: incremented whenever current_map changes. */
++    unsigned generation;
+ 
+     QTAILQ_HEAD(, MemoryListener) listeners;
+     QTAILQ_ENTRY(AddressSpace) address_spaces_link;

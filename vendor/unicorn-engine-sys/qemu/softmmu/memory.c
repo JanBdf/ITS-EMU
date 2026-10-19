@@ -1041,6 +1041,7 @@ static void address_space_set_flatview(AddressSpace *as)
     }
 
     as->current_map = new_view;
+    as->generation++;
     if (old_view) {
         flatview_unref(old_view);
     }
@@ -1531,6 +1532,7 @@ void address_space_init(struct uc_struct *uc,
     as->uc = uc;
     as->root = root;
     as->current_map = NULL;
+    as->generation++;
     QTAILQ_INIT(&as->listeners);
     QTAILQ_INSERT_TAIL(&uc->address_spaces, as, address_spaces_link);
     address_space_update_topology(as);

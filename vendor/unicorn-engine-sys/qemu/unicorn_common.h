@@ -176,7 +176,19 @@ MemoryRegion *find_memory_mapping(struct uc_struct *uc, hwaddr address)
 {
     hwaddr xlat = 0;
     hwaddr len = 1;
+    // ITS-EMU: every slow-path access (MMIO) asks; mappings are aligned to
+    // the target page (at least 1 KiB), so the answer holds for the page.
+    uint64_t page = address >> 10;
+    unsigned generation = uc->address_space_memory.generation;
+    // flash, SRAM and peripherals are at multiples of large powers of two
+    __typeof__(uc->mapping_cache[0]) *c = &uc->mapping_cache[(page ^ (page >> 8) ^ (page >> 16)) & 255];
+    if (c->mr && c->page == page && c->generation == generation) {
+        return c->mr == &uc->io_mem_unassigned ? NULL : c->mr;
+    }
     MemoryRegion *mr = address_space_translate(&uc->address_space_memory, address, &xlat, &len, false, MEMTXATTRS_UNSPECIFIED);
+    c->page = page;
+    c->generation = generation;
+    c->mr = mr;
 
     if (mr == &uc->io_mem_unassigned) {
         return NULL;

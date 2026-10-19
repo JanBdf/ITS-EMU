@@ -425,6 +425,8 @@ struct AddressSpace {
 
     /* Accessed via RCU.  */
     struct FlatView *current_map;
+    /* ITS-EMU: incremented whenever current_map changes. */
+    unsigned generation;
 
     QTAILQ_HEAD(, MemoryListener) listeners;
     QTAILQ_ENTRY(AddressSpace) address_spaces_link;
