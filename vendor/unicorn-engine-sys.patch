@@ -1,3 +1,23 @@
+--- a/build.rs
++++ b/build.rs
+@@ -153,13 +153,10 @@
+ 
+ fn watch_source_files() {
+     let current_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+-    let project_root = std::path::Path::new(&current_dir)
+-        .parent()
+-        .unwrap()
+-        .parent()
+-        .unwrap()
+-        .parent()
+-        .unwrap();
++    // ITS-EMU: the sources are in the crate itself (the original goes three
++    // levels up, to the Unicorn repository; there the paths do not exist, so
++    // the build script ran on every build).
++    let project_root = std::path::Path::new(&current_dir);
+ 
+     println!(
+         "cargo:rerun-if-changed={}",
 --- a/include/uc_priv.h
 +++ b/include/uc_priv.h
 @@ -394,6 +394,13 @@
@@ -29,7 +49,50 @@
                  case UC_ERR_WRITE_PROT:
 --- a/qemu/accel/tcg/cputlb.c
 +++ b/qemu/accel/tcg/cputlb.c
-@@ -2240,6 +2240,9 @@
+@@ -1552,6 +1552,22 @@
+         tlb_addr &= ~TLB_INVALID_MASK;
+     }
+ 
++    /* ITS-EMU: an aligned read of a readable MMIO region without memory
++     * hooks goes straight to the device, which is where the code below ends
++     * up after looking up the region and scanning the (empty) hook lists. */
++    if ((tlb_addr & (TLB_MMIO | TLB_WATCHPOINT | TLB_BSWAP)) == TLB_MMIO &&
++        !code_read && !(addr & (size - 1)) &&
++        !HOOK_EXISTS(uc, UC_HOOK_MEM_READ) &&
++        !HOOK_EXISTS(uc, UC_HOOK_MEM_READ_AFTER)) {
++        CPUIOTLBEntry *iotlbentry = &env_tlb(env)->d[mmu_idx].iotlb[index];
++        MemoryRegionSection *section =
++            iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
++        if (section->mr->perms & UC_PROT_READ) {
++            return io_readx(env, iotlbentry, mmu_idx, addr, retaddr,
++                            access_type, op);
++        }
++    }
++
+     paddr = entry->paddr | (addr & ~TARGET_PAGE_MASK);
+     mr = uc->memory_mapping(uc, paddr);
+ 
+@@ -2190,6 +2206,19 @@
+         tlb_addr = tlb_addr_write(entry) & ~TLB_INVALID_MASK;
+     }
+ 
++    /* ITS-EMU: likewise for an aligned write to a writable MMIO region
++     * (see load_helper). */
++    if ((tlb_addr & (TLB_MMIO | TLB_WATCHPOINT | TLB_BSWAP)) == TLB_MMIO &&
++        !(addr & (size - 1)) && !HOOK_EXISTS(uc, UC_HOOK_MEM_WRITE)) {
++        CPUIOTLBEntry *iotlbentry = &env_tlb(env)->d[mmu_idx].iotlb[index];
++        MemoryRegionSection *section =
++            iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
++        if ((section->mr->perms & UC_PROT_WRITE) && !section->mr->ram) {
++            io_writex(env, iotlbentry, mmu_idx, val, addr, retaddr, op);
++            return;
++        }
++    }
++
+     // Load the latest memory mapping.
+     paddr = entry->paddr | (addr & ~TARGET_PAGE_MASK);
+     mr = uc->memory_mapping(uc, paddr);
+@@ -2240,6 +2269,9 @@
              uc->invalid_error = UC_ERR_WRITE_UNMAPPED;
              // printf("***** Invalid memory write at " TARGET_FMT_lx "\n", addr);
              cpu_exit(uc->cpu);
@@ -39,7 +102,7 @@
              return;
          } else {
              uc->invalid_error = UC_ERR_OK;
-@@ -2259,6 +2262,9 @@
+@@ -2259,6 +2291,9 @@
              if (mr == NULL) {
                  uc->invalid_error = UC_ERR_MAP;
                  cpu_exit(uc->cpu);
@@ -49,7 +112,7 @@
                  return;
              }
          }
-@@ -2305,6 +2311,9 @@
+@@ -2305,6 +2340,9 @@
              uc->invalid_error = UC_ERR_WRITE_PROT;
              // printf("***** Invalid memory write (ro) at " TARGET_FMT_lx "\n", addr);
              cpu_exit(uc->cpu);
@@ -59,7 +122,7 @@
              return;
          }
      }
-@@ -2315,6 +2324,9 @@
+@@ -2315,6 +2353,9 @@
              uc->invalid_addr = paddr;
              uc->invalid_error = UC_ERR_NOMEM;
              cpu_exit(uc->cpu);

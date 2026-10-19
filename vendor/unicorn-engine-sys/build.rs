@@ -153,13 +153,10 @@ fn build_with_cmake() {
 
 fn watch_source_files() {
     let current_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let project_root = std::path::Path::new(&current_dir)
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
+    // ITS-EMU: the sources are in the crate itself (the original goes three
+    // levels up, to the Unicorn repository; there the paths do not exist, so
+    // the build script ran on every build).
+    let project_root = std::path::Path::new(&current_dir);
 
     println!(
         "cargo:rerun-if-changed={}",
