@@ -1552,6 +1552,22 @@ load_helper(CPUArchState *env, target_ulong addr, TCGMemOpIdx oi,
         tlb_addr &= ~TLB_INVALID_MASK;
     }
 
+    /* ITS-EMU: an aligned read of a readable MMIO region without memory
+     * hooks goes straight to the device, which is where the code below ends
+     * up after looking up the region and scanning the (empty) hook lists. */
+    if ((tlb_addr & (TLB_MMIO | TLB_WATCHPOINT | TLB_BSWAP)) == TLB_MMIO &&
+        !code_read && !(addr & (size - 1)) &&
+        !HOOK_EXISTS(uc, UC_HOOK_MEM_READ) &&
+        !HOOK_EXISTS(uc, UC_HOOK_MEM_READ_AFTER)) {
+        CPUIOTLBEntry *iotlbentry = &env_tlb(env)->d[mmu_idx].iotlb[index];
+        MemoryRegionSection *section =
+            iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
+        if (section->mr->perms & UC_PROT_READ) {
+            return io_readx(env, iotlbentry, mmu_idx, addr, retaddr,
+                            access_type, op);
+        }
+    }
+
     paddr = entry->paddr | (addr & ~TARGET_PAGE_MASK);
     mr = uc->memory_mapping(uc, paddr);
 
@@ -2188,6 +2204,19 @@ store_helper(CPUArchState *env, target_ulong addr, uint64_t val,
             entry = tlb_entry(env, mmu_idx, addr);
         }
         tlb_addr = tlb_addr_write(entry) & ~TLB_INVALID_MASK;
+    }
+
+    /* ITS-EMU: likewise for an aligned write to a writable MMIO region
+     * (see load_helper). */
+    if ((tlb_addr & (TLB_MMIO | TLB_WATCHPOINT | TLB_BSWAP)) == TLB_MMIO &&
+        !(addr & (size - 1)) && !HOOK_EXISTS(uc, UC_HOOK_MEM_WRITE)) {
+        CPUIOTLBEntry *iotlbentry = &env_tlb(env)->d[mmu_idx].iotlb[index];
+        MemoryRegionSection *section =
+            iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
+        if ((section->mr->perms & UC_PROT_WRITE) && !section->mr->ram) {
+            io_writex(env, iotlbentry, mmu_idx, val, addr, retaddr, op);
+            return;
+        }
     }
 
     // Load the latest memory mapping.
