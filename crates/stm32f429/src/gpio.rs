@@ -236,8 +236,39 @@ impl PortState {
         (self.exti_rise | self.exti_fall != 0).then_some(self.exti_due)
     }
 
+    /// Levels of all pins (bit n: [`Self::level`] of pin n), computed for
+    /// all pins at once.
     pub fn idr(&self) -> u32 {
-        (0..16).filter(|&p| self.level(p)).fold(0, |acc, p| acc | (1 << p))
+        // one bit per pin from the 2-bit fields of MODER and PUPDR
+        let field = |reg: u32, v: u32| {
+            let x = !(reg ^ (v * 0x5555_5555));
+            // gather the even bits
+            let mut b = x & (x >> 1) & 0x5555_5555;
+            b = (b | (b >> 1)) & 0x3333_3333;
+            b = (b | (b >> 2)) & 0x0F0F_0F0F;
+            b = (b | (b >> 4)) & 0x00FF_00FF;
+            ((b | (b >> 8)) & 0xFFFF) as u16
+        };
+        let pull_up = field(self.pupdr, 1);
+        let pull_down = field(self.pupdr, 2);
+        let floating = !(pull_up | pull_down);
+        let pulled = pull_up | (floating & self.float_level);
+        let undriven = (self.ext_mask & self.ext_level) | (!self.ext_mask & pulled);
+        let open_drain = self.otyper as u16;
+        let odr = self.odr as u16;
+        let output = (odr & !open_drain) | (odr & open_drain & undriven);
+        let mut levels = (field(self.moder, 0) & undriven) | (field(self.moder, 1) & output);
+        let mut alternate = field(self.moder, 2);
+        while alternate != 0 {
+            let pin = alternate.trailing_zeros();
+            alternate &= alternate - 1;
+            let high = match self.af_drive[pin as usize][self.af(pin) as usize] {
+                Some(high) if !(open_drain & (1 << pin) != 0 && high) => high,
+                _ => undriven & (1 << pin) != 0,
+            };
+            levels |= u16::from(high) << pin;
+        }
+        u32::from(levels & self.bonded)
     }
 }
 
@@ -444,6 +475,37 @@ impl Peripheral for GpioPort {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idr_is_the_level_of_each_pin() {
+        // xorshift: deterministic pseudo-random port states
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..20_000 {
+            let mut p = PortState::reset_for((next() % 11) as usize);
+            p.moder = next() as u32;
+            p.pupdr = next() as u32;
+            p.otyper = next() as u32 & 0xFFFF;
+            p.odr = next() as u32 & 0xFFFF;
+            p.afr = [next() as u32, next() as u32];
+            p.ext_mask = next() as u16;
+            p.ext_level = next() as u16;
+            p.float_level = next() as u16;
+            for pin in 0..16 {
+                let r = next();
+                if r & 1 != 0 {
+                    p.af_drive[pin][p.af(pin as u32) as usize] = Some(r & 2 != 0);
+                }
+            }
+            let want = (0..16).filter(|&pin| p.level(pin)).fold(0, |acc, pin| acc | (1 << pin));
+            assert_eq!(p.idr(), want, "{p:?}");
+        }
+    }
     use crate::rcc::Clocks;
     use emu_core::Clock;
     use emu_core::nvic::Nvic;
