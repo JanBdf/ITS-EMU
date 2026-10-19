@@ -503,6 +503,20 @@ J3_X = 65.4
 
 
 
+# carrier parts under the Nucleo and the display (measured on the bare board)
+R_ARRAY_X = ([380.7, 391.3, 402.0, 412.6, 423.2, 433.9, 444.5, 454.8] +        # R23..R16
+             [496.7, 507.4, 518.0, 528.8, 539.3, 549.9, 560.3, 570.6] +        # R15..R8
+             [591.5, 602.2, 612.4, 622.6, 632.8, 643.3, 654.1, 664.5])         # R7..R0
+R24_X = [785.0, 795.7, 806.3, 816.6, 827.0, 837.7, 847.9, 858.5]               # R31..R24
+R41_X = [555.6 + i * 10.85 for i in range(7)]                                  # R47..R41
+R37_Y = 107.7
+# CN11 / CN12: 2 × 36 sockets the Nucleo's Morpho pins plug into; the Nucleo
+# uses columns 2..36
+MORPHO_SOCKET_X = [345.55 + i * 10.548 for i in range(36)]
+MORPHO_SOCKET_Y = [(75.98, 86.52), (328.0, 338.6)]
+# holes under the Nucleo
+HIDDEN_HOLES = [(419.0, 115.4), (419.0, 303.0), (735.1, 110.6), (729.9, 311.0)]
+
 SEC = 2.7             # width of the section frame lines
 
 # section frame lines (polylines)
@@ -513,10 +527,10 @@ SECTIONS = [
      (733.4, 481.2), (750.6, 481.2), (762, 469.6), (1008, 469.6)],
     [(634.5, 495.6), (634.5, 655)],
     [(330, 382.7), (344.4, 382.7), (344.4, 464.4)],
-    [(413, 464.4), (413, 358.8), (418, 353.8), (728, 353.8), (761, 386.6), (761, 469.6)],
+    [(413, 464.4), (413, 355.8), (418, 350.8), (731, 350.8), (761, 380.8), (761, 469.6)],
     [(895.1, 190.5), (895.1, 469.6)],          # above y = 300 never seen (under the display), assumed
-    [(870.0, -7), (870.0, 50.0), (840.0, 80.0)],
-    [(344.2, -7), (344.2, 45.0)],
+    [(869.0, -7), (869.0, 53.0), (851.0, 71.0), (738.0, 71.0)],      # Timer frame (bare board)
+    [(339.5, -7), (339.5, 69.7)],
 ]
 
 
@@ -624,6 +638,28 @@ def carrier_labels():
         out.append(L(t, x - 0.7, 22.8, 3.9, 'l', -45))
     # ---- around U5
     out.append(L('C7', 282.0, 144.3))
+    return out + hidden_labels()
+
+
+def hidden_labels():
+    """Labels under the Nucleo and the display (measured on the bare board)."""
+    out = [L('C8', 335.6, 81.2), L('C6', 335.6, 102.4), L('C5', 335.8, 123.0), L('CN11', 356.5, 101.5),
+           L('CN12', 357.0, 316.6), L('U4', 356.1, 153.2), L('C4', 340.6, 191.8), L('U3', 415.1, 170.0),
+           L('U2', 509.9, 170.0), L('U1', 603.7, 170.6), L('C3', 476.0, 202.0), L('C2', 570.4, 202.5),
+           L('C1', 664.0, 188.0), L('C12', 707.7, 134.8), L('C13', 691.2, 177.0), L('C11', 759.4, 131.5),
+           L('C10', 775.4, 177.3), L('VR1', 732.8, 193.8), L('R48', 815.0, 120.3), L('CN0', 832.4, 173.0)]
+    for n, y in zip((34, 35, 36), (155.5, 165.8, 176.0)):
+        out.append(L(f'R{n}', 313.0, y))
+    for n, x in zip((33, 32), (363.8, 397.7)):
+        out.append(L(f'R{n}', x, 207.6, rot=-90))
+    for n in range(37, 41):
+        out.append(L(f'R{n}', 615.0, R37_Y + (n - 37) * 10.6, anchor='l'))
+    for x, n in zip(R_ARRAY_X, list(range(23, -1, -1))):
+        out.append(L(f'R{n}', x, 248.0, anchor='l', rot=-90))
+    for x, n in zip(R24_X, range(31, 23, -1)):
+        out.append(L(f'R{n}', x, 245.5, anchor='l', rot=-90))
+    for x, n in zip(R41_X, range(47, 40, -1)):
+        out.append(L(f'R{n}', x, 377.0, anchor='l', rot=-90))
     return out
 
 
@@ -812,6 +848,92 @@ def carrier():
         out.append(smd_r(x, 9.9, 13.6, 6.0, '#262628'))
     out += [lit_led(925.9, 40.7), lit_led(957.2, 40.7)]
     out.append(rs232())
+    out.append(carrier_hidden())
+    return '\n'.join(out)
+
+
+def socket_2row(x0, ys, n, pitch=10.548):
+    """2-row female socket from above: (x0, ys) = centres of the first column."""
+    out = [rect(x0 - pitch / 2, ys[0] - pitch / 2, x0 - pitch / 2 + n * pitch, ys[1] + pitch / 2, HEADER, 0.6)]
+    cells = ''.join(f'M{f(x0 + i * pitch - 2.3)},{f(y - 2.3)}h4.6v4.6h-4.6Z' for i in range(n) for y in ys)
+    frames = ''.join(f'M{f(x0 + i * pitch - 3.4)},{f(y - 3.4)}h6.8v6.8h-6.8Z' for i in range(n) for y in ys)
+    out.append(path(frames, 'none', ' stroke="#38383b" stroke-width="0.7"'))
+    out.append(path(cells, '#050505'))
+    return '\n'.join(out)
+
+
+def tantalum(x, y, w, h):
+    """Tantalum capacitor standing vertically (polarity band at the top), (x, y) = centre."""
+    return '\n'.join([rect(x - w * 0.33, y - h / 2, x + w * 0.33, y + h / 2, TIN, 0.4),
+                      rect(x - w / 2, y - h / 2 + 2.2, x + w / 2, y + h / 2 - 2.2, '#e0a83a', 0.8),
+                      rect(x - w / 2, y - h / 2 + 2.2, x + w / 2, y - h / 2 + 5.2, '#c88d27', 0.8)])
+
+
+def soic(x0, y0, x1, y1, n, horizontal, pitch=5.27, lead=5.5, mark=None):
+    """SOIC: body box and `n` leads per side (on the long sides: top/bottom if
+    `horizontal`); `mark` = (x, y) of the pin 1 dimple."""
+    leads = []
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    for i in range(n):
+        o = (i - (n - 1) / 2) * pitch
+        if horizontal:
+            leads.append(f'M{f(cx + o - 1.0)},{f(y0 - lead)}h2v{f(y1 - y0 + 2 * lead)}h-2Z')
+        else:
+            leads.append(f'M{f(x0 - lead)},{f(cy + o - 1.0)}v2h{f(x1 - x0 + 2 * lead)}v-2Z')
+    out = [path(''.join(leads), '#c9c4b8'), rect(x0, y0, x1, y1, '#262627', 0.8)]
+    if mark:
+        out.append(circle(*mark, 1.6, '#1a1a1b', ' stroke="#3a3a3b" stroke-width="0.4"'))
+    return '\n'.join(out)
+
+
+def carrier_hidden():
+    """The parts the Nucleo and the display hide (seen in the see-through view)."""
+    out = []
+    for ys in MORPHO_SOCKET_Y:
+        out.append(socket_2row(MORPHO_SOCKET_X[0], ys, 36))
+        x0, x1 = MORPHO_SOCKET_X[0] - 6.3, MORPHO_SOCKET_X[-1] + 6.3
+        out.append(rect_stroke(x0, ys[0] - 6.3, x1, ys[1] + 6.3, SILK, 0.9))
+    for x, y in HIDDEN_HOLES:
+        out.append(mount_hole(x, y, 5.6))
+    # the three bus buffers (SN74LVC245A, SO-20, pin 1 at the top right), U4 (SO-8)
+    for x0, mark in [(412.2, (460.4, 192.2)), (508.0, (556.0, 192.0)), (602.3, (650.6, 192.8))]:
+        out.append(soic(x0, 186.0, x0 + 53.2, 216.0, 10, True, mark=mark))
+        for dy, t in [(-3.0, '78CYVDK'), (4.5, 'LVC245A')]:
+            out.append(ftext(x0 + 26.6, 201.0 + dy, t, 'LiberationSans-Regular.ttf', 3.6, 'c', '#6d6d6a', 180,
+                             mid=True))
+    out.append(soic(357.6, 160.0, 371.4, 180.2, 4, False, lead=4.6, mark=(368.6, 163.2)))
+    # resistors and capacitors (0603 with their pads)
+    for x in R_ARRAY_X + R24_X:
+        out.append(smd_r(x, 260.0 if x < 700 else 256.6, 6.0, 13.5, '#242425', vertical=True))
+    for x in R41_X:
+        out.append(smd_r(x, 384.8, 6.0, 13.5, '#242425', vertical=True))
+    for i in range(4):
+        out.append(smd_r(602.0, R37_Y + i * 10.6, 13.5, 6.0, '#242425'))
+    for y in (155.5, 165.8, 176.0):
+        out.append(smd_r(333.3, y, 14.0, 6.6, '#242425'))
+    for x, y in [(375.5, 207.7), (386.1, 207.7)]:
+        out.append(smd_r(x, y, 6.0, 13.5, '#242425', vertical=True))
+    for x, y in [(323.2, 80.9), (323.2, 102.3), (323.2, 123.5), (475.8, 216.9), (569.8, 217.3), (664.6, 203.0),
+                 (707.2, 149.8), (759.4, 147.4)]:
+        out.append(smd_r(x, y, 6.2, 14.0, '#c4a57a', vertical=True))
+    out.append(smd_r(359.8, 191.8, 14.0, 6.0, '#c4a57a'))                          # C4
+    out.append(smd_r(812.1, 136.0, 6.0, 13.0, '#242425', vertical=True))           # R48
+    # VR1 (LF33 in DPAK, tab at the bottom), C13 and C10 (tantalum, case C)
+    for x in (724.3, 743.6):
+        out.append(rect(x - 1.6, 140.5, x + 1.6, 153.5, TIN, 0.4))
+    out.append(rect(721.0, 177.0, 747.0, 186.5, TIN, 0.8))
+    out.append(rect(720.3, 153.2, 747.3, 179.0, '#262627', 0.8))
+    out.append(ftext(733.8, 166.0, 'LF33A', 'LiberationSans-Regular.ttf', 3.4, 'c', '#6d6d6a', 90, mid=True))
+    out.append(tantalum(693.2, 154.1, 13.6, 25.2))
+    out.append(tantalum(777.3, 154.6, 13.6, 26.2))
+    out += [line(683.0, 137.7, 701.0, 137.7, SILK, 0.9), line(767.5, 139.0, 787.0, 139.0, SILK, 0.9)]
+    # CN0 (micro USB, opening into the notch)
+    for i in range(5):
+        out.append(rect(824.5, 139.0 + i * 2.7, 830.0, 140.3 + i * 2.7, TIN, 0.2))
+    out.append(rect(828.0, 129.8, 853.5, 163.2, '#bdbab2', 1.2, ' stroke="#8f8c84" stroke-width="0.5"'))
+    out.append(rect(831.0, 133.0, 850.5, 160.0, '#cfccc4', 0.8))
+    for y in (128.5, 160.5):
+        out.append(rect(826.5, y - 1.8, 834.0, y + 3.0, TIN, 0.5))
     return '\n'.join(out)
 
 
@@ -1191,8 +1313,9 @@ def main():
     board = carrier()
     board_clip()
     layers = {
-        'carrier': ['<g clip-path="url(#board)">', board, '</g>', morpho_sockets()],
-        'nucleo': [f'<g transform="{layer(M_NUCLEO)}">', nucleo(), '</g>', nucleo_top_right(), nucleo_caps(),
+        'carrier': ['<g clip-path="url(#board)">', board, '</g>'],
+        # the grey sockets sit on the Nucleo's bent Morpho pins
+        'nucleo': [morpho_sockets(), f'<g transform="{layer(M_NUCLEO)}">', nucleo(), '</g>', nucleo_top_right(), nucleo_caps(),
                    morpho_pins()],
         'shield': [f'<g transform="{layer(M_SHIELD)}">', shield(), '</g>', poly(GLASS, '#08090a')],
     }
