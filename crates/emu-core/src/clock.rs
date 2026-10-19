@@ -23,14 +23,17 @@ impl Clock {
     }
 
     /// Executed CPU cycles since reset.
+    #[inline]
     pub fn cycles(&self) -> u64 {
         self.cycles
     }
 
+    #[inline]
     pub fn cpu_hz(&self) -> u32 {
         self.cpu_hz
     }
 
+    #[inline]
     pub fn advance(&mut self, cycles: u64) {
         self.cycles += cycles;
     }
