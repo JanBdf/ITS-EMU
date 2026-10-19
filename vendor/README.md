@@ -22,6 +22,12 @@ crates.io (GPL-2.0, see `unicorn-engine-sys/COPYING`), used through
 - Writing xPSR/IPSR rebuilds the cached TB flags, which include handler mode
   (the emulator enters and leaves exceptions by writing xPSR); QEMU then
   recognizes EXC_RETURN only in handler mode, as on the M4.
+- The guest TLB index folds in higher address bits (64-bit x86 hosts, C and
+  JIT): with the page number alone, the first pages of flash, SRAM and the
+  peripherals shared entries, so alternating accesses (literal pool, stack)
+  evicted each other and all took the slow path.
+- `find_memory_mapping`, asked on every slow-path access (all MMIO), caches
+  its answer per 1 KiB page until the memory map changes.
 - Only the Arm guest: the other targets' sources are removed (`uc.c` still
   includes their `unicorn.h`).
 

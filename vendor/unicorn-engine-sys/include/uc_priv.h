@@ -394,6 +394,13 @@ struct uc_struct {
     int thumb; // thumb mode for ARM
     MemoryRegion **mapped_blocks;
     uint32_t mapped_block_count;
+    // ITS-EMU: find_memory_mapping results per 1 KiB page, valid while
+    // address_space_memory.generation is unchanged.
+    struct {
+        uint64_t page;
+        unsigned generation;
+        MemoryRegion *mr;
+    } mapping_cache[256];
     uint32_t mapped_block_cache_index;
     void *qemu_thread_data; // to support cross compile to Windows
                             // (qemu-thread-win32.c)

@@ -1733,6 +1733,16 @@ static inline void tcg_out_tlb_load(TCGContext *s, TCGReg addrlo, TCGReg addrhi,
     }
 
     tcg_out_mov(s, tlbtype, r0, addrlo);
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(TLB_INDEX_FOLD)
+#error "TLB_INDEX_FOLD (exec/cpu-defs.h) must be visible: tlb_index() uses it"
+#endif
+#ifdef TLB_INDEX_FOLD
+    /* ITS-EMU: index of tlb_index(): addr ^ (addr >> TLB_INDEX_FOLD).
+       L1 is free until it gets the address below. */
+    tcg_out_mov(s, tlbtype, r1, addrlo);
+    tcg_out_shifti(s, SHIFT_SHR + tlbrexw, r1, TLB_INDEX_FOLD);
+    tgen_arithr(s, ARITH_XOR + tlbrexw, r0, r1);
+#endif
     tcg_out_shifti(s, SHIFT_SHR + tlbrexw, r0,
                    TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
 

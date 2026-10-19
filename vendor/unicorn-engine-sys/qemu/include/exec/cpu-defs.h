@@ -85,6 +85,18 @@ typedef uint64_t target_ulong;
 #define CPU_TLB_DYN_MIN_BITS 6
 #define CPU_TLB_DYN_DEFAULT_BITS 8
 
+/*
+ * ITS-EMU: the TLB is direct mapped; with the plain page number as index,
+ * the first pages of flash (0x0800_0000), SRAM (0x2000_0000) and the
+ * peripherals share entries and evict each other on every alternating
+ * access (both then take the slow path). Folding higher address bits into
+ * the index separates them. Only for 64-bit x86 hosts, whose TCG backend
+ * computes the index the same way (tcg_out_tlb_load).
+ */
+#if defined(__x86_64__) || defined(_M_X64)
+#define TLB_INDEX_FOLD 14
+#endif
+
 # if HOST_LONG_BITS == 32
 /* Make sure we do not require a double-word shift for the TLB load */
 #  define CPU_TLB_DYN_MAX_BITS (32 - TARGET_PAGE_BITS)

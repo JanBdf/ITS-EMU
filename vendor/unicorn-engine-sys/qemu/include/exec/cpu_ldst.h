@@ -103,6 +103,10 @@ static inline uintptr_t tlb_index(CPUArchState *env, uintptr_t mmu_idx,
 #endif
     uintptr_t size_mask = env_tlb(env)->f[mmu_idx].mask >> CPU_TLB_ENTRY_BITS;
 
+#ifdef TLB_INDEX_FOLD
+    /* ITS-EMU: see TLB_INDEX_FOLD */
+    addr ^= addr >> TLB_INDEX_FOLD;
+#endif
     return (addr >> TARGET_PAGE_BITS) & size_mask;
 }
 
