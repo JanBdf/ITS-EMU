@@ -58,7 +58,15 @@ cargo run --release -p its-emu -- path/to/Program.axf --seconds 10 \
 GUI: keys `0`–`7` press S0–S7, right click latches a button, clicking the
 display is a touch, clicking an AUX pad connects it to GND/3V3, the mouse
 wheel or a right click on a pad of the Analog header applies a voltage,
-firmware files can be dropped onto the window. On the command line,
+firmware files can be dropped onto the window. A right click on the display
+(or *Display*, Ctrl+D) shows it alone, as large as the window allows, with
+the LEDs, S0–S7 and the USER button in a row below; right click or Esc
+returns. *See-through* (Ctrl+T) makes the Nucleo and the display
+transparent (slider: opacity), to see the carrier board under them. When a
+new build replaces the firmware file, the GUI loads it again and restarts
+(not while a debugger is attached; switch off in the ☰ menu, which also
+saves the display as a PNG, Ctrl+S). Ctrl+O opens a file, Ctrl+R resets.
+On the command line,
 `--input 2:PC3=1.65` applies 1.65 V to PC3 (`open` disconnects it).
 `--device encoder@PC6,PC7` connects a rotary encoder (contacts to GND,
 pull-ups; the TIM8_1/TIM8_2 header pins suit TIM8's encoder mode) and
