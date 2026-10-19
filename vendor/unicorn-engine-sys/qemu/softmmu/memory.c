@@ -152,6 +152,36 @@ static void mmio_write_wrapper(struct uc_struct *uc, void *opaque, hwaddr addr, 
     }
 }
 
+/* ITS-EMU: an aligned access of at most 4 bytes to a Unicorn MMIO region is
+ * one call of its callback, with the value masked to the access size: what
+ * memory_region_dispatch_read/write end up doing (no size adjustment, no byte
+ * swap). False for other regions and accesses. */
+bool uc_its_mmio_read(struct uc_struct *uc, MemoryRegion *mr, hwaddr addr,
+                      MemOp op, uint64_t *val)
+{
+    unsigned size = memop_size(op);
+
+    if (mr->ops->read != mmio_read_wrapper || size > 4 || (op & MO_BSWAP) ||
+        (addr & (size - 1))) {
+        return false;
+    }
+    *val = mmio_read_wrapper(uc, mr->opaque, addr, size) & MAKE_64BIT_MASK(0, size * 8);
+    return true;
+}
+
+bool uc_its_mmio_write(struct uc_struct *uc, MemoryRegion *mr, hwaddr addr,
+                       uint64_t val, MemOp op)
+{
+    unsigned size = memop_size(op);
+
+    if (mr->ops->write != mmio_write_wrapper || size > 4 || (op & MO_BSWAP) ||
+        (addr & (size - 1))) {
+        return false;
+    }
+    mmio_write_wrapper(uc, mr->opaque, addr, val & MAKE_64BIT_MASK(0, size * 8), size);
+    return true;
+}
+
 static void mmio_region_destructor_uc(MemoryRegion *mr)
 {
     g_free(mr->opaque);

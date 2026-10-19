@@ -1061,6 +1061,9 @@ static uint64_t io_readx_section(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
         cpu_io_recompile(cpu, retaddr);
     }
 
+    if (uc_its_mmio_read(uc, mr, mr_offset, op, &val)) {
+        return val;
+    }
     r = memory_region_dispatch_read(uc, mr, mr_offset, &val, op, iotlbentry->attrs);
     if (r != MEMTX_OK) {
 #if 0
@@ -1105,6 +1108,9 @@ static void io_writex_section(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
     }
     cpu->mem_io_pc = retaddr;
 
+    if (uc_its_mmio_write(uc, mr, mr_offset, val, op)) {
+        return;
+    }
     r = memory_region_dispatch_write(uc, mr, mr_offset, val, op, iotlbentry->attrs);
     if (r != MEMTX_OK) {
 #if 0

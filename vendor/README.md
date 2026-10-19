@@ -32,7 +32,9 @@ crates.io (GPL-2.0, see `unicorn-engine-sys/COPYING`), used through
   its answer per 1 KiB page until the memory map changes.
 - Aligned MMIO reads and writes without memory hooks go straight to the
   device (`io_readx`/`io_writex`) instead of first looking up the region and
-  scanning the empty hook lists.
+  scanning the empty hook lists, and for Unicorn's MMIO regions straight to
+  the callback (`uc_its_mmio_read/write`) instead of through QEMU's memory
+  API layers.
 - The guest page size is a compile-time constant (1 KiB, as before;
   `TARGET_PAGE_BITS_FIXED` in `target/arm/cpu-param.h`), not loaded through
   a pointer chain in every TB lookup and TLB access. Setting another page

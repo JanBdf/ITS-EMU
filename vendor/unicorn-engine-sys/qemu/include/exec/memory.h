@@ -1195,6 +1195,12 @@ MemTxResult address_space_read(AddressSpace *as, hwaddr addr,
 
 #ifdef NEED_CPU_H
 /* enum device_endian to MemOp.  */
+/* ITS-EMU: see softmmu/memory.c */
+bool uc_its_mmio_read(struct uc_struct *uc, MemoryRegion *mr, hwaddr addr,
+                      MemOp op, uint64_t *val);
+bool uc_its_mmio_write(struct uc_struct *uc, MemoryRegion *mr, hwaddr addr,
+                       uint64_t val, MemOp op);
+
 static inline MemOp devend_memop(enum device_endian end)
 {
     QEMU_BUILD_BUG_ON(DEVICE_HOST_ENDIAN != DEVICE_LITTLE_ENDIAN &&
