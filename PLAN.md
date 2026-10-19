@@ -70,8 +70,12 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   Busy-wait delay loops (`for (i = 0; i < N; i++);`) are the common case
   that idle detection cannot skip (the counter changes): they run at about
   1.5-2x real time, one block hook per iteration. Skipping them would need
-  the loop's exit condition (e.g. recognising counter loops in
-  `timing::analyze_block` and computing the remaining iterations).
+  the loop's exit condition. A sketch on top of idle detection: if two
+  consecutive visits of the loop head differ only in one register or RAM word
+  by a constant step (everything else equal, clean period, constant period),
+  and the loop's conditional branch compares that value with a constant or an
+  unchanged register (decoded by `timing`), the number of iterations left
+  follows; skip all but the last, as idle skipping does, up to the slice end.
   `--no-idle-skip` benchmarks are sensitive to code layout (±10 % with
   identical instruction counts): compare `perf stat` instruction counts
 - Release builds for students (cargo-dist)
