@@ -513,6 +513,7 @@ R37_Y = 107.7
 # CN11 / CN12: 2 × 36 sockets the Nucleo's Morpho pins plug into; the Nucleo
 # uses columns 2..36
 MORPHO_SOCKET_X = [345.55 + i * 10.548 for i in range(36)]
+# rows: under the Nucleo's Morpho pins
 MORPHO_SOCKET_Y = [(75.98, 86.52), (328.0, 338.6)]
 # holes under the Nucleo
 HIDDEN_HOLES = [(419.0, 115.4), (419.0, 303.0), (735.1, 110.6), (729.9, 311.0)]
@@ -1097,11 +1098,224 @@ def st_logo(x0, y0, x1, y1):
     return f'<path transform="{tr}" d="{d}" fill="{N_BLUE}"/>'
 
 
+NUCLEO_HOLES = [(400.5, 101.5, 6.6), (401.5, 300.5, 6.6), (509.9, 241.9, 6.8), (735.8, 94.7, 6.3)]
+# snap-off slots between the Nucleo and its ST-LINK part (x range, y ranges)
+NUCLEO_SLOTS = ((746.6, 750.4), [(44.0, 118.5), (130.4, 216.6), (232.7, 269.0), (281.7, 360.0)])
+
+
+def nucleo_outline():
+    """The Nucleo's PCB with its mounting holes and the snap-off slots cut out."""
+    x0, y0, x1, y1, r = 279.8, 50.6, 856.0, 352.0, 3.5
+    d = (f'M{f(x0 + r)},{f(y0)}H{f(x1 - r)}A{r},{r} 0 0 1 {f(x1)},{f(y0 + r)}V{f(y1 - r)}'
+         f'A{r},{r} 0 0 1 {f(x1 - r)},{f(y1)}H{f(x0 + r)}A{r},{r} 0 0 1 {f(x0)},{f(y1 - r)}V{f(y0 + r)}'
+         f'A{r},{r} 0 0 1 {f(x0 + r)},{f(y0)}Z')
+    for x, y, rr in NUCLEO_HOLES:
+        d += f'M{f(x - rr)},{f(y)}a{f(rr)},{f(rr)} 0 1 0 {f(2 * rr)},0a{f(rr)},{f(rr)} 0 1 0 {f(-2 * rr)},0Z'
+    (sx0, sx1), segs = NUCLEO_SLOTS
+    w = (sx1 - sx0) / 2
+    for a, b in segs:                     # open at the board edge, round inside
+        top = f'M{f(sx0)},{f(y0)}H{f(sx1)}' if a <= y0 else f'M{f(sx0)},{f(a + w)}a{f(w)},{f(w)} 0 0 1 {f(2 * w)},0'
+        bottom = f'V{f(y1)}H{f(sx0)}' if b >= y1 else f'V{f(b - w)}a{f(w)},{f(w)} 0 0 1 {f(-2 * w)},0'
+        d += top + bottom + 'Z'
+    return d
+
+
+# ZIO sockets (2 rows, 2.54 mm pitch) as footprints: first column, rows, and
+# the columns of each socket in pitches from that first column (the Arduino
+# connectors are not on one grid)
+ZIO_X0 = 418.3
+ZIO_ROWS = [(94.75, 105.76), (292.25, 303.26)]
+ZIO = [(0, 0, 15, 'CN9'), (0, 16, 8, 'CN8'), (1, 0, 17, 'CN10'), (1, 17.61, 10, 'CN7')]
+
+
+def zio_sockets():
+    """The four ZIO female sockets (8.5 mm high) seen from straight above."""
+    out = []
+    p = 11.01
+    for row, c0, n, _ in ZIO:
+        ya, yb = ZIO_ROWS[row]
+        xa = ZIO_X0 + c0 * p
+        out.append(rect(xa - p / 2 - 0.4, ya - p / 2 - 0.4, xa + (n - 0.5) * p + 0.4, yb + p / 2 + 0.4, '#262628', 1.0))
+        frames = ''.join(f'M{f(xa + i * p - 3.7)},{f(y - 3.7)}h7.4v7.4h-7.4Z' for i in range(n) for y in (ya, yb))
+        holes = ''.join(f'M{f(xa + i * p - 2.1)},{f(y - 2.1)}h4.2v4.2h-4.2Z' for i in range(n) for y in (ya, yb))
+        out.append(path(frames, '#151516'))
+        out.append(path(holes, '#030303'))
+    return '\n'.join(out)
+
+
+def lqfp(cx, cy, body, n, pitch, lead, pin_w=1.0):
+    """LQFP: square body and `n` gull-wing leads per side."""
+    h = body / 2
+    d = ''
+    for i in range(n):
+        o = (i - (n - 1) / 2) * pitch - pin_w / 2
+        d += f'M{f(cx + o)},{f(cy - h - lead)}h{f(pin_w)}v{f(lead)}h{f(-pin_w)}Z'
+        d += f'M{f(cx + o)},{f(cy + h)}h{f(pin_w)}v{f(lead)}h{f(-pin_w)}Z'
+        d += f'M{f(cx - h - lead)},{f(cy + o)}v{f(pin_w)}h{f(lead)}v{f(-pin_w)}Z'
+        d += f'M{f(cx + h)},{f(cy + o)}v{f(pin_w)}h{f(lead)}v{f(-pin_w)}Z'
+    return '\n'.join([path(d, '#c7c1b3'), rect(cx - h, cy - h, cx + h, cy + h, '#2b2b2b', 1.2)])
+
+
+def sot(x, y, w, h, top, bottom, lead=2.6, color='#232325', vertical=False):
+    """Small outline transistor/regulator: body w × h centred at (x, y), `top`
+    and `bottom` = lists of lead offsets along the long side (leads across it)."""
+    out = []
+    for offs, sgn in ((top, -1), (bottom, 1)):
+        for o in offs:
+            if vertical:
+                x0 = x + sgn * h / 2 if sgn > 0 else x - h / 2 - lead
+                out.append(rect(x0, y + o - 0.8, x0 + lead, y + o + 0.8, '#c7c1b3', 0.3))
+            else:
+                y0 = y + h / 2 if sgn > 0 else y - h / 2 - lead
+                out.append(rect(x + o - 0.8, y0, x + o + 0.8, y0 + lead, '#c7c1b3', 0.3))
+    out.append(rect(x - (h if vertical else w) / 2, y - (w if vertical else h) / 2, x + (h if vertical else w) / 2,
+                    y + (w if vertical else h) / 2, color, 0.5))
+    return '\n'.join(out)
+
+
+def jumper_block(x0, y0, x1, y1):
+    """Black jumper cap / plastic header body seen from above."""
+    return '\n'.join([rect(x0, y0, x1, y1, '#1d1d1e', 1.2), rect(x0 + 1.5, y0 + 1.5, x1 - 1.5, y1 - 1.5, '#2b2b2c', 0.8)])
+
+
+def nucleo_hidden():
+    """Parts of the Nucleo under the display (measured on the bare Nucleo, 031702)."""
+    out = []
+    R, C, LED = '#2b2a28', '#c9b48e', '#efe9d6'
+    # STM32F429ZIT6 (LQFP-144) and its corner pads
+    out.append(lqfp(588.5, 202.3, 87.0, 36, 2.255, 6.6, 1.05))
+    out.append(circle(553.0, 167.0, 1.8, '#121212'))
+    for x, y in [(555.0, 235.0), (621.5, 167.7)]:
+        out.append(circle(x, y, 4.2, '#262626'))
+    for x, y in [(540.0, 152.0), (637.0, 152.0), (540.0, 253.0), (637.0, 253.0)]:
+        a = 45 if (x < 588) == (y < 202) else -45
+        out.append(f'<rect x="{f(x - 2.0)}" y="{f(y - 5.0)}" width="4" height="10" rx="0.6" fill="{TIN}" '
+                   f'transform="rotate({a} {f(x)} {f(y)})"/>')
+    out.append(nt(574.0, 202.0, 'ARM', 9.0, 90, '#3a3a3a', N_BOLD))
+    out.append(nt(596.0, 202.0, 'STM32F429ZIT6', 4.0, 90, '#3f3f3f'))
+    out.append(nt(603.0, 202.0, 'GH24P 93', 3.6, 90, '#3f3f3f'))
+    # small parts: (x, y, body colour, vertical)
+    parts = [(549.2, 141.1, C, 1), (563.2, 141.1, R, 1), (577.7, 141.1, C, 1), (599.9, 141.1, C, 1),
+             (553.0, 261.5, C, 1), (582.2, 261.5, C, 1), (603.7, 261.5, C, 1), (625.9, 261.5, C, 1),
+             (648.7, 160.1, C, 0), (649.3, 179.1, R, 0), (648.7, 195.0, C, 0), (647.9, 215.9, C, 0),
+             (502.3, 174.7, C, 0), (502.3, 185.5, C, 0), (525.1, 176.6, R, 0), (525.1, 183.6, R, 0),
+             (528.3, 229.8, C, 1), (482.0, 129.0, TIN, 1), (487.7, 129.0, TIN, 1), (487.7, 273.6, TIN, 1),
+             (498.5, 273.6, TIN, 1), (496.6, 208.3, TIN, 0), (496.6, 216.5, TIN, 0)]
+    for y in (209.6, 215.9, 222.9, 229.9, 236.2, 250.9, 257.9, 264.2, 274.7):
+        parts.append((671.7, y, R if y in (264.2, 274.7) else (C if y > 240 else TIN), 0))
+    for y in (215.9, 222.2, 228.5, 235.5):
+        parts.append((688.2, y, TIN if y < 223 else C, 0))
+    parts += [(720.4, 179.5, R, 0), (722.5, 192.8, R, 0), (722.5, 207.5, R, 0), (735.8, 278.2, R, 0),
+              # ST-LINK part
+              (763.8, 102.4, R, 1), (775.0, 102.4, R, 1), (786.2, 102.4, R, 1), (808.7, 101.7, R, 1),
+              (818.5, 101.7, R, 1), (789.7, 152.8, C, 1), (798.1, 152.8, C, 1), (775.7, 169.0, R, 0),
+              (775.7, 176.0, R, 0), (761.0, 192.0, C, 1), (761.7, 208.2, C, 1), (761.7, 220.0, R, 1),
+              (781.3, 232.7, C, 1), (787.6, 232.7, R, 1), (803.0, 232.7, C, 1), (817.0, 246.0, R, 0),
+              (817.0, 253.0, R, 0), (759.6, 253.0, C, 1), (766.6, 266.3, C, 0), (766.6, 272.6, C, 0),
+              (766.6, 279.0, R, 0), (783.4, 283.0, C, 0), (783.4, 290.0, C, 0), (780.6, 307.6, TIN, 1)]
+    for y in (169.6, 176.6, 183.0, 189.3, 195.5, 202.0, 208.5, 215.0):
+        parts.append((819.9, y, R if y not in (183.0, 195.5) else C, 0))
+    for y in (278.2, 285.2, 292.0, 307.0, 313.5, 320.0):
+        parts.append((808.0, y, R, 0))
+    for x, y, c, v in parts:
+        out.append(smd_r(x, y, 4.4, 9.2, c, vertical=True) if v else smd_r(x, y, 9.2, 4.4, c))
+    # crystals X2 (32 kHz) and X3 (8 MHz, pads only on this board), X1
+    out.append(rect(509.5, 172.5, 518.0, 188.5, '#cdbf9c', 1.0, ' stroke="#9d9070" stroke-width="0.5"'))
+    out += [rect(506.0, 205.8, 517.5, 211.5, TIN, 0.6), rect(506.0, 214.0, 517.5, 219.7, TIN, 0.6)]
+    out.append(rect(786.2, 162.6, 801.7, 174.5, '#2a2a2b', 1.0))
+    # U5 (LD1117S50, SOT-223) with C17 (tantalum), U2 (STM32F103CBT6, LQFP-48), U4 (ST890, SO-8)
+    for x in (700.8, 710.6, 720.4):
+        out.append(rect(x - 1.8, 134.6, x + 1.8, 145.5, TIN, 0.4))
+    out.append(rect(705.0, 157.0, 718.5, 171.0, TIN, 0.6))
+    out.append(rect(698.0, 145.0, 726.7, 158.4, '#262627', 0.6))
+    out.append(nt(712.3, 151.7, 'LD50 F022', 3.0, 180, '#6d6d6a'))
+    out.append(tantalum(705.3, 115.0, 13.3, 15.4).replace('</', '</'))
+    out.append(rect_stroke(696.5, 104.5, 714.5, 125.0, N_SILK, 0.45))
+    out.append(lqfp(793.0, 199.0, 30.5, 12, 2.255, 4.2, 0.9))
+    out.append(nt(793.0, 199.0, 'STM32F103CBT6', 2.6, 180, '#5a5a58'))
+    out.append(soic(756.5, 301.3, 777.0, 318.8, 4, True, pitch=5.5, lead=4.6))
+    out.append(nt(766.7, 310.0, 'ST890C 6K022', 2.6, 180, '#6d6d6a'))
+    out.append(rect(756.8, 284.5, 775.0, 293.0, '#e0a83a', 0.8))
+    out.append(rect(756.8, 284.5, 759.8, 293.0, '#c88d27', 0.5))
+    # small transistors, diodes, regulators
+    out.append(sot(822.7, 222.9, 7.0, 3.0, [], [], color='#1e1e1f'))                       # D2
+    for x in (770.0, 779.2, 788.3):                                                        # D5, D4, D3
+        out.append(sot(x, 253.0, 7.0, 4.6, [0], [0], 1.8, vertical=True))
+    out.append(rect_stroke(764.0, 245.0, 794.0, 261.0, N_SILK, 0.45))
+    out.append(sot(818.5, 265.0, 7.0, 5.0, [-2.2, 0, 2.2], [-2.2, 2.2], 2.0))              # U1
+    out.append(sot(820.6, 286.6, 7.0, 5.0, [0], [-2.2, 2.2], 2.0))                          # T1
+    out.append(sot(783.4, 270.5, 10.0, 7.0, [-3.0, 0, 3.0], [-3.0, 3.0], 2.4))              # U3
+    out.append(sot(833.2, 101.0, 4.4, 3.2, [0], [0], 1.5, color='#1e1e1f', vertical=True))   # D1
+    out.append(sot(688.2, 252.3, 9.0, 7.5, [-3.0, 0, 3.0], [-3.0, 3.0], 2.2))               # U6
+    out.append(sot(688.9, 269.5, 7.0, 4.6, [0], [-2.2, 2.2], 2.0))                          # U7
+    out.append(rect(706.0, 180.0, 716.0, 201.0, '#2c2c2d', 1.0))                            # D? (SMA)
+    # user LEDs LD1..LD3, LD6 (PWR), LD4 (COM)
+    for y in (180.2, 194.9, 207.9):
+        out.append(rect_stroke(731.0, y - 3.4, 744.2, y + 3.4, '#3a64c4', 0.7, 0.6))
+        out.append(rect(732.6, y - 2.2, 742.6, y + 2.2, LED, 0.5))
+    out.append(rect_stroke(731.5, 251.0, 742.5, 257.8, '#3a64c4', 0.7, 0.6))
+    out.append(rect(733.0, 252.2, 741.0, 256.6, LED, 0.5))
+    out.append(rect(824.0, 304.0, 843.7, 314.7, TIN, 0.6))
+    out.append(rect(829.0, 303.5, 843.0, 315.2, '#f2ecdc', 0.8))
+    # jumpers and headers: USB_EN, IDD, JP3 (power source), CN4, CN5, CN6 (SWD), JP1
+    for box in [(684.0, 154.0, 703.0, 179.0), (682.0, 186.0, 704.0, 212.0), (700.0, 246.0, 733.0, 263.0),
+                (805.0, 119.5, 845.0, 134.0), (763.0, 81.4, 828.0, 89.1), (760.5, 125.5, 776.0, 133.8),
+                (836.7, 190.0, 855.0, 209.6)]:
+        out.append(jumper_block(*box))
+    pins = ''
+    for i in range(6):                                                                     # SWD pins, bent
+        x = 768.2 + i * 11.01
+        pins += f'M{f(x - 1.0)},{f(88.0)}L{f(x + 6.0)},{f(80.5)}L{f(x + 7.6)},{f(81.8)}L{f(x + 0.8)},{f(89.0)}Z'
+    for i in range(2):                                                                     # CN5 RX/TX
+        x = 765.0 + i * 11.01
+        pins += f'M{f(x - 1.0)},{f(132.0)}L{f(x + 14.0)},{f(126.0)}L{f(x + 14.6)},{f(127.6)}L{f(x)},{f(133.4)}Z'
+    for y in (195.0, 205.0):                                                               # JP1
+        pins += f'M855,{f(y - 0.8)}h7v1.6h-7Z'
+    for x in (689.0, 698.0, 707.0, 716.0, 725.0):                                          # JP3 pins
+        pins += f'M{f(x)},{f(264.0)}l6,14l-1.5,0.6l-6,-14Z'
+    out.append(path(pins, '#d9b25c'))
+    # CN1 (ST-LINK USB, micro B)
+    out.append(rect(835.3, 246.0, 860.0, 279.6, '#bdbab2', 1.2, ' stroke="#8f8c84" stroke-width="0.5"'))
+    out.append(rect(838.0, 249.5, 857.0, 276.0, '#cfccc4', 0.8))
+    for i in range(5):
+        out.append(rect(830.0, 256.0 + i * 3.0, 836.0, 257.4 + i * 3.0, TIN, 0.2))
+    # silkscreen: frames of the parts and the labels
+    out += [rect_stroke(759.6, 79.0, 838.0, 91.0, N_SILK, 0.45), rect_stroke(804.0, 117.0, 847.0, 136.0, N_SILK, 0.45),
+            rect(806.0, 136.6, 820.6, 138.0, N_BLUE), rect(827.5, 136.6, 842.3, 138.0, N_BLUE),
+            rect_stroke(822.0, 301.5, 845.5, 317.0, N_SILK, 0.45), rect_stroke(753.0, 282.5, 777.5, 295.0, N_SILK, 0.45)]
+    labels = [(555.5, 142.0, 'C33'), (569.5, 142.0, 'R36'), (584.0, 142.0, 'C30'), (606.0, 142.0, 'C28'),
+              (624.5, 142.4, 'U8'), (559.5, 262.0, 'C32'), (588.5, 262.0, 'C31'), (610.0, 262.0, 'C29'),
+              (632.0, 262.0, 'C27'), (660.0, 160.0, 'C24'), (660.0, 179.0, 'R35'), (660.0, 195.0, 'C25'),
+              (659.0, 216.0, 'C26'), (514.0, 165.0, 'X2'), (508.5, 172.0, 'C35'), (508.5, 190.0, 'C36'),
+              (531.0, 172.0, 'R37'), (531.0, 190.0, 'R38'), (512.0, 225.0, 'X3'), (534.5, 230.0, 'C34'),
+              (715.0, 172.0, 'U5'), (720.0, 115.0, 'C17'), (747.5, 161.0, 'User LEDs'), (751.0, 180.2, 'LD3'),
+              (751.0, 194.9, 'LD2'), (751.0, 207.9, 'LD1'), (750.0, 254.4, 'LD6'), (737.0, 240.0, 'JP3'),
+              (770.0, 113.0, 'R23'), (781.0, 113.0, 'R22'), (792.0, 113.0, 'R19'), (815.0, 113.6, 'ST-LINK'),
+              (821.0, 147.9, 'NUCLEO'), (793.0, 75.1, 'SWD'), (754.7, 85.6, 'CN6'), (787.0, 128.0, 'CN5'),
+              (808.0, 156.0, 'X1'), (764.0, 160.0, 'C6'), (793.0, 230.0, 'U2'), (812.0, 263.0, 'U1'),
+              (829.0, 286.0, 'T1'), (789.0, 316.0, 'U4'), (850.0, 309.0, 'LD4'), (848.0, 262.0, 'CN1'),
+              (800.0, 253.0, 'D3'), (727.0, 223.0, 'SB2')]
+    for x, y, t in labels:
+        out.append(nt(x, y, t, 3.3, 180 if t in ('ST-LINK', 'NUCLEO', 'SWD') else 90))
+    for x0, x1, y, t in [(477.6, 510.6, 116.0, 'SAI_A'), (532.7, 577.0, 116.0, 'USART'), (621.5, 660.0, 116.0, 'SDMMC'),
+                         (489.0, 532.0, 284.0, 'QSPI'), (537.0, 566.0, 284.0, 'ADC_IN'), (616.0, 640.0, 284.0, 'SPI_B'),
+                         (646.0, 668.0, 284.0, 'I2S_B'), (674.0, 700.0, 284.0, 'I2S_A')]:
+        out.append(nt((x0 + x1) / 2, y, t, 3.6, 180))
+        top = y < 200
+        yy = y + (3.4 if top else -3.4)
+        out.append(polyline([(x0, yy + (-2 if top else 2)), (x0, yy), (x1, yy), (x1, yy + (-2 if top else 2))],
+                            N_SILK, 0.45))
+    for x, t in [(521.3, 'GND'), (603.0, 'IO')]:
+        out.append(nt(x, 120.0, t, 3.6, 90))
+    for x, t in [(577.0, 'GND'), (588.5, 'AGND'), (600.0, 'AVDD')]:
+        out.append(nt(x, 280.0, t, 3.4, 90))
+    return '\n'.join(out)
+
+
 def nucleo():
     out = []
     # PCB with the slot of the snap-off ST-LINK part at the bottom
-    out.append(rect(279.8, 50.6, 856.0, 352.0, NUCLEO, 3.5))
-    out.append(rect(746.2, 333.0, 748.6, 352.0, '#16181c'))
+    out.append(path(nucleo_outline(), NUCLEO, ' fill-rule="evenodd"'))
     out.append(rect(352.5, 88.6, 374.6, 167.3, '#fbfbf9'))          # white label field
     # Morpho pins and GND test points
     for x in MORPHO_X:
@@ -1115,11 +1329,7 @@ def nucleo():
     out.append(nt(323.6, 71.5, 'GND', 3.6))
     out.append(nt(323.6, 330.2, 'GND', 3.6))
     # ZIO sockets CN7 / CN10 (CN8 / CN9 are under the display)
-    for x, y in [(400.5, 101.5), (401.5, 300.5)]:          # mounting holes beside them
-        out.append(circle(x, y, 6.6, '#1b1b1d'))
-    out.append(on_nucleo(8.5, zio(404.6, 83.0, 474.5, 105.0, [410.3, 421.6, 432.9, 444.2, 455.5, 466.8], [88.5, 99.5])))
-    out.append(on_nucleo(8.5, zio(405.4, 286.3, 478.6, 311.9, [411.5, 422.9, 434.3, 445.6, 456.9, 468.2],
-                                  [291.2, 302.6])))
+    out.append(zio_sockets())
     out += [nt(419.6, 118.9, 'IO', 3.6, 180), nt(448.6, 119.6, 'SAI_B', 3.6, 180),
             polyline([(441.5, 115.8), (441.5, 121.5), (460.0, 121.5), (460.0, 115.8)], N_SILK, 0.45),
             nt(431.4, 281.0, 'TIMER', 3.6, 180), nt(455.2, 281.0, 'GND', 3.4),
@@ -1145,9 +1355,11 @@ def nucleo():
     n0, n1, depth = 230.0, 247.7, 18.0
     shell = (f'M257,203.2 H321 Q322.5,203.2 322.5,204.7 V273 Q322.5,274.5 321,274.5 H257 Q255.5,274.5 255.5,273 '
              f'V{n1} H{255.5 + depth} V{n0} H255.5 V204.7 Q255.5,203.2 257,203.2 Z')
-    out.append(on_nucleo(13.5, '\n'.join([rect(255.5, n0, 255.5 + depth, n1, '#3b3935'),
-                                           rect(255.5 + depth - 5.0, n0 + 1.0, 255.5 + depth, n1 - 1.0, '#8d8e8f'),
-                                           path(shell, '#c9c3b3', ' stroke="#a39c8a" stroke-width="0.5"'),
+    # the cut-out in the middle of the cable side shows what is below; at its
+    # end the latch window of the jack
+    out.append(on_nucleo(13.5, '\n'.join([path(shell, '#c9c3b3', ' stroke="#a39c8a" stroke-width="0.5"'),
+                                           rect(255.5 + depth - 0.2, n0 + 0.6, 255.5 + depth + 2.4, n1 - 0.6,
+                                                '#3d3b36'),
                                            line(258.0, 207.5, 320.0, 207.5, '#b3ac9a', 0.6),
                                            line(258.0, 270.2, 320.0, 270.2, '#b3ac9a', 0.6)])))
     # small parts
@@ -1227,19 +1439,33 @@ def nucleo():
     out.append(nt(381.5, 137.3, 'Nucleo', 5.8, 90, N_BLUE, N_BOLD))
     out.append(nucleo_logo(402.0, 137.0, 0.75))
     out.append(st_logo(364.3, 270.9, 391.1, 320.1))
+    out.append(nucleo_hidden())
     # ST-LINK corner (bottom right, beside the display)
-    out += [nt(726.0, 339.0, '12', 3.3), nt(756.0, 342.0, 'R28', 2.8), nt(763.5, 342.0, 'C11', 2.8),
-            nt(774.5, 342.5, 'LD5', 2.8), nt(784.5, 341.5, 'R21', 2.8), nt(816.0, 340.0, 'CN3', 3.0)]
-    for x in (754.5, 761.5, 781.5):
-        out.append(smd_r(x, 336.5, 3.6, 5.6, '#3a3631', vertical=True))
-    out.append(rect_stroke(769.0, 333.5, 776.0, 341.0, '#3a64c4', 0.6))
-    out.append(rect(770.2, 334.5, 774.8, 340.0, '#efe9d6', 0.4))
-    out.append(poly([(794.5, 326.0), (794.5, 350.5), (816.0, 338.2)], N_BLUE, ' stroke-linejoin="round"'))
-    out.append(path('M798,334 C801,332 805,333 806,336 L808,341 C806,344 801,345 799,343 Z', NUCLEO))  # hand
-    out.append(line(797.5, 330.5, 811.0, 344.0, NUCLEO, 1.6, cap='butt'))
-    out.append(rect_stroke(822.0, 333.0, 844.0, 346.0, N_SILK, 0.5))
-    for x in (827.6, 839.5):
-        out.append(circle(x, 337.5, 2.6, '#d6c8a6'))
+    out += [nt(726.0, 339.0, '12', 3.3), nt(756.0, 346.0, 'R28', 3.0), nt(763.0, 346.0, 'C11', 3.0),
+            nt(774.0, 346.0, 'LD5', 3.0), nt(785.5, 345.0, 'R21', 3.0), nt(817.5, 339.0, 'CN3', 3.3)]
+    for x, c in ((756.3, '#2b2a28'), (762.8, '#c9b48e'), (780.8, '#2b2a28')):
+        out.append(smd_r(x, 335.5, 4.4, 10.0, c, vertical=True))
+    # LD5 (white 0603 LED in a thin frame)
+    out.append(rect_stroke(770.5, 326.5, 777.0, 341.0, '#3a64c4', 0.45))
+    out.append(rect(771.6, 329.0, 775.9, 339.2, TIN, 0.4))
+    out.append(rect(771.9, 330.6, 775.6, 337.6, '#f1ecdf', 0.4))
+    out.append(rect(773.0, 333.2, 774.5, 335.0, '#d8b45a', 0.2))
+    # ESD caution symbol (triangle with a struck-through hand), mostly under the display
+    esd = [[(785.7, 322.6), (787.5, 321.6), (798.5, 327.6), (798.3, 329.0), (794.0, 330.0), (790.5, 329.3),
+            (789.5, 330.6), (794.0, 332.6), (795.2, 334.6), (794.0, 335.2), (789.0, 333.6), (788.0, 334.6),
+            (792.3, 338.0), (792.5, 340.2), (786.5, 349.8), (785.7, 349.0)],
+           [(793.3, 340.6), (794.2, 340.2), (798.6, 345.0), (798.3, 346.2), (788.6, 351.5), (787.6, 350.9)],
+           [(800.6, 328.6), (801.6, 328.6), (812.3, 336.0), (812.0, 337.6), (803.6, 342.3), (802.6, 341.8),
+            (800.4, 330.0)]]
+    for pts in esd:
+        out.append(poly(pts, N_BLUE, f' stroke="{N_BLUE}" stroke-width="0.6" stroke-linejoin="round"'))
+    # CN3 (2 pins, bent over) with its frame and pin 1 mark
+    out.append(rect_stroke(823.0, 334.0, 845.5, 344.0, N_SILK, 0.45))
+    for x in (828.5, 839.0):
+        out.append(circle(x, 339.6, 3.0, TIN))
+        out.append(circle(x, 339.6, 1.5, '#9f9a8e'))
+    out.append(path('M829.2,341 L835,345.5 L833.8,346.6 L828,342.2 Z M839.7,341 L846,345.5 L844.8,346.6 L838.8,342.2 Z',
+                    '#b9b4a8'))
     return '\n'.join(out)
 
 
