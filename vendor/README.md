@@ -18,7 +18,9 @@ crates.io (GPL-2.0, see `unicorn-engine-sys/COPYING`), used through
   M-class CPU a Cortex-M33, whose Security Extension sends every function
   return (BX LR, POP {PC}) out of the JIT to the main loop to check for
   FNC_RETURN/EXC_RETURN, and whose v8-M stack limit checks run on every SP
-  change.
+  change. This is also a behaviour change: instructions and registers that
+  only ARMv8-M has (MSPLIM/PSPLIM, TT, SG, ...) are undefined now, as on the
+  STM32F429.
 - Writing xPSR/IPSR rebuilds the cached TB flags, which include handler mode
   (the emulator enters and leaves exceptions by writing xPSR); QEMU then
   recognizes EXC_RETURN only in handler mode, as on the M4.
