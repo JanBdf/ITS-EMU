@@ -178,7 +178,7 @@ pub struct System {
     /// End address of the previous block, if it ended without a branch, and
     /// its last instruction's result for the next block (see
     /// `continuation_saving` and `continuation_stall`).
-    fell_through: Option<(u64, BlockTiming)>,
+    fell_through: Option<(u64, Option<u8>, Option<u8>)>,
     /// Division instructions found in new blocks, waiting for their timing hook.
     new_divs: Vec<DivSite>,
     /// Address and size of the executing block (`None` while stepping) and
@@ -423,13 +423,21 @@ impl BlockCache {
         ((addr as u32 >> 1) & ((1 << Self::BITS) - 1)) as usize
     }
 
-    fn get(&self, addr: u64, size: u32) -> Option<BlockTiming> {
-        let (a, s, info) = self.entries[Self::slot(addr)];
-        (a == addr as u32 && u32::from(s) == size).then_some(info)
+    /// Slot of the block's entry, if cached.
+    fn find(&self, addr: u64, size: u32) -> Option<usize> {
+        let slot = Self::slot(addr);
+        let (a, s, _) = &self.entries[slot];
+        (*a == addr as u32 && u32::from(*s) == size).then_some(slot)
     }
 
-    fn insert(&mut self, addr: u64, size: u32, info: BlockTiming) {
-        self.entries[Self::slot(addr)] = (addr as u32, size as u16, info);
+    fn at(&self, slot: usize) -> &BlockTiming {
+        &self.entries[slot].2
+    }
+
+    fn insert(&mut self, addr: u64, size: u32, info: BlockTiming) -> usize {
+        let slot = Self::slot(addr);
+        self.entries[slot] = (addr as u32, size as u16, info);
+        slot
     }
 
     fn clear(&mut self) {
@@ -593,7 +601,7 @@ impl IdleDetector {
     /// Called at the start of every block. Returns `Some(t)` if the core
     /// repeats the same loop iteration until cycle `t` (at most the end of the
     /// slice; whole iterations, so `t` is the start of one).
-    fn on_block(uc: &mut Unicorn<System>, addr: u64, info: BlockTiming) -> Option<u64> {
+    fn on_block(uc: &mut Unicorn<System>, addr: u64, stores: bool, side_effects: bool) -> Option<u64> {
         enum Action {
             Nothing,
             Snapshot { with_ram: bool },
@@ -675,10 +683,10 @@ impl IdleDetector {
         };
         // The current block belongs to the next period.
         let d = &mut uc.get_data_mut().idle;
-        if info.side_effects {
+        if side_effects {
             d.clean = false;
         }
-        if info.stores {
+        if stores {
             d.stored = true;
         }
         idle
@@ -902,52 +910,58 @@ impl Machine {
         // This is the only place that calls `emu_stop`: at a block boundary no
         // instruction is half-done, so execution can resume at the current PC.
         uc.add_block_hook(1, 0, |uc, addr, size| {
-            if uc.get_data().stepping {
+            let sys = uc.get_data_mut();
+            if sys.stepping {
                 // `step` accounts for its single instruction. (With a branch the
                 // hook also fires for the next block before the step ends.)
-                uc.get_data_mut().block = None;
+                sys.block = None;
                 return;
             }
             // Taken branch at the end of the previous block: pipeline refill
             // (for unconditional branches included in the block's cycles).
-            let entered_by_branch = match uc.get_data_mut().branch_from.take() {
+            let entered_by_branch = match sys.branch_from.take() {
                 Some((_, false)) => true,
                 Some((fallthrough, true)) if fallthrough != addr => {
-                    uc.get_data_mut().clock.advance(1);
+                    sys.clock.advance(1);
                     true
                 }
                 _ => false,
             };
-            if uc.get_data().clock.cycles() >= uc.get_data().slice_end && !uc.get_data_mut().continue_after_events() {
+            if sys.clock.cycles() >= sys.slice_end && !sys.continue_after_events() {
                 let _ = uc.emu_stop();
                 return;
             }
-            let info = match uc.get_data().block_insns.get(addr, size) {
-                Some(info) => info,
-                None => {
-                    let mut code = vec![0u8; size as usize];
-                    let mut divs = Vec::new();
-                    let info = if uc.mem_read(addr, &mut code).is_ok() {
-                        timing::analyze_block(&code, addr as u32, &mut divs)
-                    } else {
-                        BlockTiming { insns: 1, cycles: 1, stores: true, side_effects: true, ..BlockTiming::default() }
-                    };
-                    let sys = uc.get_data_mut();
-                    sys.block_insns.insert(addr, size, info);
-                    divs.retain(|d| !sys.hooked_divs.contains(&d.addr));
-                    if !divs.is_empty() {
-                        // Their timing hooks are installed between runs; the
-                        // block is translated again with them.
-                        sys.new_divs.extend(divs);
-                        sys.request_stop();
-                        let _ = uc.emu_stop();
-                        return;
-                    }
-                    info
-                }
+            let slot = match sys.block_insns.find(addr, size) {
+                Some(slot) => slot,
+                None => match Self::analyze_new_block(uc, addr, size) {
+                    Some(slot) => slot,
+                    None => return,
+                },
             };
-            let idle_until = if uc.get_data().idle_skipping { IdleDetector::on_block(uc, addr, info) } else { None };
-            if let Some(until) = idle_until {
+            let sys = uc.get_data_mut();
+            // Read in place: copying the whole entry costs a store-forwarding stall.
+            let info = sys.block_insns.at(slot);
+            let refill = if entered_by_branch { info.entry_penalty } else { 0 };
+            let (saving, stall, continues) = match sys.fell_through {
+                Some((prev_end, last_load_rt, last_fp_dst)) if prev_end == addr => {
+                    (info.continuation_saving(last_load_rt), info.continuation_stall(last_fp_dst), true)
+                }
+                _ => (0, 0, false),
+            };
+            let cycles = u64::from(info.cycles + refill + stall - saving);
+            let (stores, side_effects) = (info.stores, info.side_effects);
+            let end = addr + u64::from(size);
+            let next_branch_from = if info.ends_with_branch {
+                Some((end, true))
+            } else if info.ends_with_jump {
+                Some((end, false))
+            } else {
+                None
+            };
+            let next_fell_through = next_branch_from.is_none().then_some((end, info.last_load_rt, info.last_fp_dst));
+            if sys.idle_skipping
+                && let Some(until) = IdleDetector::on_block(uc, addr, stores, side_effects)
+            {
                 let sys = uc.get_data_mut();
                 let now = sys.clock.cycles();
                 if until >= sys.slice_end {
@@ -968,30 +982,14 @@ impl Machine {
                 }
             }
             let sys = uc.get_data_mut();
-            let refill = if entered_by_branch { info.entry_penalty } else { 0 };
-            let (saving, stall, continues) = match sys.fell_through.take() {
-                Some((end, prev)) if end == addr => {
-                    (info.continuation_saving(prev.last_load_rt), info.continuation_stall(prev.last_fp_dst), true)
-                }
-                _ => (0, 0, false),
-            };
-            let cycles = u64::from(info.cycles + refill + stall - saving);
             sys.clock.advance(cycles);
             sys.block = Some((addr, size));
             sys.cyccnt_reads = 0;
             // Peripheral accesses see the time of their block; a block that
             // continues a split one counts as part of it.
             sys.mmio_shift = if continues { sys.mmio_shift + cycles } else { 0 };
-            if !info.ends_with_branch && !info.ends_with_jump {
-                sys.fell_through = Some((addr + u64::from(size), info));
-            }
-            sys.branch_from = if info.ends_with_branch {
-                Some((addr + u64::from(size), true))
-            } else if info.ends_with_jump {
-                Some((addr + u64::from(size), false))
-            } else {
-                None
-            };
+            sys.fell_through = next_fell_through;
+            sys.branch_from = next_branch_from;
         })?;
 
         uc.add_intr_hook(Self::on_cpu_exception)?;
@@ -1059,6 +1057,30 @@ impl Machine {
     }
 
     /// Changes whenever flash is written, e.g. when a debugger loads a program.
+    /// Analyzes a block seen for the first time and caches its timing.
+    /// Returns `None` if the run has to stop to install timing hooks for
+    /// its division instructions (the block is translated again with them).
+    #[cold]
+    fn analyze_new_block(uc: &mut Unicorn<System>, addr: u64, size: u32) -> Option<usize> {
+        let mut code = vec![0u8; size as usize];
+        let mut divs = Vec::new();
+        let info = if uc.mem_read(addr, &mut code).is_ok() {
+            timing::analyze_block(&code, addr as u32, &mut divs)
+        } else {
+            BlockTiming { insns: 1, cycles: 1, stores: true, side_effects: true, ..BlockTiming::default() }
+        };
+        let sys = uc.get_data_mut();
+        let slot = sys.block_insns.insert(addr, size, info);
+        divs.retain(|d| !sys.hooked_divs.contains(&d.addr));
+        if !divs.is_empty() {
+            sys.new_divs.extend(divs);
+            sys.request_stop();
+            let _ = uc.emu_stop();
+            return None;
+        }
+        Some(slot)
+    }
+
     pub fn flash_writes(&self) -> u64 {
         self.flash_writes
     }
