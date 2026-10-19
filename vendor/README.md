@@ -33,6 +33,10 @@ crates.io (GPL-2.0, see `unicorn-engine-sys/COPYING`), used through
 - Aligned MMIO reads and writes without memory hooks go straight to the
   device (`io_readx`/`io_writex`) instead of first looking up the region and
   scanning the empty hook lists.
+- The guest page size is a compile-time constant (1 KiB, as before;
+  `TARGET_PAGE_BITS_FIXED` in `target/arm/cpu-param.h`), not loaded through
+  a pointer chain in every TB lookup and TLB access. Setting another page
+  size with `UC_CTL_UC_PAGE_SIZE` aborts.
 - `cpu_get_tb_cpu_state` is inline (`target/arm/cpu.h`): every lookup of the
   next translation block after an indirect branch (function returns) calls it.
 - Only the Arm guest: the other targets' sources are removed (`uc.c` still

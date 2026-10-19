@@ -132,6 +132,35 @@
              return;
          }
          /* refill tlb after CoW */
+--- a/qemu/exec-vary.c
++++ b/qemu/exec-vary.c
+@@ -74,6 +74,13 @@
+     }
+     uc->init_target_page->mask = ((target_ulong)-1) << uc->init_target_page->bits;
+     uc->init_target_page->decided = true;
++#ifdef TARGET_PAGE_BITS_FIXED
++    if (uc->init_target_page->bits != TARGET_PAGE_BITS_FIXED) {
++        fprintf(stderr, "unicorn: page size fixed at %d bits in this build\n",
++                TARGET_PAGE_BITS_FIXED);
++        abort();
++    }
++#endif
+ 
+     /*
+      * For the benefit of an -flto build, prevent the compiler from
+--- a/qemu/include/exec/cpu-all.h
++++ b/qemu/include/exec/cpu-all.h
+@@ -230,6 +230,10 @@
+ #ifdef CONFIG_DEBUG_TCG
+ #define TARGET_PAGE_BITS   ({ assert(target_page.decided); target_page.bits; })
+ #define TARGET_PAGE_MASK   ({ assert(target_page.decided); target_page.mask; })
++#elif defined(TARGET_PAGE_BITS_FIXED)
++/* ITS-EMU: see cpu-param.h; finalize_target_page_bits checks it */
++#define TARGET_PAGE_BITS   TARGET_PAGE_BITS_FIXED
++#define TARGET_PAGE_MASK   ((target_long)((target_ulong)-1 << TARGET_PAGE_BITS_FIXED))
+ #else
+ #define TARGET_PAGE_BITS   uc->init_target_page->bits
+ #define TARGET_PAGE_MASK   uc->init_target_page->mask
 --- a/qemu/include/exec/cpu-defs.h
 +++ b/qemu/include/exec/cpu-defs.h
 @@ -85,6 +85,18 @@
@@ -358,6 +387,21 @@
 +}
 +
  #endif
+--- a/qemu/target/arm/cpu-param.h
++++ b/qemu/target/arm/cpu-param.h
+@@ -24,6 +24,12 @@
+  */
+ # define TARGET_PAGE_BITS_VARY
+ # define TARGET_PAGE_BITS_MIN  10
++/*
++ * ITS-EMU: the page size is never changed (UC_CTL_UC_PAGE_SIZE is not used):
++ * a constant saves loading it through uc->init_target_page in every TB
++ * lookup, TLB index and page mask.
++ */
++# define TARGET_PAGE_BITS_FIXED 10
+ 
+ #define NB_MMU_MODES 12
+ 
 --- a/qemu/target/arm/helper.c
 +++ b/qemu/target/arm/helper.c
 @@ -11804,87 +11804,8 @@

@@ -24,6 +24,12 @@
  */
 # define TARGET_PAGE_BITS_VARY
 # define TARGET_PAGE_BITS_MIN  10
+/*
+ * ITS-EMU: the page size is never changed (UC_CTL_UC_PAGE_SIZE is not used):
+ * a constant saves loading it through uc->init_target_page in every TB
+ * lookup, TLB index and page mask.
+ */
+# define TARGET_PAGE_BITS_FIXED 10
 
 #define NB_MMU_MODES 12
 
