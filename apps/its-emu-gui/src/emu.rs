@@ -117,6 +117,8 @@ pub struct Snapshot {
     pub usb: UsbStatus,
     /// Output voltage of DAC1 while it is enabled.
     pub dac1: Option<f32>,
+    /// Mode and level of the pins of ports A–G.
+    pub pins: crate::pins::PinsView,
 }
 
 impl Default for Snapshot {
@@ -140,6 +142,7 @@ impl Default for Snapshot {
             gdb_attached: false,
             usb: UsbStatus::Off,
             dac1: None,
+            pins: Default::default(),
         }
     }
 }
@@ -822,6 +825,7 @@ impl Worker {
             snap.nucleo_leds = b.nucleo_leds();
             snap.backlight = b.backlight();
             snap.core_mhz = b.mcu().clocks.get().hclk / 1_000_000;
+            snap.pins = crate::pins::view(&b.mcu().gpio.borrow().ports);
             let out = b.mcu().usart3.borrow_mut().take_output();
             snap.serial.extend(out);
         }

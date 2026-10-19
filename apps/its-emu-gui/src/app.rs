@@ -53,6 +53,8 @@ pub struct App {
     ideal_colors: bool,
     /// Window title last set.
     title: String,
+    /// The pin inspector is open.
+    show_pins: bool,
 }
 
 const SEE_THROUGH_DEFAULT: f32 = 0.25;
@@ -107,6 +109,11 @@ fn save_png(path: &std::path::Path, img: &egui::ColorImage) -> anyhow::Result<()
     let bytes: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_array()).collect();
     enc.write_header()?.write_image_data(&bytes)?;
     Ok(())
+}
+
+/// `ITS_EMU_GUI_VIEW` names this view.
+fn start_view(name: &str) -> bool {
+    std::env::var("ITS_EMU_GUI_VIEW").is_ok_and(|v| v.split(',').any(|v| v.trim() == name))
 }
 
 /// Details of the ST-LINK state for tooltips.
@@ -169,14 +176,14 @@ impl App {
             self_screenshot: SelfScreenshot::from_env(),
             usb_on,
             settings,
-            // ITS_EMU_GUI_VIEW=lcd or see-through: start in that view (documentation, visual checks)
-            lcd_focus: std::env::var("ITS_EMU_GUI_VIEW").is_ok_and(|v| v == "lcd"),
-            see_through: std::env::var("ITS_EMU_GUI_VIEW")
-                .is_ok_and(|v| v == "see-through")
-                .then_some(SEE_THROUGH_DEFAULT),
+            // ITS_EMU_GUI_VIEW=lcd, see-through, pins (comma separated): start
+            // in that view (documentation, visual checks)
+            lcd_focus: start_view("lcd"),
+            see_through: start_view("see-through").then_some(SEE_THROUGH_DEFAULT),
             display_options: egui::TextureOptions::LINEAR,
             ideal_colors,
             title: String::new(),
+            show_pins: start_view("pins"),
         };
         if let Some(path) = firmware {
             app.load(path);
@@ -249,6 +256,7 @@ impl eframe::App for App {
                 snap.dac1,
             )
         };
+        let pins = if self.show_pins { Some(self.emu.snapshot.lock().unwrap().pins) } else { None };
 
         // shown alone and enlarged, the display's pixels stay sharp
         let options = if self.lcd_focus {
@@ -278,6 +286,9 @@ impl eframe::App for App {
         }
         if shortcut(Key::D) {
             self.lcd_focus = !self.lcd_focus;
+        }
+        if shortcut(Key::P) {
+            self.show_pins = !self.show_pins;
         }
         if shortcut(Key::T) {
             self.see_through = self.see_through.is_none().then_some(SEE_THROUGH_DEFAULT);
@@ -340,6 +351,8 @@ impl eframe::App for App {
                     ui.add(egui::Slider::new(opacity, 0.0..=1.0).show_value(false))
                         .on_hover_text("Opacity of the Nucleo and the display");
                 }
+                ui.toggle_value(&mut self.show_pins, "🔌 Pins")
+                    .on_hover_text("Mode and level of every pin of ports A–G · Ctrl+P");
                 ui.separator();
                 ui.menu_button("☰", |ui| {
                     let mut auto = self.settings.auto_reload;
@@ -494,6 +507,11 @@ impl eframe::App for App {
                 }
             });
         });
+
+        // ---- pin inspector
+        if let Some(pins) = &pins {
+            egui::Panel::right("pins").resizable(false).show(ui, |ui| crate::pins::show(ui, pins));
+        }
 
         // ---- the board
         let typing = ctx.memory(|m| m.focused().is_some());
