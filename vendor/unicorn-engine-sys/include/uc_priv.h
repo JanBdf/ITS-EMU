@@ -396,7 +396,7 @@ struct uc_struct {
     uint32_t mapped_block_count;
     // ITS-EMU: find_memory_mapping results per 1 KiB page, valid while
     // address_space_memory.generation is unchanged.
-    struct {
+    struct uc_mapping_cache_entry {
         uint64_t page;
         unsigned generation;
         MemoryRegion *mr;
