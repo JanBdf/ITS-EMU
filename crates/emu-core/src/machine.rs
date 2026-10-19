@@ -714,7 +714,10 @@ impl IdleDetector {
                         None
                     } else {
                         // The next period starts here; its reads are noted afresh.
-                        uc.get_data_mut().idle.restamp(now);
+                        let d = &mut uc.get_data_mut().idle;
+                        d.restamp(now);
+                        // The loop waits: after the next event, look again soon.
+                        d.backoff = 0;
                         Some(now + (until - now) / period * period)
                     }
                 }
