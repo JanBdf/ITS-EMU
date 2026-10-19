@@ -231,9 +231,11 @@ extern TargetPageBits target_page;
 #define TARGET_PAGE_BITS   ({ assert(target_page.decided); target_page.bits; })
 #define TARGET_PAGE_MASK   ({ assert(target_page.decided); target_page.mask; })
 #elif defined(TARGET_PAGE_BITS_FIXED)
-/* ITS-EMU: see cpu-param.h; finalize_target_page_bits checks it */
-#define TARGET_PAGE_BITS   TARGET_PAGE_BITS_FIXED
-#define TARGET_PAGE_MASK   ((target_long)((target_ulong)-1 << TARGET_PAGE_BITS_FIXED))
+/* ITS-EMU: see cpu-param.h; finalize_target_page_bits checks it. `uc` is in
+ * scope wherever the variable-size macros below are used: mention it so that
+ * those locals do not become unused. */
+#define TARGET_PAGE_BITS   ((void)uc, TARGET_PAGE_BITS_FIXED)
+#define TARGET_PAGE_MASK   ((void)uc, (target_long)((target_ulong)-1 << TARGET_PAGE_BITS_FIXED))
 #else
 #define TARGET_PAGE_BITS   uc->init_target_page->bits
 #define TARGET_PAGE_MASK   uc->init_target_page->mask
