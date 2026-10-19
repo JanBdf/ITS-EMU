@@ -615,7 +615,41 @@ impl IdleDetector {
     /// Called at the start of every block. Returns `Some(t)` if the core
     /// repeats the same loop iteration until cycle `t` (at most the end of the
     /// slice; whole iterations, so `t` is the start of one).
+    #[inline]
     fn on_block(uc: &mut Unicorn<System>, addr: u64, stores: bool, side_effects: bool) -> Option<u64> {
+        let d = &mut uc.get_data_mut().idle;
+        let prev = std::mem::replace(&mut d.prev_block, addr);
+        if addr == d.head {
+            return Self::at_head(uc, stores, side_effects);
+        }
+        d.blocks_since_head += 1;
+        // A backward branch starts a new candidate unless we are still
+        // inside the body of the current one.
+        if addr <= prev && d.blocks_since_head > 64 {
+            d.head = addr;
+            d.blocks_since_head = 0;
+            d.restart();
+            d.skip = 0;
+            d.backoff = 0;
+        }
+        d.note_block(stores, side_effects);
+        None
+    }
+
+    /// The current block belongs to the next period.
+    #[inline]
+    fn note_block(&mut self, stores: bool, side_effects: bool) {
+        if side_effects {
+            self.clean = false;
+        }
+        if stores {
+            self.stored = true;
+        }
+    }
+
+    /// [`Self::on_block`] at the head of the loop.
+    #[inline(never)]
+    fn at_head(uc: &mut Unicorn<System>, stores: bool, side_effects: bool) -> Option<u64> {
         enum Action {
             Nothing,
             Snapshot { with_ram: bool },
@@ -623,34 +657,19 @@ impl IdleDetector {
         }
         let action = {
             let d = &mut uc.get_data_mut().idle;
-            let prev = std::mem::replace(&mut d.prev_block, addr);
-            if addr != d.head {
-                d.blocks_since_head += 1;
-                // A backward branch starts a new candidate unless we are still
-                // inside the body of the current one.
-                if addr <= prev && d.blocks_since_head > 64 {
-                    d.head = addr;
-                    d.blocks_since_head = 0;
-                    d.restart();
-                    d.skip = 0;
-                    d.backoff = 0;
-                }
+            d.blocks_since_head = 0;
+            if !d.clean {
+                // Outside influence: start over, but only snapshot after a
+                // clean period so that busy loops pay nothing.
+                d.restart();
+                Action::Nothing
+            } else if d.snapshot.is_none() {
+                Action::Snapshot { with_ram: false }
+            } else if d.skip > 0 {
+                d.skip -= 1;
                 Action::Nothing
             } else {
-                d.blocks_since_head = 0;
-                if !d.clean {
-                    // Outside influence: start over, but only snapshot after a
-                    // clean period so that busy loops pay nothing.
-                    d.restart();
-                    Action::Nothing
-                } else if d.snapshot.is_none() {
-                    Action::Snapshot { with_ram: false }
-                } else if d.skip > 0 {
-                    d.skip -= 1;
-                    Action::Nothing
-                } else {
-                    Action::Compare
-                }
+                Action::Compare
             }
         };
         let idle = match action {
@@ -695,14 +714,7 @@ impl IdleDetector {
                 }
             }
         };
-        // The current block belongs to the next period.
-        let d = &mut uc.get_data_mut().idle;
-        if side_effects {
-            d.clean = false;
-        }
-        if stores {
-            d.stored = true;
-        }
+        uc.get_data_mut().idle.note_block(stores, side_effects);
         idle
     }
 }
