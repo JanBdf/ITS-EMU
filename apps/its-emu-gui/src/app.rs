@@ -51,6 +51,8 @@ pub struct App {
     display_options: egui::TextureOptions,
     /// The display shows the frame buffer's colours instead of the real panel's look.
     ideal_colors: bool,
+    /// Window title last set.
+    title: String,
 }
 
 const SEE_THROUGH_DEFAULT: f32 = 0.25;
@@ -148,10 +150,7 @@ impl App {
         if !settings.auto_reload {
             emu.send(Command::SetAutoReload(false));
         }
-        if let Some(path) = firmware {
-            emu.send(Command::Load(path));
-        }
-        Self {
+        let mut app = Self {
             emu,
             display: None,
             display_frame: vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * 4],
@@ -177,7 +176,19 @@ impl App {
                 .then_some(SEE_THROUGH_DEFAULT),
             display_options: egui::TextureOptions::LINEAR,
             ideal_colors,
+            title: String::new(),
+        };
+        if let Some(path) = firmware {
+            app.load(path);
         }
+        app
+    }
+
+    /// Loads a firmware file and remembers it among the recent ones.
+    fn load(&mut self, path: PathBuf) {
+        self.settings.add_recent(&path);
+        self.settings.save();
+        self.emu.send(Command::Load(path));
     }
 
     /// Saves the display as it is shown (480 × 320 pixels) to a PNG file the user picks.
@@ -191,11 +202,13 @@ impl App {
         }
     }
 
-    fn open_dialog(&self) {
-        let file =
-            rfd::FileDialog::new().add_filter("Firmware", &["axf", "elf"]).add_filter("All files", &["*"]).pick_file();
-        if let Some(path) = file {
-            self.emu.send(Command::Load(path));
+    fn open_dialog(&mut self) {
+        let mut dialog = rfd::FileDialog::new().add_filter("Firmware", &["axf", "elf"]).add_filter("All files", &["*"]);
+        if let Some(dir) = self.settings.recent.first().and_then(|p| p.parent()) {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(path) = dialog.pick_file() {
+            self.load(path);
         }
     }
 }
@@ -355,6 +368,23 @@ impl eframe::App for App {
                         self.emu.send(Command::IdealColors(self.ideal_colors));
                     }
                     ui.separator();
+                    let mut open = None;
+                    ui.add_enabled_ui(!self.settings.recent.is_empty(), |ui| {
+                        ui.menu_button("Open recent", |ui| {
+                            for path in &self.settings.recent {
+                                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                                let dir = path.parent().and_then(|d| d.file_name()).unwrap_or_default();
+                                let label = format!("{name}  ({})", dir.to_string_lossy());
+                                if ui.button(label).on_hover_text(path.display().to_string()).clicked() {
+                                    open = Some(path.clone());
+                                    ui.close();
+                                }
+                            }
+                        });
+                    });
+                    if let Some(path) = open {
+                        self.load(path);
+                    }
                     if ui.button("📷 Save display as PNG…  Ctrl+S").clicked() {
                         ui.close();
                         self.save_display_dialog();
@@ -542,7 +572,16 @@ impl eframe::App for App {
             i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
         });
         if let Some(path) = dropped.into_iter().next() {
-            self.emu.send(Command::Load(path));
+            self.load(path);
+        }
+
+        let title = match &firmware {
+            Some(name) => format!("{name} — ITS-Board Emulator"),
+            None => "ITS-Board Emulator".to_owned(),
+        };
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
         }
     }
 }
