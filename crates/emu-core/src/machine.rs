@@ -511,6 +511,11 @@ struct IdleDetector {
     /// Earliest cycle at which a peripheral read since the snapshot may
     /// return a different value (see `Peripheral::read_stable_until`).
     stable_until: u64,
+    /// Loop heads given up on (the loop kept making progress, e.g. an inner
+    /// loop over tasks): not taken as candidates again until a loop is found
+    /// idle, so that an enclosing loop can be observed instead.
+    unpromising: [u64; 4],
+    unpromising_next: usize,
     /// Visits of `head` to skip before comparing again (back-off).
     skip: u32,
     backoff: u32,
@@ -681,14 +686,22 @@ impl IdleDetector {
         // A backward branch starts a new candidate unless we are still
         // inside the body of the current one.
         if addr <= prev && d.blocks_since_head > 64 {
-            d.head = addr;
-            d.blocks_since_head = 0;
-            d.restart();
-            d.skip = 0;
-            d.backoff = 0;
+            d.new_candidate(addr);
         }
         d.note_block(stores, side_effects);
         None
+    }
+
+    #[cold]
+    fn new_candidate(&mut self, addr: u64) {
+        if self.unpromising.contains(&addr) {
+            return;
+        }
+        self.head = addr;
+        self.blocks_since_head = 0;
+        self.restart();
+        self.skip = 0;
+        self.backoff = 0;
     }
 
     /// The current block belongs to the next period.
@@ -751,6 +764,13 @@ impl IdleDetector {
                     let d = &mut uc.get_data_mut().idle;
                     d.backoff = (d.backoff * 2).clamp(1, 4096);
                     d.skip = d.backoff;
+                    if d.backoff >= 64 {
+                        // Look for an enclosing loop at the next backward branch.
+                        d.unpromising[d.unpromising_next] = d.head;
+                        d.unpromising_next = (d.unpromising_next + 1) % d.unpromising.len();
+                        d.head = u64::MAX;
+                        d.blocks_since_head = 65;
+                    }
                     None
                 } else {
                     // Skip whole iterations whose reads all happen before
@@ -767,6 +787,7 @@ impl IdleDetector {
                         d.restamp(now);
                         // The loop waits: after the next event, look again soon.
                         d.backoff = 0;
+                        d.unpromising = [u64::MAX; 4];
                         Some(now + (until - now) / period * period)
                     }
                 }
