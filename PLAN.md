@@ -54,6 +54,17 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   peripheral accesses see the end of their translated block, and interrupts
   pended by a write are taken only at the end of the block (`irqlat` without
   masking: the emulator is late by the rest of the block)
+- Interrupts pended by a peripheral write mid-block (STIR, SWIER): taken
+  at the end of the block, 35 cycles late in `irqlat` (26 vs 61). Taking
+  them right after the store needs `emu_stop` from the MMIO callback, but
+  Unicorn then restores the PC to the store itself (`cpu_loop_exit_restore`
+  in `helper_check_exit_request`), so the store runs twice; skipping it by
+  hand breaks for writeback stores, STM and IT blocks (no exit check there)
 - Speed: most time goes to Unicorn's per-block hook and MMIO callbacks
-  (measured; the models themselves are cheap)
+  (measured with gdb stack sampling; perf is not available in the sandbox).
+  A hook that only advances the clock runs PrimzahlSieb 4× faster, so the
+  hook body itself is worth a closer look (careful: changing timing changes
+  what the programs execute, compare with `--no-idle-skip` fingerprints).
+  Unicorn also calls a helper after every load/store (`check_exit_request`)
+- Packages use the `dist` profile (fat LTO): 15 MB GUI / 3.4 MB CLI
 - Release builds for students (cargo-dist)
