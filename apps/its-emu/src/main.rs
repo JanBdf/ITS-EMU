@@ -494,9 +494,10 @@ fn report_progress(machine: &Machine, image: &ElfImage, start: Instant, what: &s
     let wall = start.elapsed().as_secs_f64();
     let cycles = clock.cycles();
     println!(
-        "{what}\n  pc {}  virtual time {:.6} s  cycles {cycles}  wall {wall:.3} s  ({:.1} MIPS)",
+        "{what}\n  pc {}  virtual time {:.6} s  cycles {cycles}  wall {wall:.3} s  ({:.1} MIPS, {:.1} % idle skipped)",
         describe(image, machine.pc()),
         clock.time_ns() as f64 / 1e9,
         cycles as f64 / wall / 1e6,
+        machine.system().idle_skipped_cycles() as f64 * 100.0 / cycles.max(1) as f64,
     );
 }
