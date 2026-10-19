@@ -419,12 +419,22 @@ impl CoreAccess for UcCore<'_, '_> {
     }
 
     fn read_u32(&mut self, addr: u32) -> Result<u32, AccessError> {
+        // RAM and flash directly (exception stacking, vector fetch): Unicorn's
+        // memory API translates every access through its address space.
+        if let Some(v) = self.0.get_data().ram.read(addr, 4) {
+            return Ok(v);
+        }
         let mut b = [0u8; 4];
         self.0.mem_read(u64::from(addr), &mut b).map_err(|_| AccessError::Bus(addr))?;
         Ok(u32::from_le_bytes(b))
     }
 
     fn write_u32(&mut self, addr: u32, v: u32) -> Result<(), AccessError> {
+        // Through Unicorn into RAM that code runs from: it drops translations.
+        let sys = self.0.get_data_mut();
+        if sys.ram_region(addr).is_some_and(|i| !sys.ram_exec[i]) && sys.ram.write(addr, 4, v) {
+            return Ok(());
+        }
         self.0.mem_write(u64::from(addr), &v.to_le_bytes()).map_err(|_| AccessError::Bus(addr))
     }
 }

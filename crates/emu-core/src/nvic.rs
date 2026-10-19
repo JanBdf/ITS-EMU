@@ -39,11 +39,18 @@ impl Bits {
             *w &= !(1 << (n % 32));
         }
     }
+    /// The set bits in ascending order.
     fn iter(&self) -> impl Iterator<Item = u32> + '_ {
-        self.0
-            .iter()
-            .enumerate()
-            .flat_map(|(i, &w)| (0..32).filter(move |b| w & (1 << b) != 0).map(move |b| i as u32 * 32 + b))
+        self.0.iter().enumerate().flat_map(|(i, &w)| {
+            let mut rest = w;
+            std::iter::from_fn(move || {
+                (rest != 0).then(|| {
+                    let b = rest.trailing_zeros();
+                    rest &= rest - 1;
+                    i as u32 * 32 + b
+                })
+            })
+        })
     }
     fn any(&self) -> bool {
         self.0.iter().any(|&w| w != 0)
