@@ -28,13 +28,13 @@ build() {
   # own target directory: makepkg's CFLAGS/RUSTFLAGS differ from those of
   # normal builds and would rebuild Unicorn every time
   CARGO_TARGET_DIR="$ITS_EMU_ROOT/target/pkg-cargo" \
-    cargo build --release --locked -p its-emu -p its-emu-gui
+    cargo build --profile dist --locked -p its-emu -p its-emu-gui
   tools/vscode-nodebug/package.sh >/dev/null
 }
 
 package() {
   cd "$ITS_EMU_ROOT"
-  local bin="$ITS_EMU_ROOT/target/pkg-cargo/release"
+  local bin="$ITS_EMU_ROOT/target/pkg-cargo/dist"
   install -Dm755 "$bin/its-emu" "$bin/its-emu-gui" -t "$pkgdir/usr/bin/"
   install -Dm644 packaging/arch/its-emu-gui.desktop -t "$pkgdir/usr/share/applications/"
   install -Dm644 packaging/arch/its-emu-gui.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
