@@ -153,6 +153,10 @@ pub struct System {
     slice_end: u64,
     /// Unicorn is stopped once the cycle counter reaches this value.
     slice_limit: u64,
+    /// Next peripheral event as of the last `next_slice_end`, made earlier by
+    /// events that accesses scheduled since (a cancelled event may still be
+    /// in it: it is only used to tell the idle detector, conservatively).
+    bus_event: Option<u64>,
     /// Instruction count per translated block (direct-mapped cache).
     block_insns: BlockCache,
     /// Last invalid memory access reported by Unicorn (address, is_write, is_fetch).
@@ -204,13 +208,20 @@ impl System {
 
     /// Brings SysTick and the peripherals up to the current cycle.
     fn sync_devices(&mut self) {
+        self.bus_event = self.bus.next_event();
+        self.sync_devices_in_slice();
+    }
+
+    /// `sync_devices` within a slice, where `bus_event` is up to date (saves
+    /// looking at every peripheral twice per event).
+    fn sync_devices_in_slice(&mut self) {
         let now = self.clock.cycles();
         if self.scs.systick.update(now) {
             self.nvic.set_pending(nvic::SYSTICK);
         }
         // A peripheral event changes state that polling loops may read: the
         // idle detector must not rely on observations made before it.
-        if self.bus.next_event().is_some_and(|t| t <= now) {
+        if self.bus_event.is_some_and(|t| t <= now) {
             self.idle.dirty();
         }
         let (mut ctx, bus) = self.ctx();
@@ -271,9 +282,10 @@ impl System {
     }
 
     /// Next cycle at which the block hook has to look at devices.
-    fn next_slice_end(&self) -> u64 {
+    fn next_slice_end(&mut self) -> u64 {
         let now = self.clock.cycles();
-        let next_event = [self.scs.systick.next_event(), self.bus.next_event()].into_iter().flatten().min();
+        self.bus_event = self.bus.next_event();
+        let next_event = [self.scs.systick.next_event(), self.bus_event].into_iter().flatten().min();
         next_event.map_or(self.slice_limit, |ev| self.slice_limit.min(ev.max(now + 1)))
     }
 
@@ -284,7 +296,7 @@ impl System {
         if self.clock.cycles() >= self.slice_limit {
             return false;
         }
-        self.sync_devices();
+        self.sync_devices_in_slice();
         if self.nvic.any_pending() || self.reset_requested.is_some() {
             return false;
         }
@@ -296,10 +308,11 @@ impl System {
     /// (e.g. the end of an SPI frame started by a DR write), so that time is
     /// not fast-forwarded past it.
     fn clip_slice_to_events(&mut self) {
-        if let Some(ev) = self.bus.take_access_event()
-            && ev < self.slice_end
-        {
-            self.slice_end = ev;
+        if let Some(ev) = self.bus.take_access_event() {
+            self.bus_event = Some(self.bus_event.map_or(ev, |t| t.min(ev)));
+            if ev < self.slice_end {
+                self.slice_end = ev;
+            }
         }
     }
 
@@ -748,6 +761,7 @@ impl Machine {
             config: config.clone(),
             slice_end: 0,
             slice_limit: 0,
+            bus_event: None,
             branch_from: None,
             fell_through: None,
             new_divs: Vec::new(),
