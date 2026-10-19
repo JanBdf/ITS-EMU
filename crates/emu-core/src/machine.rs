@@ -414,6 +414,8 @@ impl CoreAccess for UcCore<'_, '_> {
             other => uc_reg(other),
         };
         let _ = self.0.reg_write(id, u64::from(v));
+        // also the registers that idle detection does not compare
+        self.0.get_data_mut().idle.dirty();
     }
 
     fn read_u32(&mut self, addr: u32) -> Result<u32, AccessError> {
@@ -505,7 +507,11 @@ struct Snapshot {
     ram: Option<Vec<u8>>,
 }
 
-const IDLE_REGS: [RegisterARM; 21] = [
+/// The registers compared by idle detection. The others (PRIMASK, BASEPRI,
+/// FAULTMASK, CONTROL, FPSCR, the FP registers) only change through
+/// instructions with side effects, exceptions or register writes from
+/// outside, which all end the observation period.
+const IDLE_REGS: [RegisterARM; 16] = [
     RegisterARM::R0,
     RegisterARM::R1,
     RegisterARM::R2,
@@ -522,11 +528,6 @@ const IDLE_REGS: [RegisterARM; 21] = [
     RegisterARM::SP,
     RegisterARM::LR,
     RegisterARM::XPSR,
-    RegisterARM::FPSCR,
-    RegisterARM::PRIMASK,
-    RegisterARM::BASEPRI,
-    RegisterARM::FAULTMASK,
-    RegisterARM::CONTROL,
 ];
 
 impl IdleDetector {
