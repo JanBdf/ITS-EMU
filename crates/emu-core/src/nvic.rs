@@ -162,6 +162,7 @@ impl Nvic {
     /// asserted line pends it again.
     /// Sets the request of source `src` (0..8) of a shared interrupt line; the
     /// line is high while any of its sources requests.
+    #[inline]
     pub fn set_irq_source(&mut self, irq: u32, src: u8, high: bool) {
         let Some(s) = self.sources.get_mut(irq as usize) else { return };
         if high {
@@ -173,6 +174,7 @@ impl Nvic {
         self.set_irq_level(irq, level);
     }
 
+    #[inline]
     pub fn set_irq_level(&mut self, irq: u32, high: bool) {
         if irq >= NUM_IRQS {
             return;

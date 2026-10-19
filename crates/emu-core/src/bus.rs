@@ -104,11 +104,13 @@ pub struct DeviceCtx<'a> {
 }
 
 impl DeviceCtx<'_> {
+    #[inline]
     pub fn now(&self) -> u64 {
         self.clock.cycles()
     }
 
     /// Drives the level of external interrupt line `irq`.
+    #[inline]
     pub fn set_irq(&mut self, irq: u32, high: bool) {
         self.nvic.set_irq_level(irq, high);
     }
@@ -119,6 +121,7 @@ impl DeviceCtx<'_> {
     }
 
     /// Drives source `src` of an interrupt line that several peripherals share.
+    #[inline]
     pub fn set_irq_source(&mut self, irq: u32, src: u8, high: bool) {
         self.nvic.set_irq_source(irq, src, high);
     }
@@ -392,6 +395,7 @@ fn split(addr: u32, size: u32) -> impl Iterator<Item = (u32, u32, u32)> {
 
 /// Helper for peripherals with plain 32-bit registers: merges a narrow write
 /// into the existing register value.
+#[inline]
 pub fn merge_write(old: u32, offset: u32, size: u32, value: u32) -> u32 {
     let shift = (offset & 3) * 8;
     let mask = match size {
@@ -403,6 +407,7 @@ pub fn merge_write(old: u32, offset: u32, size: u32, value: u32) -> u32 {
 }
 
 /// Extracts a narrow read from a 32-bit register value.
+#[inline]
 pub fn extract_read(reg: u32, offset: u32, size: u32) -> u32 {
     let shift = (offset & 3) * 8;
     match size {
