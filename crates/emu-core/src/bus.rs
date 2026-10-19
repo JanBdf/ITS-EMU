@@ -143,6 +143,13 @@ pub trait Peripheral {
         None
     }
 
+    /// Writes to the register at `offset` change nothing (registers of a
+    /// stub that ignores them). Lets idle polling loops that write such a
+    /// register be fast-forwarded. Conservative default: false.
+    fn write_is_inert(&self, _offset: u32) -> bool {
+        false
+    }
+
     fn reset(&mut self) {}
 
     /// Reset of the MCU; peripherals that keep state across some resets (reset
@@ -275,6 +282,20 @@ impl Bus {
                 m.dev.read_stable_until(off, clock)
             }
             None => u64::MAX,
+        }
+    }
+
+    /// See [`Peripheral::write_is_inert`]; writes to unmapped addresses are ignored.
+    pub fn write_is_inert(&mut self, addr: u32) -> bool {
+        if bitband_target(addr).is_some() {
+            return false;
+        }
+        match self.find(addr) {
+            Some(m) => {
+                let off = addr - m.base;
+                m.dev.write_is_inert(off)
+            }
+            None => true,
         }
     }
 

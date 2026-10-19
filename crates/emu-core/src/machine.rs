@@ -828,8 +828,10 @@ impl Machine {
             }),
             Some(move |uc: &mut Unicorn<System>, off: u64, size: usize, value: u64| {
                 let sys = uc.get_data_mut();
-                sys.idle.dirty();
                 let addr = sys.config.memory.periph_base + off as u32;
+                if !sys.bus.write_is_inert(addr) {
+                    sys.idle.dirty();
+                }
                 let ws = sys.bus.wait_states(addr, true, sys.clock.cycles() - sys.mmio_shift);
                 sys.clock.advance(ws);
                 let (mut ctx, bus) = sys.ctx();

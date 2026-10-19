@@ -129,6 +129,9 @@ impl emu_core::Peripheral for EthStub {
     fn read_stable_until(&self, _offset: u32, _clock: &emu_core::Clock) -> u64 {
         u64::MAX
     }
+    fn write_is_inert(&self, _offset: u32) -> bool {
+        true
+    }
     fn read(&mut self, _: &mut emu_core::DeviceCtx, _: u32, _: u32) -> u32 {
         0
     }
