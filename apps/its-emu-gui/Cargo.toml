@@ -13,7 +13,18 @@ anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
 clap.workspace = true
-eframe = "0.37"
 rfd = "0.17"
 png.workspace = true
 resvg = { version = "0.48", default-features = false }
+
+# Rendering: OpenGL (glow) on Linux, where Mesa always provides it; wgpu's
+# Vulkan/GL backends and shader compiler made the binary 7 MB larger. wgpu
+# elsewhere: DirectX 12 (with a software fallback) on Windows, whose basic
+# display driver has no modern OpenGL, and Metal on macOS.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.37", default-features = false, features = [
+    "accesskit", "clipboard", "default_fonts", "links", "system_fonts", "wayland", "x11", "glow",
+] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+eframe = "0.37"
