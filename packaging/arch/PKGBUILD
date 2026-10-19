@@ -40,9 +40,8 @@ package() {
   install -Dm644 packaging/arch/its-emu-gui.svg -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
   install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname/"
   install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
-  local unicorn
-  unicorn=$(sed -n '/^name = "unicorn-engine-sys"$/{n;s/^version = "\(.*\)"$/\1/p}' Cargo.lock)
-  install -Dm644 "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/unicorn-engine-sys-$unicorn/COPYING \
+  # Unicorn is vendored (with patches, vendor/README.md)
+  install -Dm644 vendor/unicorn-engine-sys/COPYING \
     "$pkgdir/usr/share/licenses/$pkgname/COPYING.unicorn"
 
   # The ST-LINK on USB/IP: vhci-hcd at boot, a helper that polkit lets the
