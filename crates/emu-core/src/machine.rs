@@ -204,13 +204,19 @@ impl System {
 
     /// Brings SysTick and the peripherals up to the current cycle.
     fn sync_devices(&mut self) {
+        let bus_event = self.bus.next_event();
+        self.sync_devices_with(bus_event);
+    }
+
+    /// [`Self::sync_devices`] with the bus's next event known.
+    fn sync_devices_with(&mut self, bus_event: Option<u64>) {
         let now = self.clock.cycles();
         if self.scs.systick.update(now) {
             self.nvic.set_pending(nvic::SYSTICK);
         }
         // A peripheral event changes state that polling loops may read: the
         // idle detector must not rely on observations made before it.
-        if self.bus.next_event().is_some_and(|t| t <= now) {
+        if bus_event.is_some_and(|t| t <= now) {
             self.idle.dirty();
         }
         let (mut ctx, bus) = self.ctx();
@@ -298,7 +304,7 @@ impl System {
             self.slice_end = next_event.map_or(self.slice_limit, |ev| self.slice_limit.min(ev));
             return true;
         }
-        self.sync_devices();
+        self.sync_devices_with(bus);
         if self.nvic.any_pending() || self.reset_requested.is_some() {
             return false;
         }
