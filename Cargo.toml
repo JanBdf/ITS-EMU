@@ -19,7 +19,8 @@ object = { version = "0.40", default-features = false, features = ["read_core", 
 anyhow = "1"
 thiserror = "2"
 log = "0.4"
-env_logger = "0.11"
+# without the regex filters (RUST_LOG=target/regex), which made up 0.6 MB of the binaries
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 clap = { version = "4", features = ["derive"] }
 png = "0.18"
 gdbstub = "0.7"
@@ -32,6 +33,18 @@ debug = 1
 # without it Unicorn is also built as Release (-O3) instead of RelWithDebInfo.
 [profile.release.package."*"]
 debug = false
+
+# Packages (packaging/arch): link-time optimization over all crates makes the
+# binaries about a quarter smaller and the emulator ~10 % faster (idle loops),
+# at the cost of a longer build. A panic aborts: the emulator runs in Unicorn's
+# callbacks, which cannot unwind anyway.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+debug = false
+strip = true
+panic = "abort"
 
 # Debug builds (`cargo run` without --release): Unicorn unoptimized makes the
 # emulator several times slower than real time.
