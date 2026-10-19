@@ -145,15 +145,24 @@ impl emu_core::Peripheral for EthStub {
 /// 2·div - 1 for writes). AHB peripherals cost about one cycle more than SRAM.
 fn bus_wait_states(clocks: SharedClocks) -> impl Fn(u32, bool, u64) -> u64 {
     let last_end = std::cell::Cell::new(u64::MAX);
+    // HCLK and the APB clock of the last access to each APB, with their ratio
+    // (a division per access is a noticeable part of polling a peripheral)
+    let ratios = std::cell::Cell::new([(0u32, 0u32, 1u64); 2]);
     move |addr, write, now| {
-        let c = clocks.get();
-        let pclk = match addr {
-            0x4000_0000..=0x4000_7FFF => c.pclk1,
-            0x4001_0000..=0x4001_6BFF => c.pclk2,
+        let apb = match addr {
+            0x4000_0000..=0x4000_7FFF => 0,
+            0x4001_0000..=0x4001_6BFF => 1,
             0x4002_0000..=0x5FFF_FFFF => return 1,
             _ => return 0,
         };
-        let div = u64::from(c.hclk / pclk.max(1)).max(1);
+        let c = clocks.get();
+        let pclk = if apb == 0 { c.pclk1 } else { c.pclk2 };
+        let mut known = ratios.get();
+        if (known[apb].0, known[apb].1) != (c.hclk, pclk) {
+            known[apb] = (c.hclk, pclk, u64::from(c.hclk / pclk.max(1)).max(1));
+            ratios.set(known);
+        }
+        let div = known[apb].2;
         if div == 1 {
             return 0;
         }
