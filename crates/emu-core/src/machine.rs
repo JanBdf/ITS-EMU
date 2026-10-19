@@ -144,6 +144,9 @@ pub struct System {
     /// Cycles of the blocks since the start of a chain of blocks that the
     /// translator split (see `wait_states`).
     mmio_shift: u64,
+    /// Cycle of the last [`System::sync_devices`] (`u64::MAX`: none since a
+    /// change from outside, such as a reset).
+    synced_at: u64,
     /// DMA controllers, if the MCU has any, and the memory they access.
     master: Option<Box<dyn BusMaster>>,
     ram: Ram,
@@ -211,6 +214,7 @@ impl System {
     /// [`Self::sync_devices`] with the bus's next event known.
     fn sync_devices_with(&mut self, bus_event: Option<u64>) {
         let now = self.clock.cycles();
+        self.synced_at = now;
         if self.scs.systick.update(now) {
             self.nvic.set_pending(nvic::SYSTICK);
         }
@@ -797,6 +801,7 @@ impl Machine {
             locked_up: false,
             reset_held: false,
             mmio_shift: 0,
+            synced_at: u64::MAX,
             master: None,
             ram: Ram::default(),
             config: config.clone(),
@@ -1612,6 +1617,7 @@ impl Machine {
         sys.nvic.reset();
         sys.scs.reset();
         sys.bus.reset(kind);
+        sys.synced_at = u64::MAX;
         sys.clock.set_cpu_hz(sys.config.reset_cpu_hz);
         sys.stop = None;
         sys.watch_hit = None;
@@ -1810,8 +1816,15 @@ impl Machine {
         let end = self.clock().cycles().saturating_add(budget);
         let resume_pc = self.is_exit(self.pc()).then(|| self.pc());
         let mut first = true;
+        // Inputs may have changed since the last call.
+        self.uc.get_data_mut().synced_at = u64::MAX;
         loop {
-            self.sync_devices();
+            // Not again at the cycle where the block hook just did it (it
+            // stopped for an interrupt): nothing is due, no time passed.
+            let sys = self.uc.get_data();
+            if sys.clock.cycles() != sys.synced_at {
+                self.sync_devices();
+            }
             self.install_div_hooks();
             self.take_flash_dirty();
             if self.uc.get_data().points_dirty {
