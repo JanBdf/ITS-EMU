@@ -181,7 +181,7 @@ MemoryRegion *find_memory_mapping(struct uc_struct *uc, hwaddr address)
     uint64_t page = address >> 10;
     unsigned generation = uc->address_space_memory.generation;
     // flash, SRAM and peripherals are at multiples of large powers of two
-    __typeof__(uc->mapping_cache[0]) *c = &uc->mapping_cache[(page ^ (page >> 8) ^ (page >> 16)) & 255];
+    struct uc_mapping_cache_entry *c = &uc->mapping_cache[(page ^ (page >> 8) ^ (page >> 16)) & 255];
     if (c->mr && c->page == page && c->generation == generation) {
         return c->mr == &uc->io_mem_unassigned ? NULL : c->mr;
     }
