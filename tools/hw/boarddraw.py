@@ -30,9 +30,6 @@ from fontTools.pens.svgPathPen import SVGPathPen
 from fontTools.pens.transformPen import TransformPen
 from fontTools.ttLib import TTFont
 
-W, H = 1000.0, 648.55
-CORNER = 11.3
-
 BOARD_RS = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'apps', 'its-emu-gui', 'src',
                         'board.rs')
 
@@ -43,6 +40,15 @@ def rs_const(name):
     v = [float(x) for x in re.findall(r'-?\d+(?:\.\d+)?', m.group(1))]
     return v[0] if len(v) == 1 else v
 
+
+# The drawing: the board outline, W × H units from (X0, Y0).  The design units
+# come from board-rect.jpg, which shows the board cropped by about 5 units on
+# each side, so the outline reaches into negative coordinates.
+W = rs_const('BOARD_W')
+H = rs_const('BOARD_H')
+X0, Y0 = rs_const('BOARD_ORIGIN')
+X1, Y1 = X0 + W, Y0 + H
+CORNER = 9.0                        # all corners of the board, also those of the notch
 
 # positions of the parts the GUI draws on (lights, presses, plugs, the display)
 OUT_X = rs_const('OUT_X')           # OUT0..OUT15
@@ -124,7 +130,7 @@ class Svg:
         return self
 
     def text(self):
-        return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {f(W)} {f(H)}" '
+        return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{f(X0)} {f(Y0)} {f(W)} {f(H)}" '
                 f'width="{f(W)}" height="{f(H)}">\n<defs>\n' + '\n'.join(self.defs) + '\n</defs>\n'
                 + '\n'.join(self.body) + '\n</svg>\n')
 
@@ -499,16 +505,16 @@ SEC = 2.7             # width of the section frame lines
 
 # section frame lines (polylines)
 SECTIONS = [
-    [(0, 312.3), (300, 312.3)],
+    [(-6, 312.3), (300, 312.3)],
     [(213.6, 312.3), (213.6, 464.4)],
-    [(0, 464.4), (429.1, 464.4), (445.7, 480.9), (482.3, 480.9), (497.4, 495.6), (719.2, 495.6),
-     (733.4, 481.2), (750.6, 481.2), (762, 469.6), (1001, 469.6)],
-    [(634.5, 495.6), (634.5, 649)],
+    [(-6, 464.4), (429.1, 464.4), (445.7, 480.9), (482.3, 480.9), (497.4, 495.6), (719.2, 495.6),
+     (733.4, 481.2), (750.6, 481.2), (762, 469.6), (1008, 469.6)],
+    [(634.5, 495.6), (634.5, 655)],
     [(330, 382.7), (344.4, 382.7), (344.4, 464.4)],
     [(413, 464.4), (413, 358.8), (418, 353.8), (728, 353.8), (761, 386.6), (761, 469.6)],
     [(895.1, 190.5), (895.1, 469.6)],          # above y = 300 never seen (under the display), assumed
-    [(870.0, -1), (870.0, 50.0), (840.0, 80.0)],
-    [(344.2, -1), (344.2, 45.0)],
+    [(870.0, -7), (870.0, 50.0), (840.0, 80.0)],
+    [(344.2, -7), (344.2, 45.0)],
 ]
 
 
@@ -619,16 +625,19 @@ def carrier_labels():
     return out
 
 
-NOTCH = (900.0, 93.5, 190.5)    # cut-out at the right edge (cable of the Nucleo's USB): x, top, bottom
+NOTCH = (846.0, 93.5, 190.5)    # cut-out at the right edge (cable of the Nucleo's USB): x, top, bottom
 
 
 def board_outline():
-    r = n = i = CORNER               # board corners, outer and inner corners of the notch
-    x, t, b = NOTCH
-    return (f'M{r},0 H{W - r} A{r},{r} 0 0 1 {W},{r} V{t - n} A{n},{n} 0 0 1 {W - n},{t} H{x + i} '
-            f'A{i},{i} 0 0 0 {x},{t + i} V{b - i} A{i},{i} 0 0 0 {x + i},{b} H{W - n} '
-            f'A{n},{n} 0 0 1 {W},{b + n} V{H - r} A{r},{r} 0 0 1 {W - r},{H} H{r} A{r},{r} 0 0 1 0,{H - r} '
-            f'V{r} A{r},{r} 0 0 1 {r},0 Z')
+    r = CORNER
+    x, t, b = (f(v) for v in NOTCH)
+    a = f'A{f(r)},{f(r)} 0 0 1'     # convex corner
+    c = f'A{f(r)},{f(r)} 0 0 0'     # concave corner (inside the notch)
+    l, u, rr, d = X0, Y0, X1, Y1
+    return (f'M{f(l + r)},{f(u)} H{f(rr - r)} {a} {f(rr)},{f(u + r)} V{f(NOTCH[1] - r)} {a} {f(rr - r)},{t} '
+            f'H{f(NOTCH[0] + r)} {c} {x},{f(NOTCH[1] + r)} V{f(NOTCH[2] - r)} {c} {f(NOTCH[0] + r)},{b} '
+            f'H{f(rr - r)} {a} {f(rr)},{f(NOTCH[2] + r)} V{f(d - r)} {a} {f(rr - r)},{f(d)} H{f(l + r)} '
+            f'{a} {f(l)},{f(d - r)} V{f(u + r)} {a} {f(l + r)},{f(u)} Z')
 
 
 def board_clip():
@@ -674,8 +683,10 @@ def silk_labels(labels):
         sw = l['sw'] if l['sw'] is not None else 0.2 * l['h']
         pts = [p for pl in text_lines(l['text'], x, y, l['h'], l['anchor'], l['rot'], l['adv']) for p in pl]
         if pts:
-            x += max(0.0, EDGE_GAP + sw / 2 - min(p[0] for p in pts)) - max(0.0, max(p[0] for p in pts) + sw / 2 + EDGE_GAP - W)
-            y += max(0.0, EDGE_GAP + sw / 2 - min(p[1] for p in pts)) - max(0.0, max(p[1] for p in pts) + sw / 2 + EDGE_GAP - H)
+            x += (max(0.0, X0 + EDGE_GAP + sw / 2 - min(p[0] for p in pts))
+                  - max(0.0, max(p[0] for p in pts) + sw / 2 + EDGE_GAP - X1))
+            y += (max(0.0, Y0 + EDGE_GAP + sw / 2 - min(p[1] for p in pts))
+                  - max(0.0, max(p[1] for p in pts) + sw / 2 + EDGE_GAP - Y1))
         out.append(stext(x, y, l['text'], l['h'], l['anchor'], l['rot'], sw, adv=l['adv']))
     return '\n'.join(out)
 

@@ -18,6 +18,7 @@ only the drawing is written.
 """
 import argparse
 import os
+import re
 import subprocess
 import tempfile
 
@@ -25,22 +26,27 @@ import cv2
 import numpy as np
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
-W = 1000.0
+W = 1000.0                         # width of the photo in units
 LAYERS = ['carrier', 'nucleo', 'shield']
 BACKGROUND = (27, 27, 27)          # the GUI's panel (BGR)
 
 
 def render(assets, layers, alpha, k, box):
     """The layers composed over the background, `k` pixels per unit, cropped to `box`."""
-    x0, y0, x1, y1 = (int(round(v * k)) for v in box)
+    # the drawing's view box starts a little left of and above the photo's origin
+    vx, vy, vw, _ = (float(v) for v in re.search(r'viewBox="([^"]*)"', open(
+        os.path.join(assets, 'board-carrier.svg')).read(2000)).group(1).split())
+    x0, y0, x1, y1 = (int(round(v * k)) for v in (box[0] - vx, box[1] - vy, box[2] - vx, box[3] - vy))
     out = np.empty((y1 - y0, x1 - x0, 3), np.float32)
     out[:] = BACKGROUND
     with tempfile.TemporaryDirectory() as tmp:
         for name in layers:
             png = os.path.join(tmp, name + '.png')
-            subprocess.run(['resvg', '-w', str(int(round(W * k))), os.path.join(assets, f'board-{name}.svg'), png],
+            subprocess.run(['resvg', '-w', str(int(round(vw * k))), os.path.join(assets, f'board-{name}.svg'), png],
                            check=True)
-            im = cv2.imread(png, cv2.IMREAD_UNCHANGED)[y0:y1, x0:x1].astype(np.float32)
+            im = cv2.imread(png, cv2.IMREAD_UNCHANGED)[max(y0, 0):y1, max(x0, 0):x1].astype(np.float32)
+            im = np.pad(im, ((max(-y0, 0), out.shape[0] - im.shape[0] - max(-y0, 0)),
+                             (max(-x0, 0), out.shape[1] - im.shape[1] - max(-x0, 0)), (0, 0)))
             a = im[..., 3:] / 255.0 * (alpha if name != 'carrier' else 1.0)
             out = out * (1 - a) + im[..., :3] * a
     return out.round().astype(np.uint8)
@@ -65,7 +71,10 @@ def main():
         return
     photo = cv2.imread(a.photo)
     s = photo.shape[1] / W
-    px = lambda v: int(round(v * s))
+    # outside the photo: background
+    pad = int(20 * s)
+    photo = cv2.copyMakeBorder(photo, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=BACKGROUND)
+    px = lambda v: int(round(v * s)) + pad
     crop_p = photo[px(y0):px(y1), px(x0):px(x1)]
     crop_p = cv2.resize(crop_p, (drawing.shape[1], drawing.shape[0]), interpolation=cv2.INTER_AREA)
     gap = np.full((drawing.shape[0], 8, 3), 255, np.uint8)
