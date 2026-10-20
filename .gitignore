@@ -3,6 +3,8 @@
 
 # Personal files — not for publication
 /hardware_img
+# local notes to instruct agents
+/GUI_improvements.txt
 # AC6 builds of my own lab solutions (tools/build-fixtures.sh regenerates them).
 # Only the course demo programs (BSD-2, HAW Hamburg) are published.
 /tests/fixtures/ac6/*
