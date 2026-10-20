@@ -144,6 +144,9 @@ pub struct System {
     /// Cycles of the blocks since the start of a chain of blocks that the
     /// translator split (see `wait_states`).
     mmio_shift: u64,
+    /// Cycle of the last [`System::sync_devices`] (`u64::MAX`: none since a
+    /// change from outside, such as a reset).
+    synced_at: u64,
     /// DMA controllers, if the MCU has any, and the memory they access.
     master: Option<Box<dyn BusMaster>>,
     ram: Ram,
@@ -153,10 +156,6 @@ pub struct System {
     slice_end: u64,
     /// Unicorn is stopped once the cycle counter reaches this value.
     slice_limit: u64,
-    /// Next peripheral event as of the last `next_slice_end`, made earlier by
-    /// events that accesses scheduled since (a cancelled event may still be
-    /// in it: it is only used to tell the idle detector, conservatively).
-    bus_event: Option<u64>,
     /// Instruction count per translated block (direct-mapped cache).
     block_insns: BlockCache,
     /// Last invalid memory access reported by Unicorn (address, is_write, is_fetch).
@@ -182,7 +181,7 @@ pub struct System {
     /// End address of the previous block, if it ended without a branch, and
     /// its last instruction's result for the next block (see
     /// `continuation_saving` and `continuation_stall`).
-    fell_through: Option<(u64, BlockTiming)>,
+    fell_through: Option<(u64, Option<u8>, Option<u8>)>,
     /// Division instructions found in new blocks, waiting for their timing hook.
     new_divs: Vec<DivSite>,
     /// Address and size of the executing block (`None` while stepping) and
@@ -208,20 +207,20 @@ impl System {
 
     /// Brings SysTick and the peripherals up to the current cycle.
     fn sync_devices(&mut self) {
-        self.bus_event = self.bus.next_event();
-        self.sync_devices_in_slice();
+        let bus_event = self.bus.next_event();
+        self.sync_devices_with(bus_event);
     }
 
-    /// `sync_devices` within a slice, where `bus_event` is up to date (saves
-    /// looking at every peripheral twice per event).
-    fn sync_devices_in_slice(&mut self) {
+    /// [`Self::sync_devices`] with the bus's next event known.
+    fn sync_devices_with(&mut self, bus_event: Option<u64>) {
         let now = self.clock.cycles();
+        self.synced_at = now;
         if self.scs.systick.update(now) {
             self.nvic.set_pending(nvic::SYSTICK);
         }
         // A peripheral event changes state that polling loops may read: the
         // idle detector must not rely on observations made before it.
-        if self.bus_event.is_some_and(|t| t <= now) {
+        if bus_event.is_some_and(|t| t <= now) {
             self.idle.dirty();
         }
         let (mut ctx, bus) = self.ctx();
@@ -238,6 +237,8 @@ impl System {
             if !master.wants_service() {
                 return;
             }
+            // writes RAM past Unicorn (see `IdleDetector::saved_pages`)
+            self.idle.dirty();
             let mut ctx = DeviceCtx { clock: &mut self.clock, nvic: &mut self.nvic };
             master.service(&mut ctx, &mut self.bus, &mut self.ram);
         }
@@ -282,10 +283,9 @@ impl System {
     }
 
     /// Next cycle at which the block hook has to look at devices.
-    fn next_slice_end(&mut self) -> u64 {
+    fn next_slice_end(&self) -> u64 {
         let now = self.clock.cycles();
-        self.bus_event = self.bus.next_event();
-        let next_event = [self.scs.systick.next_event(), self.bus_event].into_iter().flatten().min();
+        let next_event = [self.scs.systick.next_event(), self.bus.next_event()].into_iter().flatten().min();
         next_event.map_or(self.slice_limit, |ev| self.slice_limit.min(ev.max(now + 1)))
     }
 
@@ -293,10 +293,24 @@ impl System {
     /// events in place, which is much cheaper than ending the Unicorn run.
     /// Returns false if the run has to end (slice limit, interrupt pending).
     fn continue_after_events(&mut self) -> bool {
-        if self.clock.cycles() >= self.slice_limit {
+        let now = self.clock.cycles();
+        if now >= self.slice_limit {
             return false;
         }
-        self.sync_devices_in_slice();
+        let systick = self.scs.systick.next_event();
+        let bus = self.bus.next_event();
+        if [systick, bus].into_iter().flatten().all(|t| t > now) {
+            // The event the slice ended for has already been handled (an
+            // access brought the peripheral past it, e.g. the next SPI frame
+            // started): nothing to update.
+            if self.nvic.any_pending() || self.reset_requested.is_some() {
+                return false;
+            }
+            let next_event = [systick, bus].into_iter().flatten().min();
+            self.slice_end = next_event.map_or(self.slice_limit, |ev| self.slice_limit.min(ev));
+            return true;
+        }
+        self.sync_devices_with(bus);
         if self.nvic.any_pending() || self.reset_requested.is_some() {
             return false;
         }
@@ -308,11 +322,10 @@ impl System {
     /// (e.g. the end of an SPI frame started by a DR write), so that time is
     /// not fast-forwarded past it.
     fn clip_slice_to_events(&mut self) {
-        if let Some(ev) = self.bus.take_access_event() {
-            self.bus_event = Some(self.bus_event.map_or(ev, |t| t.min(ev)));
-            if ev < self.slice_end {
-                self.slice_end = ev;
-            }
+        if let Some(ev) = self.bus.take_access_event()
+            && ev < self.slice_end
+        {
+            self.slice_end = ev;
         }
     }
 
@@ -407,15 +420,28 @@ impl CoreAccess for UcCore<'_, '_> {
             other => uc_reg(other),
         };
         let _ = self.0.reg_write(id, u64::from(v));
+        // also the registers that idle detection does not compare
+        self.0.get_data_mut().idle.dirty();
     }
 
     fn read_u32(&mut self, addr: u32) -> Result<u32, AccessError> {
+        // RAM and flash directly (exception stacking, vector fetch): Unicorn's
+        // memory API translates every access through its address space.
+        if let Some(v) = self.0.get_data().ram.read(addr, 4) {
+            return Ok(v);
+        }
         let mut b = [0u8; 4];
         self.0.mem_read(u64::from(addr), &mut b).map_err(|_| AccessError::Bus(addr))?;
         Ok(u32::from_le_bytes(b))
     }
 
     fn write_u32(&mut self, addr: u32, v: u32) -> Result<(), AccessError> {
+        // Through Unicorn into RAM that code runs from: it drops translations.
+        let sys = self.0.get_data_mut();
+        sys.idle.dirty();
+        if sys.ram_region(addr).is_some_and(|i| !sys.ram_exec[i]) && sys.ram.write(addr, 4, v) {
+            return Ok(());
+        }
         self.0.mem_write(u64::from(addr), &v.to_le_bytes()).map_err(|_| AccessError::Bus(addr))
     }
 }
@@ -436,13 +462,21 @@ impl BlockCache {
         ((addr as u32 >> 1) & ((1 << Self::BITS) - 1)) as usize
     }
 
-    fn get(&self, addr: u64, size: u32) -> Option<BlockTiming> {
-        let (a, s, info) = self.entries[Self::slot(addr)];
-        (a == addr as u32 && u32::from(s) == size).then_some(info)
+    /// Slot of the block's entry, if cached.
+    fn find(&self, addr: u64, size: u32) -> Option<usize> {
+        let slot = Self::slot(addr);
+        let (a, s, _) = &self.entries[slot];
+        (*a == addr as u32 && u32::from(*s) == size).then_some(slot)
     }
 
-    fn insert(&mut self, addr: u64, size: u32, info: BlockTiming) {
-        self.entries[Self::slot(addr)] = (addr as u32, size as u16, info);
+    fn at(&self, slot: usize) -> &BlockTiming {
+        &self.entries[slot].2
+    }
+
+    fn insert(&mut self, addr: u64, size: u32, info: BlockTiming) -> usize {
+        let slot = Self::slot(addr);
+        self.entries[slot] = (addr as u32, size as u16, info);
+        slot
     }
 
     fn clear(&mut self) {
@@ -465,9 +499,11 @@ struct IdleDetector {
     prev_block: u64,
     /// Snapshot taken at a visit of `head`.
     snapshot: Option<Snapshot>,
-    /// Reused buffer for RAM snapshots (allocating a fresh 256 KiB buffer
-    /// each time costs a page fault per 4 KiB).
-    ram_spare: Vec<u8>,
+    /// With a snapshot that includes RAM: the pages (1 KiB) stored to since,
+    /// with their contents at the snapshot (copied by Unicorn's first-write
+    /// callback, `first_write`, before the store). Unwritten pages are
+    /// unchanged; RAM written in other ways ends the period (`dirty`).
+    saved_pages: Vec<(u32, [u8; RAM_PAGE])>,
     /// Nothing outside registers/RAM happened since the snapshot.
     clean: bool,
     /// RAM may have been written since the snapshot.
@@ -475,6 +511,11 @@ struct IdleDetector {
     /// Earliest cycle at which a peripheral read since the snapshot may
     /// return a different value (see `Peripheral::read_stable_until`).
     stable_until: u64,
+    /// Loop heads given up on (the loop kept making progress, e.g. an inner
+    /// loop over tasks): not taken as candidates again until a loop is found
+    /// idle, so that an enclosing loop can be observed instead.
+    unpromising: [u64; 4],
+    unpromising_next: usize,
     /// Visits of `head` to skip before comparing again (back-off).
     skip: u32,
     backoff: u32,
@@ -486,11 +527,37 @@ struct Snapshot {
     /// Cycle count when the snapshot was taken.
     at: u64,
     regs: [u32; IDLE_REGS.len()],
-    /// RAM contents, taken once the registers repeat in a loop that stores.
-    ram: Option<Vec<u8>>,
+    /// RAM is tracked (`saved_pages`), once the registers repeat in a loop
+    /// that stores.
+    ram: bool,
 }
 
-const IDLE_REGS: [RegisterARM; 21] = [
+/// Granularity of the RAM write tracking: Unicorn's page size.
+const RAM_PAGE: usize = 1024;
+
+unsafe extern "C" {
+    // vendor/unicorn-engine-sys (ITS-EMU write tracking)
+    fn uc_its_track_writes(
+        uc: *mut std::ffi::c_void,
+        cb: Option<unsafe extern "C" fn(opaque: *mut std::ffi::c_void, paddr: u64)>,
+        opaque: *mut std::ffi::c_void,
+    );
+    fn uc_its_rearm_writes(uc: *mut std::ffi::c_void);
+}
+
+/// Unicorn's first store to a RAM page since `uc_its_rearm_writes`.
+unsafe extern "C" fn first_write(opaque: *mut std::ffi::c_void, paddr: u64) {
+    // SAFETY: `opaque` is the machine's `System` (see `Machine::new`); Unicorn
+    // calls this from a store while it runs, like the other hooks.
+    let sys = unsafe { &mut *opaque.cast::<System>() };
+    sys.idle.note_first_write(paddr as u32, &sys.ram);
+}
+
+/// The registers compared by idle detection. The others (PRIMASK, BASEPRI,
+/// FAULTMASK, CONTROL, FPSCR, the FP registers) only change through
+/// instructions with side effects, exceptions or register writes from
+/// outside, which all end the observation period.
+const IDLE_REGS: [RegisterARM; 16] = [
     RegisterARM::R0,
     RegisterARM::R1,
     RegisterARM::R2,
@@ -507,11 +574,6 @@ const IDLE_REGS: [RegisterARM; 21] = [
     RegisterARM::SP,
     RegisterARM::LR,
     RegisterARM::XPSR,
-    RegisterARM::FPSCR,
-    RegisterARM::PRIMASK,
-    RegisterARM::BASEPRI,
-    RegisterARM::FAULTMASK,
-    RegisterARM::CONTROL,
 ];
 
 impl IdleDetector {
@@ -532,9 +594,8 @@ impl IdleDetector {
 
     /// Starts a new observation period.
     fn restart(&mut self) {
-        if let Some(ram) = self.snapshot.take().and_then(|s| s.ram) {
-            self.ram_spare = ram;
-        }
+        self.snapshot = None;
+        self.drop_saved_pages();
         self.clean = true;
         self.stored = false;
         self.stable_until = u64::MAX;
@@ -552,39 +613,47 @@ impl IdleDetector {
         r
     }
 
-    /// Compares RAM with the snapshot's copy.
-    fn ram_unchanged(sys: &System) -> bool {
-        let Some(copy) = sys.idle.snapshot.as_ref().and_then(|s| s.ram.as_deref()) else { return false };
-        let mut rest = copy;
-        for region in sys.ram.writable() {
-            let Some((head, tail)) = rest.split_at_checked(region.len()) else { return false };
-            if head != region {
-                return false;
-            }
-            rest = tail;
+    fn drop_saved_pages(&mut self) {
+        self.saved_pages.clear();
+    }
+
+    /// Saves the page of `addr` before its first store since the snapshot.
+    fn note_first_write(&mut self, addr: u32, ram: &Ram) {
+        if !self.snapshot.as_ref().is_some_and(|s| s.ram) {
+            return;
         }
-        rest.is_empty()
+        let page = addr & !(RAM_PAGE as u32 - 1);
+        if self.saved_pages.iter().any(|&(p, _)| p == page) {
+            return;
+        }
+        let Some(bytes) = ram.writable_bytes(page, RAM_PAGE as u32) else { return };
+        let mut copy = [0; RAM_PAGE];
+        copy.copy_from_slice(bytes);
+        self.saved_pages.push((page, copy));
+    }
+
+    /// Compares the RAM pages stored to since the snapshot with their contents then.
+    fn ram_unchanged(sys: &System) -> bool {
+        if !sys.idle.snapshot.as_ref().is_some_and(|s| s.ram) {
+            return false;
+        }
+        sys.idle
+            .saved_pages
+            .iter()
+            .all(|(page, copy)| sys.ram.writable_bytes(*page, RAM_PAGE as u32) == Some(&copy[..]))
     }
 
     fn take_snapshot(uc: &mut Unicorn<System>, with_ram: bool) {
         let regs = Self::read_regs(uc);
+        if with_ram {
+            // The next store to each RAM page calls `first_write` again.
+            // SAFETY: the engine of this machine, not running another call.
+            unsafe { uc_its_rearm_writes(uc.get_handle().cast()) };
+        }
         let sys = uc.get_data_mut();
         let d = &mut sys.idle;
-        let ram = with_ram.then(|| {
-            let mut buf = match d.snapshot.take().and_then(|s| s.ram) {
-                Some(old) => old,
-                None => std::mem::take(&mut d.ram_spare),
-            };
-            buf.clear();
-            for region in sys.ram.writable() {
-                buf.extend_from_slice(region);
-            }
-            buf
-        });
-        if let Some(old) = d.snapshot.take().and_then(|s| s.ram) {
-            d.ram_spare = old;
-        }
-        d.snapshot = Some(Snapshot { at: sys.clock.cycles(), regs, ram });
+        d.drop_saved_pages();
+        d.snapshot = Some(Snapshot { at: sys.clock.cycles(), regs, ram: with_ram });
         d.restart_period();
     }
 
@@ -606,7 +675,49 @@ impl IdleDetector {
     /// Called at the start of every block. Returns `Some(t)` if the core
     /// repeats the same loop iteration until cycle `t` (at most the end of the
     /// slice; whole iterations, so `t` is the start of one).
-    fn on_block(uc: &mut Unicorn<System>, addr: u64, info: BlockTiming) -> Option<u64> {
+    #[inline]
+    fn on_block(uc: &mut Unicorn<System>, addr: u64, stores: bool, side_effects: bool) -> Option<u64> {
+        let d = &mut uc.get_data_mut().idle;
+        let prev = std::mem::replace(&mut d.prev_block, addr);
+        if addr == d.head {
+            return Self::at_head(uc, stores, side_effects);
+        }
+        d.blocks_since_head += 1;
+        // A backward branch starts a new candidate unless we are still
+        // inside the body of the current one.
+        if addr <= prev && d.blocks_since_head > 64 {
+            d.new_candidate(addr);
+        }
+        d.note_block(stores, side_effects);
+        None
+    }
+
+    #[cold]
+    fn new_candidate(&mut self, addr: u64) {
+        if self.unpromising.contains(&addr) {
+            return;
+        }
+        self.head = addr;
+        self.blocks_since_head = 0;
+        self.restart();
+        self.skip = 0;
+        self.backoff = 0;
+    }
+
+    /// The current block belongs to the next period.
+    #[inline]
+    fn note_block(&mut self, stores: bool, side_effects: bool) {
+        if side_effects {
+            self.clean = false;
+        }
+        if stores {
+            self.stored = true;
+        }
+    }
+
+    /// [`Self::on_block`] at the head of the loop.
+    #[inline(never)]
+    fn at_head(uc: &mut Unicorn<System>, stores: bool, side_effects: bool) -> Option<u64> {
         enum Action {
             Nothing,
             Snapshot { with_ram: bool },
@@ -614,34 +725,19 @@ impl IdleDetector {
         }
         let action = {
             let d = &mut uc.get_data_mut().idle;
-            let prev = std::mem::replace(&mut d.prev_block, addr);
-            if addr != d.head {
-                d.blocks_since_head += 1;
-                // A backward branch starts a new candidate unless we are still
-                // inside the body of the current one.
-                if addr <= prev && d.blocks_since_head > 64 {
-                    d.head = addr;
-                    d.blocks_since_head = 0;
-                    d.restart();
-                    d.skip = 0;
-                    d.backoff = 0;
-                }
+            d.blocks_since_head = 0;
+            if !d.clean {
+                // Outside influence: start over, but only snapshot after a
+                // clean period so that busy loops pay nothing.
+                d.restart();
+                Action::Nothing
+            } else if d.snapshot.is_none() {
+                Action::Snapshot { with_ram: false }
+            } else if d.skip > 0 {
+                d.skip -= 1;
                 Action::Nothing
             } else {
-                d.blocks_since_head = 0;
-                if !d.clean {
-                    // Outside influence: start over, but only snapshot after a
-                    // clean period so that busy loops pay nothing.
-                    d.restart();
-                    Action::Nothing
-                } else if d.snapshot.is_none() {
-                    Action::Snapshot { with_ram: false }
-                } else if d.skip > 0 {
-                    d.skip -= 1;
-                    Action::Nothing
-                } else {
-                    Action::Compare
-                }
+                Action::Compare
             }
         };
         let idle = match action {
@@ -656,7 +752,7 @@ impl IdleDetector {
                 let d = &sys.idle;
                 let snap = d.snapshot.as_ref().expect("snapshot present");
                 let regs_same = regs == snap.regs;
-                if regs_same && d.stored && snap.ram.is_none() {
+                if regs_same && d.stored && !snap.ram {
                     // The loop stores: compare RAM from the next visit on.
                     Self::take_snapshot(uc, true);
                     None
@@ -668,6 +764,13 @@ impl IdleDetector {
                     let d = &mut uc.get_data_mut().idle;
                     d.backoff = (d.backoff * 2).clamp(1, 4096);
                     d.skip = d.backoff;
+                    if d.backoff >= 64 {
+                        // Look for an enclosing loop at the next backward branch.
+                        d.unpromising[d.unpromising_next] = d.head;
+                        d.unpromising_next = (d.unpromising_next + 1) % d.unpromising.len();
+                        d.head = u64::MAX;
+                        d.blocks_since_head = 65;
+                    }
                     None
                 } else {
                     // Skip whole iterations whose reads all happen before
@@ -680,20 +783,17 @@ impl IdleDetector {
                         None
                     } else {
                         // The next period starts here; its reads are noted afresh.
-                        uc.get_data_mut().idle.restamp(now);
+                        let d = &mut uc.get_data_mut().idle;
+                        d.restamp(now);
+                        // The loop waits: after the next event, look again soon.
+                        d.backoff = 0;
+                        d.unpromising = [u64::MAX; 4];
                         Some(now + (until - now) / period * period)
                     }
                 }
             }
         };
-        // The current block belongs to the next period.
-        let d = &mut uc.get_data_mut().idle;
-        if info.side_effects {
-            d.clean = false;
-        }
-        if info.stores {
-            d.stored = true;
-        }
+        uc.get_data_mut().idle.note_block(stores, side_effects);
         idle
     }
 }
@@ -756,12 +856,12 @@ impl Machine {
             locked_up: false,
             reset_held: false,
             mmio_shift: 0,
+            synced_at: u64::MAX,
             master: None,
             ram: Ram::default(),
             config: config.clone(),
             slice_end: 0,
             slice_limit: 0,
-            bus_event: None,
             branch_from: None,
             fell_through: None,
             new_divs: Vec::new(),
@@ -834,8 +934,10 @@ impl Machine {
             }),
             Some(move |uc: &mut Unicorn<System>, off: u64, size: usize, value: u64| {
                 let sys = uc.get_data_mut();
-                sys.idle.dirty();
                 let addr = sys.config.memory.periph_base + off as u32;
+                if !sys.bus.write_is_inert(addr) {
+                    sys.idle.dirty();
+                }
                 let ws = sys.bus.wait_states(addr, true, sys.clock.cycles() - sys.mmio_shift);
                 sys.clock.advance(ws);
                 let (mut ctx, bus) = sys.ctx();
@@ -902,6 +1004,8 @@ impl Machine {
                     u64::from((b[0] >> bit) & 1)
                 }),
                 Some(move |uc: &mut Unicorn<System>, off: u64, _size: usize, value: u64| {
+                    // writes RAM past the write tracking of idle detection
+                    uc.get_data_mut().idle.dirty();
                     let (byte, bit) = target(off);
                     let mut b = [0u8];
                     if uc.mem_read(u64::from(byte), &mut b).is_ok() {
@@ -916,52 +1020,58 @@ impl Machine {
         // This is the only place that calls `emu_stop`: at a block boundary no
         // instruction is half-done, so execution can resume at the current PC.
         uc.add_block_hook(1, 0, |uc, addr, size| {
-            if uc.get_data().stepping {
+            let sys = uc.get_data_mut();
+            if sys.stepping {
                 // `step` accounts for its single instruction. (With a branch the
                 // hook also fires for the next block before the step ends.)
-                uc.get_data_mut().block = None;
+                sys.block = None;
                 return;
             }
             // Taken branch at the end of the previous block: pipeline refill
             // (for unconditional branches included in the block's cycles).
-            let entered_by_branch = match uc.get_data_mut().branch_from.take() {
+            let entered_by_branch = match sys.branch_from.take() {
                 Some((_, false)) => true,
                 Some((fallthrough, true)) if fallthrough != addr => {
-                    uc.get_data_mut().clock.advance(1);
+                    sys.clock.advance(1);
                     true
                 }
                 _ => false,
             };
-            if uc.get_data().clock.cycles() >= uc.get_data().slice_end && !uc.get_data_mut().continue_after_events() {
+            if sys.clock.cycles() >= sys.slice_end && !sys.continue_after_events() {
                 let _ = uc.emu_stop();
                 return;
             }
-            let info = match uc.get_data().block_insns.get(addr, size) {
-                Some(info) => info,
-                None => {
-                    let mut code = vec![0u8; size as usize];
-                    let mut divs = Vec::new();
-                    let info = if uc.mem_read(addr, &mut code).is_ok() {
-                        timing::analyze_block(&code, addr as u32, &mut divs)
-                    } else {
-                        BlockTiming { insns: 1, cycles: 1, stores: true, side_effects: true, ..BlockTiming::default() }
-                    };
-                    let sys = uc.get_data_mut();
-                    sys.block_insns.insert(addr, size, info);
-                    divs.retain(|d| !sys.hooked_divs.contains(&d.addr));
-                    if !divs.is_empty() {
-                        // Their timing hooks are installed between runs; the
-                        // block is translated again with them.
-                        sys.new_divs.extend(divs);
-                        sys.request_stop();
-                        let _ = uc.emu_stop();
-                        return;
-                    }
-                    info
-                }
+            let slot = match sys.block_insns.find(addr, size) {
+                Some(slot) => slot,
+                None => match Self::analyze_new_block(uc, addr, size) {
+                    Some(slot) => slot,
+                    None => return,
+                },
             };
-            let idle_until = if uc.get_data().idle_skipping { IdleDetector::on_block(uc, addr, info) } else { None };
-            if let Some(until) = idle_until {
+            let sys = uc.get_data_mut();
+            // Read in place: copying the whole entry costs a store-forwarding stall.
+            let info = sys.block_insns.at(slot);
+            let refill = if entered_by_branch { info.entry_penalty } else { 0 };
+            let (saving, stall, continues) = match sys.fell_through {
+                Some((prev_end, last_load_rt, last_fp_dst)) if prev_end == addr => {
+                    (info.continuation_saving(last_load_rt), info.continuation_stall(last_fp_dst), true)
+                }
+                _ => (0, 0, false),
+            };
+            let cycles = u64::from(info.cycles + refill + stall - saving);
+            let (stores, side_effects) = (info.stores, info.side_effects);
+            let end = addr + u64::from(size);
+            let next_branch_from = if info.ends_with_branch {
+                Some((end, true))
+            } else if info.ends_with_jump {
+                Some((end, false))
+            } else {
+                None
+            };
+            let next_fell_through = next_branch_from.is_none().then_some((end, info.last_load_rt, info.last_fp_dst));
+            if sys.idle_skipping
+                && let Some(until) = IdleDetector::on_block(uc, addr, stores, side_effects)
+            {
                 let sys = uc.get_data_mut();
                 let now = sys.clock.cycles();
                 if until >= sys.slice_end {
@@ -982,33 +1092,23 @@ impl Machine {
                 }
             }
             let sys = uc.get_data_mut();
-            let refill = if entered_by_branch { info.entry_penalty } else { 0 };
-            let (saving, stall, continues) = match sys.fell_through.take() {
-                Some((end, prev)) if end == addr => {
-                    (info.continuation_saving(prev.last_load_rt), info.continuation_stall(prev.last_fp_dst), true)
-                }
-                _ => (0, 0, false),
-            };
-            let cycles = u64::from(info.cycles + refill + stall - saving);
             sys.clock.advance(cycles);
             sys.block = Some((addr, size));
             sys.cyccnt_reads = 0;
             // Peripheral accesses see the time of their block; a block that
             // continues a split one counts as part of it.
             sys.mmio_shift = if continues { sys.mmio_shift + cycles } else { 0 };
-            if !info.ends_with_branch && !info.ends_with_jump {
-                sys.fell_through = Some((addr + u64::from(size), info));
-            }
-            sys.branch_from = if info.ends_with_branch {
-                Some((addr + u64::from(size), true))
-            } else if info.ends_with_jump {
-                Some((addr + u64::from(size), false))
-            } else {
-                None
-            };
+            sys.fell_through = next_fell_through;
+            sys.branch_from = next_branch_from;
         })?;
 
         uc.add_intr_hook(Self::on_cpu_exception)?;
+
+        // Write tracking for idle detection (`IdleDetector::saved_pages`).
+        let sys: *mut System = uc.get_data_mut();
+        // SAFETY: `System` lives in the engine's heap allocation as long as the
+        // engine, which calls `first_write` only while it runs.
+        unsafe { uc_its_track_writes(uc.get_handle().cast(), Some(first_write), sys.cast()) };
 
         // Page rights come from `page_perms` instead of the CPU's MPU model
         // (the PPB, where the MPU registers are, is modelled here anyway).
@@ -1073,6 +1173,30 @@ impl Machine {
     }
 
     /// Changes whenever flash is written, e.g. when a debugger loads a program.
+    /// Analyzes a block seen for the first time and caches its timing.
+    /// Returns `None` if the run has to stop to install timing hooks for
+    /// its division instructions (the block is translated again with them).
+    #[cold]
+    fn analyze_new_block(uc: &mut Unicorn<System>, addr: u64, size: u32) -> Option<usize> {
+        let mut code = vec![0u8; size as usize];
+        let mut divs = Vec::new();
+        let info = if uc.mem_read(addr, &mut code).is_ok() {
+            timing::analyze_block(&code, addr as u32, &mut divs)
+        } else {
+            BlockTiming { insns: 1, cycles: 1, stores: true, side_effects: true, ..BlockTiming::default() }
+        };
+        let sys = uc.get_data_mut();
+        let slot = sys.block_insns.insert(addr, size, info);
+        divs.retain(|d| !sys.hooked_divs.contains(&d.addr));
+        if !divs.is_empty() {
+            sys.new_divs.extend(divs);
+            sys.request_stop();
+            let _ = uc.emu_stop();
+            return None;
+        }
+        Some(slot)
+    }
+
     pub fn flash_writes(&self) -> u64 {
         self.flash_writes
     }
@@ -1132,6 +1256,8 @@ impl Machine {
         if ok {
             self.invalidate_code(addr, data.len() as u32);
         }
+        // RAM written past the write tracking of idle detection
+        self.uc.get_data_mut().idle.dirty();
         ok
     }
 
@@ -1556,6 +1682,7 @@ impl Machine {
         sys.nvic.reset();
         sys.scs.reset();
         sys.bus.reset(kind);
+        sys.synced_at = u64::MAX;
         sys.clock.set_cpu_hz(sys.config.reset_cpu_hz);
         sys.stop = None;
         sys.watch_hit = None;
@@ -1754,8 +1881,15 @@ impl Machine {
         let end = self.clock().cycles().saturating_add(budget);
         let resume_pc = self.is_exit(self.pc()).then(|| self.pc());
         let mut first = true;
+        // Inputs may have changed since the last call.
+        self.uc.get_data_mut().synced_at = u64::MAX;
         loop {
-            self.sync_devices();
+            // Not again at the cycle where the block hook just did it (it
+            // stopped for an interrupt): nothing is due, no time passed.
+            let sys = self.uc.get_data();
+            if sys.clock.cycles() != sys.synced_at {
+                self.sync_devices();
+            }
             self.install_div_hooks();
             self.take_flash_dirty();
             if self.uc.get_data().points_dirty {

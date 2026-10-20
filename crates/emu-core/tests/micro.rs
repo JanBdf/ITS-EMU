@@ -266,3 +266,23 @@ fn single_step_into_code_in_ram() {
     assert_eq!(m.step(), StopReason::Step);
     assert_eq!((m.pc(), m.reg(CoreReg::R(1))), (0x2000_0102, 42), "the first step in RAM executes an instruction");
 }
+
+/// A loop whose registers repeat at its head while it counts in RAM is not
+/// fast-forwarded: idle detection sees its stores.
+#[test]
+fn idle_detection_sees_stores_of_a_loop() {
+    let image = ElfImage::parse(&fixture("idle_ram.elf")).unwrap();
+    let run = |idle_skipping: bool| {
+        let mut m = Machine::new(stm32f4_config(), Bus::new()).unwrap();
+        m.system_mut().idle_skipping = idle_skipping;
+        m.load_elf(&image).unwrap();
+        m.reset();
+        let stop = m.run(100_000_000);
+        assert!(matches!(stop, StopReason::Breakpoint { .. }), "unexpected stop: {stop:?} at pc {:#x}", m.pc());
+        let counter = image.symbol("counter").unwrap().addr;
+        (m.clock().cycles(), m.read_u32(counter).unwrap())
+    };
+    let (cycles, count) = run(true);
+    assert_eq!(count, 200_000);
+    assert_eq!(run(false), (cycles, count));
+}

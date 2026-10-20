@@ -61,3 +61,7 @@ opt-level = 1
 opt-level = 1
 [profile.dev.package.itsboard]
 opt-level = 1
+
+# Unicorn with patches for speed (vendor/README.md)
+[patch.crates-io]
+unicorn-engine-sys = { path = "vendor/unicorn-engine-sys" }

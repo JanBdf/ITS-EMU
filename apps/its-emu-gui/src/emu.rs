@@ -13,6 +13,8 @@ use emu_core::{ElfImage, StopReason};
 use itsboard::sim::DEFAULT_FONTS;
 use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH, Simulator};
 
+use crate::render::Renderer;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Speed {
     /// Virtual time runs at wall-clock speed times this factor.
@@ -173,7 +175,7 @@ impl Drop for EmuHandle {
 /// Starts the emulator thread. `repaint` is called whenever the snapshot
 /// changed. With `gdb_addr`, a GDB server listens there (except while
 /// pyOCD uses the ST-LINK: its own GDB server takes the port).
-pub fn spawn(repaint: impl Fn() + Send + 'static, gdb_addr: Option<String>, usb: UsbConfig) -> EmuHandle {
+pub fn spawn(repaint: impl Fn() + Send + Sync + 'static, gdb_addr: Option<String>, usb: UsbConfig) -> EmuHandle {
     let (tx, rx) = channel();
     let snapshot = SharedSnapshot::default();
     let shared = snapshot.clone();
@@ -188,7 +190,7 @@ pub fn spawn(repaint: impl Fn() + Send + 'static, gdb_addr: Option<String>, usb:
     });
     let thread = std::thread::Builder::new()
         .name("emulator".into())
-        .spawn(move || Worker::new(rx, shared, Box::new(repaint), gdb_addr, usb, wake, pending).run())
+        .spawn(move || Worker::new(rx, shared, Arc::new(repaint), gdb_addr, usb, wake, pending).run())
         .expect("spawn emulator thread");
     EmuHandle { commands: tx, snapshot, thread: Some(thread) }
 }
@@ -200,11 +202,13 @@ const PORT_LEFT_TO_PYOCD: &str = "port left to pyOCD (ST-LINK in use)";
 const SLICE: Duration = Duration::from_millis(4);
 /// Minimum interval between snapshot updates (UI refresh).
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
+/// Interval of repaints for the virtual time alone, when nothing else changed.
+const CLOCK_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 
 struct Worker {
     commands: Receiver<Command>,
     snapshot: SharedSnapshot,
-    repaint: Box<dyn Fn() + Send>,
+    repaint: Arc<dyn Fn() + Send + Sync>,
     sim: Option<Simulator>,
     firmware: Option<PathBuf>,
     /// A debugger has written flash since the last load (`firmware` is stale).
@@ -214,12 +218,12 @@ struct Worker {
     /// Pacing reference: (wall instant, virtual ns) at the last speed change/resume.
     anchor: (Instant, u64),
     last_publish: Instant,
+    last_repaint: Instant,
     rate_sample: (Instant, u64),
     measured_speed: f64,
     published_generation: u64,
-    /// The next display frame, rendered outside the snapshot lock and then
-    /// swapped in.
-    display: Vec<u8>,
+    /// Turns captured display frames into pixels (own thread).
+    renderer: Renderer,
     ideal_colors: bool,
     /// External inputs, re-applied when new firmware is loaded.
     buttons: [bool; 8],
@@ -276,7 +280,7 @@ impl Worker {
     fn new(
         commands: Receiver<Command>,
         snapshot: SharedSnapshot,
-        repaint: Box<dyn Fn() + Send>,
+        repaint: Arc<dyn Fn() + Send + Sync>,
         gdb_addr: Option<String>,
         usb_config: UsbConfig,
         wake: Arc<dyn Fn() + Send + Sync>,
@@ -285,6 +289,7 @@ impl Worker {
         let now = Instant::now();
         let mut w = Self {
             commands,
+            renderer: Renderer::spawn(snapshot.clone(), repaint.clone()),
             snapshot,
             repaint,
             // Like a board with empty flash: a debugger can attach and load a program.
@@ -295,10 +300,10 @@ impl Worker {
             speed: Speed::Factor(1.0),
             anchor: (now, 0),
             last_publish: now,
+            last_repaint: now,
             rate_sample: (now, 0),
             measured_speed: 0.0,
             published_generation: u64::MAX,
-            display: vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * 4],
             ideal_colors: false,
             buttons: [false; 8],
             ints: [None; 6],
@@ -782,55 +787,63 @@ impl Worker {
             self.rate_sample = (now, virt);
         }
 
-        // Render outside the lock: the UI thread waits for it.
-        let new_frame = self.sim.as_ref().and_then(|sim| {
+        // Only a copy of the frame buffer here; the display thread computes
+        // the pixels and puts them into the snapshot.
+        if let Some(sim) = &self.sim {
             let b = &sim.board;
             let generation = b.display_generation() ^ (b.backlight().to_bits() as u64);
-            if generation == self.published_generation {
-                return None;
+            if generation != self.published_generation {
+                let mut frame = self.renderer.frame();
+                b.capture_display(&mut frame);
+                // Busy with earlier frames: try again at the next publish.
+                if self.renderer.submit(frame, self.ideal_colors) {
+                    self.published_generation = generation;
+                }
             }
-            if self.ideal_colors {
-                b.render_display(&mut self.display);
-            } else {
-                b.render_display_as_seen(&mut self.display);
-            }
-            Some(generation)
-        });
+        }
 
+        // Repaint when something visible changed; the virtual time alone
+        // only every CLOCK_REPAINT_INTERVAL (a repaint draws the whole board).
+        fn set<T: PartialEq>(field: &mut T, value: T) -> bool {
+            let changed = *field != value;
+            *field = value;
+            changed
+        }
         let mut snap = self.snapshot.lock().unwrap();
-        snap.firmware = if self.uploaded {
+        let firmware = if self.uploaded {
             Some("uploaded by debugger".to_owned())
         } else {
             self.firmware.as_ref().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
         };
-        snap.state = self.state.clone();
+        let mut changed = set(&mut snap.firmware, firmware);
+        changed |= set(&mut snap.state, self.state.clone());
         snap.virtual_ns = virt;
-        snap.speed = if self.state == RunState::Running { self.measured_speed } else { 0.0 };
-        snap.gdb = self.gdb_status.clone();
-        snap.gdb_attached = self.gdb.as_ref().is_some_and(GdbServer::has_controller);
-        snap.usb = self.usb_status();
+        let speed = if self.state == RunState::Running { self.measured_speed } else { 0.0 };
+        changed |= set(&mut snap.speed, speed);
+        changed |= set(&mut snap.gdb, self.gdb_status.clone());
+        changed |= set(&mut snap.gdb_attached, self.gdb.as_ref().is_some_and(GdbServer::has_controller));
+        changed |= set(&mut snap.usb, self.usb_status());
         if let Some(sim) = &self.sim {
             let b = &sim.board;
-            if let Some(generation) = new_frame {
-                std::mem::swap(&mut snap.display, &mut self.display);
-                snap.display_generation = snap.display_generation.wrapping_add(1);
-                self.published_generation = generation;
-            }
-            snap.leds = b.leds();
-            snap.dac1 = sim.board.dac1();
+            changed |= set(&mut snap.leds, b.leds());
+            changed |= set(&mut snap.dac1, sim.board.dac1());
             let duty = sim.take_led_duty();
-            snap.led_duty = duty.out;
-            snap.nucleo_duty = duty.nucleo;
-            snap.inputs = b.inputs();
-            snap.nucleo_leds = b.nucleo_leds();
-            snap.backlight = b.backlight();
-            snap.core_mhz = b.mcu().clocks.get().hclk / 1_000_000;
-            snap.pins = crate::pins::view(&b.mcu().gpio.borrow().ports);
+            changed |= set(&mut snap.led_duty, duty.out);
+            changed |= set(&mut snap.nucleo_duty, duty.nucleo);
+            changed |= set(&mut snap.inputs, b.inputs());
+            changed |= set(&mut snap.nucleo_leds, b.nucleo_leds());
+            changed |= set(&mut snap.backlight, b.backlight());
+            changed |= set(&mut snap.core_mhz, b.mcu().clocks.get().hclk / 1_000_000);
+            changed |= set(&mut snap.pins, crate::pins::view(&b.mcu().gpio.borrow().ports));
             let out = b.mcu().usart3.borrow_mut().take_output();
+            changed |= !out.is_empty();
             snap.serial.extend(out);
         }
         drop(snap);
-        (self.repaint)();
+        if changed || force || now - self.last_repaint >= CLOCK_REPAINT_INTERVAL {
+            self.last_repaint = now;
+            (self.repaint)();
+        }
     }
 }
 

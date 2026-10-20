@@ -51,6 +51,13 @@ impl Ram {
         })
     }
 
+    /// `len` bytes at `addr`, if they lie in one writable region.
+    pub fn writable_bytes(&self, addr: u32, len: u32) -> Option<&[u8]> {
+        let (p, writable) = self.locate(addr, len)?;
+        // SAFETY: `locate` checked the bounds; valid while the `Ram` is used (see `add`)
+        writable.then(|| unsafe { std::slice::from_raw_parts(p, len as usize) })
+    }
+
     /// Reads `size` bytes (1, 2, 4), little endian.
     pub fn read(&self, addr: u32, size: u32) -> Option<u32> {
         let (p, _) = self.locate(addr, size)?;
@@ -97,11 +104,13 @@ pub struct DeviceCtx<'a> {
 }
 
 impl DeviceCtx<'_> {
+    #[inline]
     pub fn now(&self) -> u64 {
         self.clock.cycles()
     }
 
     /// Drives the level of external interrupt line `irq`.
+    #[inline]
     pub fn set_irq(&mut self, irq: u32, high: bool) {
         self.nvic.set_irq_level(irq, high);
     }
@@ -112,6 +121,7 @@ impl DeviceCtx<'_> {
     }
 
     /// Drives source `src` of an interrupt line that several peripherals share.
+    #[inline]
     pub fn set_irq_source(&mut self, irq: u32, src: u8, high: bool) {
         self.nvic.set_irq_source(irq, src, high);
     }
@@ -141,6 +151,13 @@ pub trait Peripheral {
     /// Cycle of the next internal event (timer overflow, ...), if any.
     fn next_event(&self) -> Option<u64> {
         None
+    }
+
+    /// Writes to the register at `offset` change nothing (registers of a
+    /// stub that ignores them). Lets idle polling loops that write such a
+    /// register be fast-forwarded. Conservative default: false.
+    fn write_is_inert(&self, _offset: u32) -> bool {
+        false
     }
 
     fn reset(&mut self) {}
@@ -278,6 +295,20 @@ impl Bus {
         }
     }
 
+    /// See [`Peripheral::write_is_inert`]; writes to unmapped addresses are ignored.
+    pub fn write_is_inert(&mut self, addr: u32) -> bool {
+        if bitband_target(addr).is_some() {
+            return false;
+        }
+        match self.find(addr) {
+            Some(m) => {
+                let off = addr - m.base;
+                m.dev.write_is_inert(off)
+            }
+            None => true,
+        }
+    }
+
     pub fn update(&mut self, ctx: &mut DeviceCtx) {
         for m in &mut self.maps {
             m.dev.update(ctx);
@@ -364,6 +395,7 @@ fn split(addr: u32, size: u32) -> impl Iterator<Item = (u32, u32, u32)> {
 
 /// Helper for peripherals with plain 32-bit registers: merges a narrow write
 /// into the existing register value.
+#[inline]
 pub fn merge_write(old: u32, offset: u32, size: u32, value: u32) -> u32 {
     let shift = (offset & 3) * 8;
     let mask = match size {
@@ -375,6 +407,7 @@ pub fn merge_write(old: u32, offset: u32, size: u32, value: u32) -> u32 {
 }
 
 /// Extracts a narrow read from a 32-bit register value.
+#[inline]
 pub fn extract_read(reg: u32, offset: u32, size: u32) -> u32 {
     let shift = (offset & 3) * 8;
     match size {
