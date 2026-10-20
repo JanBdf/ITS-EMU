@@ -67,6 +67,15 @@ jobs:
       - name: Test
         run: cargo test --release --workspace --locked ${{ env.TARGET }}
 
+      # The GUI starts and draws a frame (Xvfb, Mesa's software OpenGL):
+      # start-up and renderer problems that the tests do not see.
+      - name: GUI smoke test
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y --no-install-recommends xvfb libgl1-mesa-dri libegl1 libxkbcommon-x11-0
+          ITS_EMU_GUI_SCREENSHOT=gui.png:3 timeout 120 xvfb-run -a $BIN/its-emu-gui --no-gdb --no-usb tests/fixtures/micro/bench.elf
+          test -s gui.png
+
       - name: Throughput
         shell: bash
         run: |

@@ -8,6 +8,7 @@ use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
 use crate::board::{self, BoardState};
 use crate::emu::{self, Command, EmuHandle, RunState, Speed, UsbStatus};
+use crate::files::FilePicker;
 use crate::settings::Settings;
 
 const OK_GREEN: Color32 = Color32::from_rgb(0x34, 0xD3, 0x59);
@@ -55,6 +56,7 @@ pub struct App {
     title: String,
     /// The pin inspector is open.
     show_pins: bool,
+    files: FilePicker,
 }
 
 const SEE_THROUGH_DEFAULT: f32 = 0.25;
@@ -157,6 +159,8 @@ impl App {
         if !settings.auto_reload {
             emu.send(Command::SetAutoReload(false));
         }
+        // the file dialog starts in the folder of the last opened file
+        let files = FilePicker::new(settings.recent.first().and_then(|p| p.parent()).map(PathBuf::from));
         let mut app = Self {
             emu,
             display: None,
@@ -184,6 +188,7 @@ impl App {
             ideal_colors,
             title: String::new(),
             show_pins: start_view("pins"),
+            files,
         };
         if let Some(path) = firmware {
             app.load(path);
@@ -209,15 +214,6 @@ impl App {
         }
     }
 
-    fn open_dialog(&mut self) {
-        let mut dialog = rfd::FileDialog::new().add_filter("Firmware", &["axf", "elf"]).add_filter("All files", &["*"]);
-        if let Some(dir) = self.settings.recent.first().and_then(|p| p.parent()) {
-            dialog = dialog.set_directory(dir);
-        }
-        if let Some(path) = dialog.pick_file() {
-            self.load(path);
-        }
-    }
 }
 
 impl eframe::App for App {
@@ -276,7 +272,7 @@ impl eframe::App for App {
         // ---- keyboard shortcuts
         let shortcut = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
         if shortcut(Key::O) {
-            self.open_dialog();
+            self.files.open(&ctx, false);
         }
         if shortcut(Key::R) {
             self.emu.send(Command::Reset);
@@ -297,8 +293,11 @@ impl eframe::App for App {
         // ---- toolbar
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("📂 Open…").on_hover_text("Open a firmware file (.axf) · Ctrl+O").clicked() {
-                    self.open_dialog();
+                let open = ui
+                    .button("📂 Open…")
+                    .on_hover_text("Open a firmware file (.axf) · Ctrl+O\nShift+click: the emulator's own file browser");
+                if open.clicked() {
+                    self.files.open(&ctx, ui.input(|i| i.modifiers.shift));
                 }
                 if ui.button("⟲ Reset").on_hover_text("RESET button of the Nucleo board · Ctrl+R").clicked() {
                     self.emu.send(Command::Reset);
@@ -585,11 +584,12 @@ impl eframe::App for App {
             shot.tick(&ctx);
         }
 
-        // Drag & drop of firmware files
+        // Drag & drop of firmware files, file dialog
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
         });
-        if let Some(path) = dropped.into_iter().next() {
+        let picked = self.files.show(&ctx);
+        if let Some(path) = dropped.into_iter().next().or(picked) {
             self.load(path);
         }
 

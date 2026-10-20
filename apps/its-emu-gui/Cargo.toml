@@ -26,5 +26,9 @@ eframe = { version = "0.37", default-features = false, features = [
     "accesskit", "clipboard", "default_fonts", "links", "system_fonts", "wayland", "x11", "glow",
 ] }
 
+# glow: OpenGL where wgpu finds no adapter (see --renderer)
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-eframe = "0.37"
+eframe = { version = "0.37", features = ["glow"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }

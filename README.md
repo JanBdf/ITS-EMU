@@ -78,6 +78,29 @@ pull-ups; the TIM8_1/TIM8_2 header pins suit TIM8's encoder mode) and
 
 The font table that ITS_BRD_LIB expects in flash at `0x0810_0000` is built in.
 
+### GUI on different systems
+
+- **File dialog.** *Open…* uses the system's file dialog. On Linux that is
+  the XDG desktop portal with a FileChooser backend (`xdg-desktop-portal-gtk`,
+  `-kde` or `-gnome`; the Hyprland and wlroots portals have none), or else
+  `zenity`. Where neither is installed (window managers without a desktop),
+  the GUI shows its own file browser instead; Shift+click on *Open…* or
+  `ITS_EMU_FILE_DIALOG=builtin` opens it directly. Dropping a file onto the window works everywhere except on
+  Wayland, where winit does not support drag and drop yet.
+- **Graphics.** On Linux the GUI draws with OpenGL, which Mesa always
+  provides. On Windows and macOS it uses wgpu (DirectX 12, Metal) and
+  switches to OpenGL when wgpu finds no graphics adapter (virtual machines,
+  remote desktops); there `--renderer gl` chooses OpenGL right away,
+  `--renderer wgpu` never falls back.
+- **Windows.** The release build of `its-emu-gui.exe` opens no console
+  window; started from a terminal it writes its log there.
+- **macOS.** Binaries from the CI are not signed: after unpacking,
+  `chmod +x its-emu its-emu-gui` (the artifact zip loses the permission) and
+  `xattr -d com.apple.quarantine its-emu its-emu-gui`, or Gatekeeper refuses
+  to start them.
+- **Log.** `RUST_LOG=info` (or `debug`) shows more; by default only
+  warnings and errors appear, without the window system's own notices.
+
 ## Debugging with GDB
 
 The GUI starts a GDB server on `127.0.0.1:3333` (`--gdb ADDR` to change,
