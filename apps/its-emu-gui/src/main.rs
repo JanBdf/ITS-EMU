@@ -67,10 +67,11 @@ enum RendererChoice {
 fn main() -> eframe::Result {
     #[cfg(all(windows, not(debug_assertions)))]
     attach_console();
-    // winit warns about things that only concern other applications, such as
-    // X servers without an XSETTINGS daemon (window managers without a desktop);
+    // Hidden: warnings about the desktop that do not affect the emulator, such
+    // as X servers without an XSETTINGS daemon (winit; window managers without
+    // a desktop), no accessibility bus (zbus) or the C locale (font provider);
     // eframe logs the wgpu error that main falls back from (and returns all others)
-    let filter = "warn,winit=error,eframe::native::run=off";
+    let filter = "warn,winit=error,zbus=error,egui_system_font_provider=error,eframe::native::run=off";
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(filter)).init();
     let args = Args::parse();
     if args.renderer == RendererChoice::Gl {
