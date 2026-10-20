@@ -987,6 +987,7 @@ dependencies = [
  "egui-winit",
  "egui_glow",
  "egui_system_font_provider",
+ "glow",
  "glutin",
  "glutin-winit",
  "image",
@@ -1896,6 +1897,7 @@ dependencies = [
  "rfd",
  "stlink",
  "stm32f429",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
