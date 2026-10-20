@@ -1,8 +1,12 @@
 //! Graphical ITS-Board emulator.
 
+// No console window next to the GUI on Windows (debug builds keep it for the log)
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod board;
 mod emu;
+mod files;
 mod pins;
 mod render;
 mod settings;
@@ -11,7 +15,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version, about = "ITS-Board emulator (graphical)")]
 struct Args {
     /// Firmware image (.axf / .elf) to start with
@@ -47,11 +51,51 @@ struct Args {
     /// look of the real panel (darker mid tones, grey black)
     #[arg(long)]
     ideal_colors: bool,
+
+    /// Graphics backend. auto: wgpu (DirectX 12, Metal), and OpenGL where
+    /// wgpu finds no graphics adapter (virtual machines, remote desktops).
+    /// Linux always uses OpenGL
+    #[cfg(not(target_os = "linux"))]
+    #[arg(long, value_enum, default_value_t = RendererChoice::Auto)]
+    renderer: RendererChoice,
+}
+
+#[cfg(not(target_os = "linux"))]
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq)]
+enum RendererChoice {
+    Auto,
+    Wgpu,
+    Gl,
 }
 
 fn main() -> eframe::Result {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    #[cfg(all(windows, not(debug_assertions)))]
+    attach_console();
+    // Hidden: warnings about the desktop that do not affect the emulator, such
+    // as X servers without an XSETTINGS daemon (winit; window managers without
+    // a desktop), no accessibility bus (zbus) or the C locale (font provider);
+    // eframe logs the wgpu error that main falls back from (and returns all others)
+    let filter = "warn,winit=error,zbus=error,egui_system_font_provider=error,eframe::native::run=off";
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(filter)).init();
     let args = Args::parse();
+    #[cfg(target_os = "linux")]
+    return run(args, eframe::Renderer::Glow);
+    #[cfg(not(target_os = "linux"))]
+    {
+        if args.renderer == RendererChoice::Gl {
+            return run(args, eframe::Renderer::Glow);
+        }
+        match run(args.clone(), eframe::Renderer::Wgpu) {
+            Err(eframe::Error::Wgpu(e)) if args.renderer == RendererChoice::Auto => {
+                log::warn!("wgpu: {e}; using OpenGL");
+                run(args, eframe::Renderer::Glow)
+            }
+            result => result,
+        }
+    }
+}
+
+fn run(args: Args, renderer: eframe::Renderer) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("ITS-Board Emulator")
@@ -59,6 +103,7 @@ fn main() -> eframe::Result {
             .with_app_id("its-emu-gui")
             .with_inner_size([1280.0, 1000.0])
             .with_drag_and_drop(true),
+        renderer,
         // dithering adds noise that makes the small print of the board drawing hard to read
         dithering: false,
         ..Default::default()
@@ -77,4 +122,13 @@ fn main() -> eframe::Result {
             Ok(Box::new(app::App::new(cc, args.firmware, gdb, usb, settings, args.ideal_colors)))
         }),
     )
+}
+
+/// Started from a terminal, the GUI (without a console of its own) writes
+/// its help and log there.
+#[cfg(all(windows, not(debug_assertions)))]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // SAFETY: no arguments besides the constant; fails harmlessly without a parent console
+    unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }

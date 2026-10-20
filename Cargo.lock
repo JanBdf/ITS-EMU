@@ -1897,6 +1897,7 @@ dependencies = [
  "rfd",
  "stlink",
  "stm32f429",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
