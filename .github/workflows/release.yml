@@ -69,10 +69,35 @@ jobs:
           path: dist/*.pkg.tar.zst
           if-no-files-found: error
 
+  macos:
+    name: macOS app (${{ matrix.arch }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - { arch: arm64, os: macos-15 }
+          - { arch: x86_64, os: macos-15-intel }
+    steps:
+      # full history: build.sh takes the package version from git
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install rsvg-convert (icon)
+        run: brew install librsvg
+      - name: Build
+        run: packaging/macos/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-macos-${{ matrix.arch }}
+          path: dist/*.dmg
+          if-no-files-found: error
+
   release:
     name: publish release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [arch]
+    needs: [arch, macos]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

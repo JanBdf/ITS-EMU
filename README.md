@@ -23,6 +23,15 @@ Packages are published on the [Releases](https://github.com/JanBdf/ITS-EMU/relea
 | Platform | Package | Install |
 |---|---|---|
 | Arch Linux (x86_64) | `its-emu-<version>-x86_64.pkg.tar.zst` | `sudo pacman -U its-emu-*.pkg.tar.zst` |
+| macOS (Apple silicon / Intel) | `its-emu-<version>-macos-arm64.dmg` / `-x86_64.dmg` | open it, drag *ITS-Board Emulator* to Applications |
+
+The macOS app is signed ad hoc, not by an Apple developer: on the first
+start macOS refuses to open it; then *System Settings → Privacy & Security →
+Open Anyway* (once). The command-line emulator is inside the app:
+`ln -s '/Applications/ITS-Board Emulator.app/Contents/MacOS/its-emu' /usr/local/bin/`.
+The USB ST-LINK is Linux only ([below](#the-boards-st-link-on-usb-linux));
+on macOS debug through the emulator's GDB server ([Debugging with
+GDB](#debugging-with-gdb)).
 
 Packages for other platforms will follow. Until then, build from source
 ([below](#building)); the CI also keeps binaries for Linux, Windows and macOS
@@ -299,6 +308,17 @@ packaging/arch/build.sh
 sudo pacman -U dist/its-emu-<version>-x86_64.pkg.tar.zst   # install or update
 sudo pacman -Rns its-emu                                   # remove
 ```
+
+### macOS app
+
+`packaging/macos/build.sh` builds *ITS-Board Emulator.app* for the Mac's
+architecture and a disk image `dist/its-emu-<version>-macos-<arch>.dmg`
+(needs `rsvg-convert` for the icon: `brew install librsvg`). The app holds
+both programs (`Contents/MacOS`), and the VS Code extension
+(`Contents/Resources/gdbtarget-nodebug.vsix`) with the licenses. It is
+signed ad hoc only (`codesign -s -`), so Gatekeeper asks once before the
+first start ([Installation](#installation)). Removing the app removes
+everything but `~/.config/its-emu/gui.conf`.
 
 ### Releases
 
