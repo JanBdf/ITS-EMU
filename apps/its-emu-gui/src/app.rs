@@ -212,8 +212,9 @@ impl eframe::App for App {
         // ---- toolbar
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("📂 Open…").clicked() {
-                    self.files.open(&ctx);
+                let open = ui.button("📂 Open…").on_hover_text("Shift+click: the emulator's own file browser");
+                if open.clicked() {
+                    self.files.open(&ctx, ui.input(|i| i.modifiers.shift));
                 }
                 if ui.button("⟲ Reset").on_hover_text("RESET button of the Nucleo board").clicked() {
                     self.emu.send(Command::Reset);
@@ -412,11 +413,12 @@ impl eframe::App for App {
             shot.tick(&ctx);
         }
 
-        // Drag & drop of firmware files
+        // Drag & drop of firmware files, file dialog
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
         });
-        if let Some(path) = dropped.into_iter().next().or_else(|| self.files.show(&ctx)) {
+        let picked = self.files.show(&ctx);
+        if let Some(path) = dropped.into_iter().next().or(picked) {
             self.emu.send(Command::Load(path));
         }
     }

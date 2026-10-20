@@ -74,8 +74,8 @@ The font table that ITS_BRD_LIB expects in flash at `0x0810_0000` is built in.
   the XDG desktop portal with a FileChooser backend (`xdg-desktop-portal-gtk`,
   `-kde` or `-gnome`; the Hyprland and wlroots portals have none), or else
   `zenity`. Where neither is installed (window managers without a desktop),
-  the GUI shows its own file browser instead; `ITS_EMU_FILE_DIALOG=builtin`
-  always uses it. Dropping a file onto the window works everywhere except on
+  the GUI shows its own file browser instead; Shift+click on *Open…* or
+  `ITS_EMU_FILE_DIALOG=builtin` opens it directly. Dropping a file onto the window works everywhere except on
   Wayland, where winit does not support drag and drop yet.
 - **Graphics.** The GUI draws with wgpu (Vulkan, Metal, DirectX 12) and
   switches to OpenGL when wgpu finds no graphics adapter (no Vulkan driver,

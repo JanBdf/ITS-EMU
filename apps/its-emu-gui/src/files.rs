@@ -43,11 +43,13 @@ impl FilePicker {
         Self { native, state: State::Idle, last_dir: None }
     }
 
-    pub fn open(&mut self, ctx: &egui::Context) {
+    /// Opens the system's file dialog, or the built-in one (`builtin`, or
+    /// when the system's turned out to show nothing).
+    pub fn open(&mut self, ctx: &egui::Context, builtin: bool) {
         if !matches!(self.state, State::Idle) {
             return;
         }
-        if !self.native {
+        if builtin || !self.native {
             self.state = State::Builtin(Browser::new(self.start_dir()));
             return;
         }
@@ -111,10 +113,11 @@ impl FilePicker {
         self.state = State::Idle;
         match path {
             Some(path) => self.taken(path),
-            None if since.elapsed() < NO_DIALOG => {
+            // Windows and macOS always have one
+            None if cfg!(target_os = "linux") && since.elapsed() < NO_DIALOG => {
                 log::warn!(
-                    "the system file dialog did not open (on Linux it needs xdg-desktop-portal with a \
-                     FileChooser backend such as xdg-desktop-portal-gtk, or zenity); using the built-in one"
+                    "the system file dialog did not open (it needs xdg-desktop-portal with a FileChooser \
+                     backend such as xdg-desktop-portal-gtk, or zenity); using the built-in one"
                 );
                 self.native = false;
                 self.state = State::Builtin(Browser::new(self.start_dir()));
@@ -156,6 +159,9 @@ struct Browser {
     error: Option<String>,
     selected: Option<usize>,
     all_files: bool,
+    /// Drive letters (Windows); looked up once, a disconnected network
+    /// drive can take seconds to answer.
+    drives: Vec<String>,
 }
 
 impl Browser {
@@ -167,6 +173,11 @@ impl Browser {
             error: None,
             selected: None,
             all_files: false,
+            drives: if cfg!(windows) {
+                (b'A'..=b'Z').map(|d| format!("{}:\\", d as char)).filter(|r| Path::new(r).exists()).collect()
+            } else {
+                Vec::new()
+            },
         };
         b.go(dir);
         b
@@ -224,10 +235,8 @@ impl Browser {
                     {
                         go_to = Some(home);
                     }
-                    #[cfg(windows)]
-                    for drive in b'A'..=b'Z' {
-                        let root = format!("{}:\\", drive as char);
-                        if Path::new(&root).exists() && ui.button(&root[..2]).clicked() {
+                    for root in &self.drives {
+                        if ui.button(&root[..2]).clicked() {
                             go_to = Some(root.into());
                         }
                     }
