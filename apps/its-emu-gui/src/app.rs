@@ -213,7 +213,6 @@ impl App {
             }
         }
     }
-
 }
 
 impl eframe::App for App {
@@ -293,9 +292,9 @@ impl eframe::App for App {
         // ---- toolbar
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                let open = ui
-                    .button("📂 Open…")
-                    .on_hover_text("Open a firmware file (.axf) · Ctrl+O\nShift+click: the emulator's own file browser");
+                let open = ui.button("📂 Open…").on_hover_text(
+                    "Open a firmware file (.axf) · Ctrl+O\nShift+click: the emulator's own file browser",
+                );
                 if open.clicked() {
                     self.files.open(&ctx, ui.input(|i| i.modifiers.shift));
                 }
