@@ -39,11 +39,18 @@ impl Bits {
             *w &= !(1 << (n % 32));
         }
     }
+    /// The set bits in ascending order.
     fn iter(&self) -> impl Iterator<Item = u32> + '_ {
-        self.0
-            .iter()
-            .enumerate()
-            .flat_map(|(i, &w)| (0..32).filter(move |b| w & (1 << b) != 0).map(move |b| i as u32 * 32 + b))
+        self.0.iter().enumerate().flat_map(|(i, &w)| {
+            let mut rest = w;
+            std::iter::from_fn(move || {
+                (rest != 0).then(|| {
+                    let b = rest.trailing_zeros();
+                    rest &= rest - 1;
+                    i as u32 * 32 + b
+                })
+            })
+        })
     }
     fn any(&self) -> bool {
         self.0.iter().any(|&w| w != 0)
@@ -155,6 +162,7 @@ impl Nvic {
     /// asserted line pends it again.
     /// Sets the request of source `src` (0..8) of a shared interrupt line; the
     /// line is high while any of its sources requests.
+    #[inline]
     pub fn set_irq_source(&mut self, irq: u32, src: u8, high: bool) {
         let Some(s) = self.sources.get_mut(irq as usize) else { return };
         if high {
@@ -166,6 +174,7 @@ impl Nvic {
         self.set_irq_level(irq, level);
     }
 
+    #[inline]
     pub fn set_irq_level(&mut self, irq: u32, high: bool) {
         if irq >= NUM_IRQS {
             return;

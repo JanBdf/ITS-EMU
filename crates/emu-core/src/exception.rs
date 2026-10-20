@@ -135,7 +135,11 @@ pub fn enter<C: CoreAccess>(
     // Update the stack pointer that was used for stacking, then switch to MSP
     // while still in thread mode (SPSEL writes are ignored in handler mode).
     core.set_reg(CoreReg::Sp, frame);
-    core.set_reg(CoreReg::Control, control & !(CONTROL_SPSEL | CONTROL_FPCA));
+    let new_control = control & !(CONTROL_SPSEL | CONTROL_FPCA);
+    // (Unchanged without an RTOS or an FP context: the write would only cost.)
+    if new_control != control {
+        core.set_reg(CoreReg::Control, new_control);
+    }
     // Enter handler mode: IPSR = exc, clear IT bits, keep flags.
     core.set_reg(CoreReg::Xpsr, (xpsr & 0xF80F_0000) | XPSR_T | exc);
     core.set_reg(CoreReg::Lr, exc_return);
@@ -182,14 +186,17 @@ pub fn exit<C: CoreAccess>(core: &mut C, nvic: &mut Nvic, exc_return: u32) -> Re
     }
     // Leave handler mode first, then select the thread stack pointer.
     core.set_reg(CoreReg::Xpsr, (stacked_xpsr & XPSR_RESTORE_MASK & !XPSR_IPSR_MASK) | XPSR_T | ipsr);
-    let mut control = core.reg(CoreReg::Control) & !(CONTROL_SPSEL | CONTROL_FPCA);
+    let old_control = core.reg(CoreReg::Control);
+    let mut control = old_control & !(CONTROL_SPSEL | CONTROL_FPCA);
     if to_thread && use_psp {
         control |= CONTROL_SPSEL;
     }
     if fp_frame {
         control |= CONTROL_FPCA;
     }
-    core.set_reg(CoreReg::Control, control);
+    if control != old_control {
+        core.set_reg(CoreReg::Control, control);
+    }
     core.set_reg(CoreReg::Sp, new_sp);
 
     for (i, r) in [0u8, 1, 2, 3, 12].iter().enumerate() {

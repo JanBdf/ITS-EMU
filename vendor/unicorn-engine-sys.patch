@@ -1,0 +1,860 @@
+--- a/build.rs
++++ b/build.rs
+@@ -153,13 +153,10 @@
+ 
+ fn watch_source_files() {
+     let current_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+-    let project_root = std::path::Path::new(&current_dir)
+-        .parent()
+-        .unwrap()
+-        .parent()
+-        .unwrap()
+-        .parent()
+-        .unwrap();
++    // ITS-EMU: the sources are in the crate itself (the original goes three
++    // levels up, to the Unicorn repository; there the paths do not exist, so
++    // the build script ran on every build).
++    let project_root = std::path::Path::new(&current_dir);
+ 
+     println!(
+         "cargo:rerun-if-changed={}",
+--- a/include/uc_priv.h
++++ b/include/uc_priv.h
+@@ -394,6 +394,19 @@
+     int thumb; // thumb mode for ARM
+     MemoryRegion **mapped_blocks;
+     uint32_t mapped_block_count;
++    // ITS-EMU: write tracking for idle detection (uc_its_track_writes): the
++    // callback gets the address of the first store to a RAM page after
++    // uc_its_rearm_writes (and of every store to pages with code).
++    void (*its_first_write)(void *opaque, uint64_t paddr);
++    void *its_first_write_opaque;
++    void (*its_rearm_writes)(struct uc_struct *uc);
++    // ITS-EMU: find_memory_mapping results per 1 KiB page, valid while
++    // address_space_memory.generation is unchanged.
++    struct uc_mapping_cache_entry {
++        uint64_t page;
++        unsigned generation;
++        MemoryRegion *mr;
++    } mapping_cache[256];
+     uint32_t mapped_block_cache_index;
+     void *qemu_thread_data; // to support cross compile to Windows
+                             // (qemu-thread-win32.c)
+--- a/qemu/accel/tcg/cpu-exec.c
++++ b/qemu/accel/tcg/cpu-exec.c
+@@ -75,7 +75,9 @@
+          * of the start of the TB.
+          */
+         CPUClass *cc = CPU_GET_CLASS(cpu);
+-        if (!HOOK_EXISTS(env->uc, UC_HOOK_CODE)) {
++        // ITS-EMU: TB_EXIT_REQUESTED comes from the exit check at the start
++        // of the TB (gen_tb_start), before any instruction synced the PC.
++        if (tb_exit == TB_EXIT_REQUESTED || !HOOK_EXISTS(env->uc, UC_HOOK_CODE)) {
+             // We should sync pc for R/W error.
+             switch (env->uc->invalid_error) {
+                 case UC_ERR_WRITE_PROT:
+--- a/qemu/accel/tcg/cputlb.c
++++ b/qemu/accel/tcg/cputlb.c
+@@ -718,6 +718,34 @@
+     }
+ }
+ 
++/* ITS-EMU: the next store to each RAM page in the TLB of the current MMU
++ * index goes through notdirty_write again (uc_its_rearm_writes). Within one
++ * observation period of the idle detection the index does not change
++ * (exceptions and MSR end it), and the unprivileged stores (STRT, ...),
++ * which use another one, count as side effects there. */
++static void its_rearm_writes(struct uc_struct *uc)
++{
++    CPUState *cpu = uc->cpu;
++    CPUArchState *env = cpu->env_ptr;
++    int mmu_idx = cpu_mmu_index(env, false);
++    unsigned int i;
++    unsigned int n = tlb_n_entries(&env_tlb(env)->f[mmu_idx]);
++
++    for (i = 0; i < n; i++) {
++        tlb_reset_dirty_range_locked(uc, &env_tlb(env)->f[mmu_idx].table[i],
++                                     0, UINTPTR_MAX);
++    }
++    for (i = 0; i < CPU_VTLB_SIZE; i++) {
++        tlb_reset_dirty_range_locked(uc, &env_tlb(env)->d[mmu_idx].vtable[i],
++                                     0, UINTPTR_MAX);
++    }
++}
++
++void its_init_write_tracking(struct uc_struct *uc)
++{
++    uc->its_rearm_writes = its_rearm_writes;
++}
++
+ void tlb_reset_dirty_by_vaddr(CPUState *cpu, target_ulong start1, target_ulong length)
+ {
+     struct uc_struct *uc = cpu->uc;
+@@ -1013,19 +1041,19 @@
+ #endif
+ }
+ 
+-static uint64_t io_readx(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
+-                         int mmu_idx, target_ulong addr, uintptr_t retaddr,
+-                         MMUAccessType access_type, MemOp op)
++/* ITS-EMU: io_readx with the section already looked up */
++static uint64_t io_readx_section(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
++                                 MemoryRegionSection *section,
++                                 int mmu_idx, target_ulong addr, uintptr_t retaddr,
++                                 MMUAccessType access_type, MemOp op)
+ {
+     CPUState *cpu = env_cpu(env);
+     struct uc_struct *uc = cpu->uc;
+     hwaddr mr_offset;
+-    MemoryRegionSection *section;
+     MemoryRegion *mr;
+     uint64_t val;
+     MemTxResult r;
+ 
+-    section = iotlb_to_section(cpu, iotlbentry->addr, iotlbentry->attrs);
+     mr = section->mr;
+     mr_offset = (iotlbentry->addr & TARGET_PAGE_MASK) + addr;
+     cpu->mem_io_pc = retaddr;
+@@ -1033,6 +1061,9 @@
+         cpu_io_recompile(cpu, retaddr);
+     }
+ 
++    if (uc_its_mmio_read(uc, mr, mr_offset, op, &val)) {
++        return val;
++    }
+     r = memory_region_dispatch_read(uc, mr, mr_offset, &val, op, iotlbentry->attrs);
+     if (r != MEMTX_OK) {
+ #if 0
+@@ -1048,18 +1079,28 @@
+     return val;
+ }
+ 
+-static void io_writex(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
+-                      int mmu_idx, uint64_t val, target_ulong addr,
+-                      uintptr_t retaddr, MemOp op)
++static uint64_t io_readx(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
++                         int mmu_idx, target_ulong addr, uintptr_t retaddr,
++                         MMUAccessType access_type, MemOp op)
++{
++    MemoryRegionSection *section =
++        iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
++    return io_readx_section(env, iotlbentry, section, mmu_idx, addr, retaddr,
++                            access_type, op);
++}
++
++/* ITS-EMU: io_writex with the section already looked up */
++static void io_writex_section(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
++                              MemoryRegionSection *section,
++                              int mmu_idx, uint64_t val, target_ulong addr,
++                              uintptr_t retaddr, MemOp op)
+ {
+     CPUState *cpu = env_cpu(env);
+     struct uc_struct *uc = env->uc;
+     hwaddr mr_offset;
+-    MemoryRegionSection *section;
+     MemoryRegion *mr;
+     MemTxResult r;
+ 
+-    section = iotlb_to_section(cpu, iotlbentry->addr, iotlbentry->attrs);
+     mr = section->mr;
+     mr_offset = (iotlbentry->addr & TARGET_PAGE_MASK) + addr;
+     if (!cpu->can_do_io) {
+@@ -1067,6 +1108,9 @@
+     }
+     cpu->mem_io_pc = retaddr;
+ 
++    if (uc_its_mmio_write(uc, mr, mr_offset, val, op)) {
++        return;
++    }
+     r = memory_region_dispatch_write(uc, mr, mr_offset, val, op, iotlbentry->attrs);
+     if (r != MEMTX_OK) {
+ #if 0
+@@ -1081,6 +1125,15 @@
+     }
+ }
+ 
++static void io_writex(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
++                      int mmu_idx, uint64_t val, target_ulong addr,
++                      uintptr_t retaddr, MemOp op)
++{
++    MemoryRegionSection *section =
++        iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
++    io_writex_section(env, iotlbentry, section, mmu_idx, val, addr, retaddr, op);
++}
++
+ static inline target_ulong tlb_read_ofs(CPUTLBEntry *entry, size_t ofs)
+ {
+ #if TCG_OVERSIZED_GUEST
+@@ -1196,6 +1249,12 @@
+     ram_addr_t ram_addr = mem_vaddr + iotlbentry->addr;
+     MemoryRegion *mr = cpu->uc->memory_mapping(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK));
+ 
++    /* ITS-EMU: before the store changes the page (see uc_its_track_writes) */
++    if (cpu->uc->its_first_write) {
++        cpu->uc->its_first_write(cpu->uc->its_first_write_opaque,
++                                 tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK));
++    }
++
+     if (mr && (mr->perms & UC_PROT_EXEC) != 0) {
+         struct page_collection *pages
+             = page_collection_lock(cpu->uc, ram_addr, ram_addr + size);
+@@ -1552,6 +1611,22 @@
+         tlb_addr &= ~TLB_INVALID_MASK;
+     }
+ 
++    /* ITS-EMU: an aligned read of a readable MMIO region without memory
++     * hooks goes straight to the device, which is where the code below ends
++     * up after looking up the region and scanning the (empty) hook lists. */
++    if ((tlb_addr & (TLB_MMIO | TLB_WATCHPOINT | TLB_BSWAP)) == TLB_MMIO &&
++        !code_read && !(addr & (size - 1)) &&
++        !HOOK_EXISTS(uc, UC_HOOK_MEM_READ) &&
++        !HOOK_EXISTS(uc, UC_HOOK_MEM_READ_AFTER)) {
++        CPUIOTLBEntry *iotlbentry = &env_tlb(env)->d[mmu_idx].iotlb[index];
++        MemoryRegionSection *section =
++            iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
++        if (section->mr->perms & UC_PROT_READ) {
++            return io_readx_section(env, iotlbentry, section, mmu_idx, addr,
++                                    retaddr, access_type, op);
++        }
++    }
++
+     paddr = entry->paddr | (addr & ~TARGET_PAGE_MASK);
+     mr = uc->memory_mapping(uc, paddr);
+ 
+@@ -2190,6 +2265,20 @@
+         tlb_addr = tlb_addr_write(entry) & ~TLB_INVALID_MASK;
+     }
+ 
++    /* ITS-EMU: likewise for an aligned write to a writable MMIO region
++     * (see load_helper). */
++    if ((tlb_addr & (TLB_MMIO | TLB_WATCHPOINT | TLB_BSWAP)) == TLB_MMIO &&
++        !(addr & (size - 1)) && !HOOK_EXISTS(uc, UC_HOOK_MEM_WRITE)) {
++        CPUIOTLBEntry *iotlbentry = &env_tlb(env)->d[mmu_idx].iotlb[index];
++        MemoryRegionSection *section =
++            iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
++        if ((section->mr->perms & UC_PROT_WRITE) && !section->mr->ram) {
++            io_writex_section(env, iotlbentry, section, mmu_idx, val, addr,
++                              retaddr, op);
++            return;
++        }
++    }
++
+     // Load the latest memory mapping.
+     paddr = entry->paddr | (addr & ~TARGET_PAGE_MASK);
+     mr = uc->memory_mapping(uc, paddr);
+@@ -2240,6 +2329,9 @@
+             uc->invalid_error = UC_ERR_WRITE_UNMAPPED;
+             // printf("***** Invalid memory write at " TARGET_FMT_lx "\n", addr);
+             cpu_exit(uc->cpu);
++            if (uc->nested_level > 0 && !uc->cpu->stopped) {
++                cpu_loop_exit_restore(uc->cpu, retaddr);
++            }
+             return;
+         } else {
+             uc->invalid_error = UC_ERR_OK;
+@@ -2259,6 +2351,9 @@
+             if (mr == NULL) {
+                 uc->invalid_error = UC_ERR_MAP;
+                 cpu_exit(uc->cpu);
++                if (uc->nested_level > 0 && !uc->cpu->stopped) {
++                    cpu_loop_exit_restore(uc->cpu, retaddr);
++                }
+                 return;
+             }
+         }
+@@ -2305,6 +2400,9 @@
+             uc->invalid_error = UC_ERR_WRITE_PROT;
+             // printf("***** Invalid memory write (ro) at " TARGET_FMT_lx "\n", addr);
+             cpu_exit(uc->cpu);
++            if (uc->nested_level > 0 && !uc->cpu->stopped) {
++                cpu_loop_exit_restore(uc->cpu, retaddr);
++            }
+             return;
+         }
+     }
+@@ -2315,6 +2413,9 @@
+             uc->invalid_addr = paddr;
+             uc->invalid_error = UC_ERR_NOMEM;
+             cpu_exit(uc->cpu);
++            if (uc->nested_level > 0 && !uc->cpu->stopped) {
++                cpu_loop_exit_restore(uc->cpu, retaddr);
++            }
+             return;
+         }
+         /* refill tlb after CoW */
+--- a/qemu/exec-vary.c
++++ b/qemu/exec-vary.c
+@@ -74,6 +74,13 @@
+     }
+     uc->init_target_page->mask = ((target_ulong)-1) << uc->init_target_page->bits;
+     uc->init_target_page->decided = true;
++#ifdef TARGET_PAGE_BITS_FIXED
++    if (uc->init_target_page->bits != TARGET_PAGE_BITS_FIXED) {
++        fprintf(stderr, "unicorn: page size fixed at %d bits in this build\n",
++                TARGET_PAGE_BITS_FIXED);
++        abort();
++    }
++#endif
+ 
+     /*
+      * For the benefit of an -flto build, prevent the compiler from
+--- a/qemu/include/exec/cpu-all.h
++++ b/qemu/include/exec/cpu-all.h
+@@ -230,6 +230,12 @@
+ #ifdef CONFIG_DEBUG_TCG
+ #define TARGET_PAGE_BITS   ({ assert(target_page.decided); target_page.bits; })
+ #define TARGET_PAGE_MASK   ({ assert(target_page.decided); target_page.mask; })
++#elif defined(TARGET_PAGE_BITS_FIXED)
++/* ITS-EMU: see cpu-param.h; finalize_target_page_bits checks it. `uc` is in
++ * scope wherever the variable-size macros below are used: mention it so that
++ * those locals do not become unused. */
++#define TARGET_PAGE_BITS   ((void)uc, TARGET_PAGE_BITS_FIXED)
++#define TARGET_PAGE_MASK   ((void)uc, (target_long)((target_ulong)-1 << TARGET_PAGE_BITS_FIXED))
+ #else
+ #define TARGET_PAGE_BITS   uc->init_target_page->bits
+ #define TARGET_PAGE_MASK   uc->init_target_page->mask
+--- a/qemu/include/exec/cpu-defs.h
++++ b/qemu/include/exec/cpu-defs.h
+@@ -85,6 +85,18 @@
+ #define CPU_TLB_DYN_MIN_BITS 6
+ #define CPU_TLB_DYN_DEFAULT_BITS 8
+ 
++/*
++ * ITS-EMU: the TLB is direct mapped; with the plain page number as index,
++ * the first pages of flash (0x0800_0000), SRAM (0x2000_0000) and the
++ * peripherals share entries and evict each other on every alternating
++ * access (both then take the slow path). Folding higher address bits into
++ * the index separates them. Only for 64-bit x86 hosts, whose TCG backend
++ * computes the index the same way (tcg_out_tlb_load).
++ */
++#if defined(__x86_64__) || defined(_M_X64)
++#define TLB_INDEX_FOLD 14
++#endif
++
+ # if HOST_LONG_BITS == 32
+ /* Make sure we do not require a double-word shift for the TLB load */
+ #  define CPU_TLB_DYN_MAX_BITS (32 - TARGET_PAGE_BITS)
+--- a/qemu/include/exec/cpu_ldst.h
++++ b/qemu/include/exec/cpu_ldst.h
+@@ -103,6 +103,10 @@
+ #endif
+     uintptr_t size_mask = env_tlb(env)->f[mmu_idx].mask >> CPU_TLB_ENTRY_BITS;
+ 
++#ifdef TLB_INDEX_FOLD
++    /* ITS-EMU: see TLB_INDEX_FOLD */
++    addr ^= addr >> TLB_INDEX_FOLD;
++#endif
+     return (addr >> TARGET_PAGE_BITS) & size_mask;
+ }
+ 
+--- a/qemu/include/exec/gen-icount.h
++++ b/qemu/include/exec/gen-icount.h
+@@ -32,6 +32,22 @@
+ 
+ static inline void gen_tb_start(TCGContext *tcg_ctx, TranslationBlock *tb)
+ {
++    // ITS-EMU: without a delay slot, test the exit request inline as QEMU
++    // does instead of calling a helper (which syncs all globals) per TB.
++    // An exit leaves before the first instruction with TB_EXIT_REQUESTED;
++    // cpu_tb_exec then sets the PC to the TB's start.
++    if (tcg_ctx->delay_slot_flag == NULL) {
++        TCGv_i32 count = tcg_temp_new_i32(tcg_ctx);
++        tcg_gen_ld_i32(tcg_ctx, count, tcg_ctx->cpu_env,
++                       offsetof(ArchCPU, neg.icount_decr.u32) -
++                       offsetof(ArchCPU, env));
++        tcg_ctx->exitreq_label = gen_new_label(tcg_ctx);
++        tcg_gen_brcondi_i32(tcg_ctx, TCG_COND_LT, count, 0, tcg_ctx->exitreq_label);
++        tcg_temp_free_i32(tcg_ctx, count);
++        return;
++    }
++    tcg_ctx->exitreq_label = NULL;
++
+     TCGv_ptr puc = tcg_const_ptr(tcg_ctx, tcg_ctx->uc);
+     TCGv_i32 tmp = tcg_const_i32(tcg_ctx, 0);
+     // Unicorn:
+@@ -57,6 +73,10 @@
+         tcg_set_insn_param(tcg_ctx->icount_start_insn, 1, num_insns);
+     }
+ 
++    if (tcg_ctx->exitreq_label) {
++        gen_set_label(tcg_ctx, tcg_ctx->exitreq_label);
++        tcg_ctx->exitreq_label = NULL;
++    }
+     tcg_gen_exit_tb(tcg_ctx, tb, TB_EXIT_REQUESTED);
+ }
+ 
+--- a/qemu/include/exec/memory.h
++++ b/qemu/include/exec/memory.h
+@@ -425,6 +425,8 @@
+ 
+     /* Accessed via RCU.  */
+     struct FlatView *current_map;
++    /* ITS-EMU: incremented whenever current_map changes. */
++    unsigned generation;
+ 
+     QTAILQ_HEAD(, MemoryListener) listeners;
+     QTAILQ_ENTRY(AddressSpace) address_spaces_link;
+@@ -1193,6 +1195,12 @@
+ 
+ #ifdef NEED_CPU_H
+ /* enum device_endian to MemOp.  */
++/* ITS-EMU: see softmmu/memory.c */
++bool uc_its_mmio_read(struct uc_struct *uc, MemoryRegion *mr, hwaddr addr,
++                      MemOp op, uint64_t *val);
++bool uc_its_mmio_write(struct uc_struct *uc, MemoryRegion *mr, hwaddr addr,
++                       uint64_t val, MemOp op);
++
+ static inline MemOp devend_memop(enum device_endian end)
+ {
+     QEMU_BUILD_BUG_ON(DEVICE_HOST_ENDIAN != DEVICE_LITTLE_ENDIAN &&
+--- a/qemu/include/tcg/tcg.h
++++ b/qemu/include/tcg/tcg.h
+@@ -672,6 +672,8 @@
+ #endif
+ 
+     TCGv_i32 delay_slot_flag;
++    /* ITS-EMU: target of the exit request check at the start of a TB. */
++    TCGLabel *exitreq_label;
+ 
+     TCGTempSet free_temps[TCG_TYPE_COUNT * 2];
+     TCGTemp temps[TCG_MAX_TEMPS]; /* globals first, temps after */
+--- a/qemu/softmmu/memory.c
++++ b/qemu/softmmu/memory.c
+@@ -152,6 +152,36 @@
+     }
+ }
+ 
++/* ITS-EMU: an aligned access of at most 4 bytes to a Unicorn MMIO region is
++ * one call of its callback, with the value masked to the access size: what
++ * memory_region_dispatch_read/write end up doing (no size adjustment, no byte
++ * swap). False for other regions and accesses. */
++bool uc_its_mmio_read(struct uc_struct *uc, MemoryRegion *mr, hwaddr addr,
++                      MemOp op, uint64_t *val)
++{
++    unsigned size = memop_size(op);
++
++    if (mr->ops->read != mmio_read_wrapper || size > 4 || (op & MO_BSWAP) ||
++        (addr & (size - 1))) {
++        return false;
++    }
++    *val = mmio_read_wrapper(uc, mr->opaque, addr, size) & MAKE_64BIT_MASK(0, size * 8);
++    return true;
++}
++
++bool uc_its_mmio_write(struct uc_struct *uc, MemoryRegion *mr, hwaddr addr,
++                       uint64_t val, MemOp op)
++{
++    unsigned size = memop_size(op);
++
++    if (mr->ops->write != mmio_write_wrapper || size > 4 || (op & MO_BSWAP) ||
++        (addr & (size - 1))) {
++        return false;
++    }
++    mmio_write_wrapper(uc, mr->opaque, addr, val & MAKE_64BIT_MASK(0, size * 8), size);
++    return true;
++}
++
+ static void mmio_region_destructor_uc(MemoryRegion *mr)
+ {
+     g_free(mr->opaque);
+@@ -1041,6 +1071,7 @@
+     }
+ 
+     as->current_map = new_view;
++    as->generation++;
+     if (old_view) {
+         flatview_unref(old_view);
+     }
+@@ -1531,6 +1562,7 @@
+     as->uc = uc;
+     as->root = root;
+     as->current_map = NULL;
++    as->generation++;
+     QTAILQ_INIT(&as->listeners);
+     QTAILQ_INSERT_TAIL(&uc->address_spaces, as, address_spaces_link);
+     address_space_update_topology(as);
+--- a/qemu/target/arm/cpu.c
++++ b/qemu/target/arm/cpu.c
+@@ -2111,7 +2111,12 @@
+ 
+ #if !defined(TARGET_AARCH64)
+     if (uc->mode & UC_MODE_MCLASS) {
+-        uc->cpu_model = UC_CPU_ARM_CORTEX_M33;
++        // ITS-EMU: keep an M-profile model set with UC_CTL_CPU_MODEL instead
++        // of always making a Cortex-M33 (ARMv8-M with Security Extension).
++        if (uc->cpu_model < UC_CPU_ARM_CORTEX_M0 ||
++            uc->cpu_model > UC_CPU_ARM_CORTEX_M33) {
++            uc->cpu_model = UC_CPU_ARM_CORTEX_M33;
++        }
+     } else if (uc->mode & UC_MODE_ARM926) {
+         uc->cpu_model = UC_CPU_ARM_926;
+     } else if (uc->mode & UC_MODE_ARM946) {
+--- a/qemu/target/arm/cpu.h
++++ b/qemu/target/arm/cpu.h
+@@ -3240,8 +3240,6 @@
+     return sctlr_b;
+ }
+ 
+-void cpu_get_tb_cpu_state(CPUARMState *env, target_ulong *pc,
+-                          target_ulong *cs_base, uint32_t *flags);
+ 
+ enum {
+     QEMU_PSCI_CONDUIT_DISABLED = 0,
+@@ -3787,4 +3785,88 @@
+  */
+ #define cpu_isar_feature(name, cpu) isar_feature_##name(&cpu->isar)
+ 
++/* ITS-EMU: inline (from helper.c): every TB lookup calls it. */
++static inline void cpu_get_tb_cpu_state(CPUARMState *env, target_ulong *pc,
++                                        target_ulong *cs_base, uint32_t *pflags)
++{
++    /* CONTROL.FPCA and CONTROL.SFPA (internals.h is not visible here) */
++    const uint32_t control_fpca = 1u << 2, control_sfpa = 1u << 3;
++    uint32_t flags = env->hflags;
++    uint32_t pstate_for_ss;
++
++    *cs_base = 0;
++
++    if (FIELD_EX32(flags, TBFLAG_ANY, AARCH64_STATE)) {
++        *pc = env->pc;
++        if (cpu_isar_feature(aa64_bti, env_archcpu(env))) {
++            FIELD_DP32(flags, TBFLAG_A64, BTYPE, env->btype, flags);
++        }
++        pstate_for_ss = env->pstate;
++    } else {
++        *pc = env->regs[15];
++
++        if (arm_feature(env, ARM_FEATURE_M)) {
++            if (arm_feature(env, ARM_FEATURE_M_SECURITY) &&
++                FIELD_EX32(env->v7m.fpccr[M_REG_S], V7M_FPCCR, S)
++                != env->v7m.secure) {
++                FIELD_DP32(flags, TBFLAG_M32, FPCCR_S_WRONG, 1, flags);
++            }
++
++            if ((env->v7m.fpccr[env->v7m.secure] & R_V7M_FPCCR_ASPEN_MASK) &&
++                (!(env->v7m.control[M_REG_S] & control_fpca) ||
++                 (env->v7m.secure &&
++                  !(env->v7m.control[M_REG_S] & control_sfpa)))) {
++                /*
++                 * ASPEN is set, but FPCA/SFPA indicate that there is no
++                 * active FP context; we must create a new FP context before
++                 * executing any FP insn.
++                 */
++                FIELD_DP32(flags, TBFLAG_M32, NEW_FP_CTXT_NEEDED, 1, flags);
++            }
++
++            bool is_secure = env->v7m.fpccr[M_REG_S] & R_V7M_FPCCR_S_MASK;
++            if (env->v7m.fpccr[is_secure] & R_V7M_FPCCR_LSPACT_MASK) {
++                FIELD_DP32(flags, TBFLAG_M32, LSPACT, 1, flags);
++            }
++        } else {
++            /*
++             * Note that XSCALE_CPAR shares bits with VECSTRIDE.
++             * Note that VECLEN+VECSTRIDE are RES0 for M-profile.
++             */
++            if (arm_feature(env, ARM_FEATURE_XSCALE)) {
++                FIELD_DP32(flags, TBFLAG_A32,
++                                   XSCALE_CPAR, env->cp15.c15_cpar, flags);
++            } else {
++                FIELD_DP32(flags, TBFLAG_A32, VECLEN,
++                                   env->vfp.vec_len, flags);
++                FIELD_DP32(flags, TBFLAG_A32, VECSTRIDE,
++                                   env->vfp.vec_stride, flags);
++            }
++            if (env->vfp.xregs[ARM_VFP_FPEXC] & (1 << 30)) {
++                FIELD_DP32(flags, TBFLAG_A32, VFPEN, 1, flags);
++            }
++        }
++
++        FIELD_DP32(flags, TBFLAG_AM32, THUMB, env->thumb, flags);
++        FIELD_DP32(flags, TBFLAG_AM32, CONDEXEC, env->condexec_bits, flags);
++        pstate_for_ss = env->uncached_cpsr;
++    }
++
++    /*
++     * The SS_ACTIVE and PSTATE_SS bits correspond to the state machine
++     * states defined in the ARM ARM for software singlestep:
++     *  SS_ACTIVE   PSTATE.SS   State
++     *     0            x       Inactive (the TB flag for SS is always 0)
++     *     1            0       Active-pending
++     *     1            1       Active-not-pending
++     * SS_ACTIVE is set in hflags; PSTATE_SS is computed every TB.
++     */
++    if (FIELD_EX32(flags, TBFLAG_ANY, SS_ACTIVE) &&
++        (pstate_for_ss & PSTATE_SS)) {
++        FIELD_DP32(flags, TBFLAG_ANY, PSTATE_SS, 1, flags);
++    }
++
++    *pflags = flags;
++}
++
+ #endif
+--- a/qemu/target/arm/cpu-param.h
++++ b/qemu/target/arm/cpu-param.h
+@@ -24,6 +24,12 @@
+  */
+ # define TARGET_PAGE_BITS_VARY
+ # define TARGET_PAGE_BITS_MIN  10
++/*
++ * ITS-EMU: the page size is never changed (UC_CTL_UC_PAGE_SIZE is not used):
++ * a constant saves loading it through uc->init_target_page in every TB
++ * lookup, TLB index and page mask.
++ */
++# define TARGET_PAGE_BITS_FIXED 10
+ 
+ #define NB_MMU_MODES 12
+ 
+--- a/qemu/target/arm/helper.c
++++ b/qemu/target/arm/helper.c
+@@ -11804,87 +11804,8 @@
+ #endif
+ }
+ 
+-void cpu_get_tb_cpu_state(CPUARMState *env, target_ulong *pc,
+-                          target_ulong *cs_base, uint32_t *pflags)
+-{
+-    uint32_t flags = env->hflags;
+-    uint32_t pstate_for_ss;
+-
+-    *cs_base = 0;
+-    assert_hflags_rebuild_correctly(env);
+-
+-    if (FIELD_EX32(flags, TBFLAG_ANY, AARCH64_STATE)) {
+-        *pc = env->pc;
+-        if (cpu_isar_feature(aa64_bti, env_archcpu(env))) {
+-            FIELD_DP32(flags, TBFLAG_A64, BTYPE, env->btype, flags);
+-        }
+-        pstate_for_ss = env->pstate;
+-    } else {
+-        *pc = env->regs[15];
+-
+-        if (arm_feature(env, ARM_FEATURE_M)) {
+-            if (arm_feature(env, ARM_FEATURE_M_SECURITY) &&
+-                FIELD_EX32(env->v7m.fpccr[M_REG_S], V7M_FPCCR, S)
+-                != env->v7m.secure) {
+-                FIELD_DP32(flags, TBFLAG_M32, FPCCR_S_WRONG, 1, flags);
+-            }
+-
+-            if ((env->v7m.fpccr[env->v7m.secure] & R_V7M_FPCCR_ASPEN_MASK) &&
+-                (!(env->v7m.control[M_REG_S] & R_V7M_CONTROL_FPCA_MASK) ||
+-                 (env->v7m.secure &&
+-                  !(env->v7m.control[M_REG_S] & R_V7M_CONTROL_SFPA_MASK)))) {
+-                /*
+-                 * ASPEN is set, but FPCA/SFPA indicate that there is no
+-                 * active FP context; we must create a new FP context before
+-                 * executing any FP insn.
+-                 */
+-                FIELD_DP32(flags, TBFLAG_M32, NEW_FP_CTXT_NEEDED, 1, flags);
+-            }
+-
+-            bool is_secure = env->v7m.fpccr[M_REG_S] & R_V7M_FPCCR_S_MASK;
+-            if (env->v7m.fpccr[is_secure] & R_V7M_FPCCR_LSPACT_MASK) {
+-                FIELD_DP32(flags, TBFLAG_M32, LSPACT, 1, flags);
+-            }
+-        } else {
+-            /*
+-             * Note that XSCALE_CPAR shares bits with VECSTRIDE.
+-             * Note that VECLEN+VECSTRIDE are RES0 for M-profile.
+-             */
+-            if (arm_feature(env, ARM_FEATURE_XSCALE)) {
+-                FIELD_DP32(flags, TBFLAG_A32,
+-                                   XSCALE_CPAR, env->cp15.c15_cpar, flags);
+-            } else {
+-                FIELD_DP32(flags, TBFLAG_A32, VECLEN,
+-                                   env->vfp.vec_len, flags);
+-                FIELD_DP32(flags, TBFLAG_A32, VECSTRIDE,
+-                                   env->vfp.vec_stride, flags);
+-            }
+-            if (env->vfp.xregs[ARM_VFP_FPEXC] & (1 << 30)) {
+-                FIELD_DP32(flags, TBFLAG_A32, VFPEN, 1, flags);
+-            }
+-        }
+-
+-        FIELD_DP32(flags, TBFLAG_AM32, THUMB, env->thumb, flags);
+-        FIELD_DP32(flags, TBFLAG_AM32, CONDEXEC, env->condexec_bits, flags);
+-        pstate_for_ss = env->uncached_cpsr;
+-    }
+-
+-    /*
+-     * The SS_ACTIVE and PSTATE_SS bits correspond to the state machine
+-     * states defined in the ARM ARM for software singlestep:
+-     *  SS_ACTIVE   PSTATE.SS   State
+-     *     0            x       Inactive (the TB flag for SS is always 0)
+-     *     1            0       Active-pending
+-     *     1            1       Active-not-pending
+-     * SS_ACTIVE is set in hflags; PSTATE_SS is computed every TB.
+-     */
+-    if (FIELD_EX32(flags, TBFLAG_ANY, SS_ACTIVE) &&
+-        (pstate_for_ss & PSTATE_SS)) {
+-        FIELD_DP32(flags, TBFLAG_ANY, PSTATE_SS, 1, flags);
+-    }
+-
+-    *pflags = flags;
+-}
++/* ITS-EMU: cpu_get_tb_cpu_state is static inline in cpu.h (every TB lookup
++ * calls it). */
+ 
+ #ifdef TARGET_AARCH64
+ /*
+--- a/qemu/target/arm/unicorn_arm.c
++++ b/qemu/target/arm/unicorn_arm.c
+@@ -154,6 +154,12 @@
+     }
+ 
+     xpsr_write(env, val, xpsrmask);
++    // ITS-EMU: the cached TB flags include handler mode (IPSR != 0). Stale,
++    // thread mode code was translated as handler code, whose returns
++    // (BX LR, POP {PC}) leave the JIT for the exception return check.
++    if (reg & 1) {
++        arm_rebuild_hflags(env);
++    }
+ }
+ 
+ static uc_err read_cp_reg(CPUARMState *env, uc_arm_cp_reg *cp)
+@@ -770,6 +776,8 @@
+     return UC_ERR_OK;
+ }
+ 
++void its_init_write_tracking(struct uc_struct *uc); /* cputlb.c */
++
+ DEFAULT_VISIBILITY
+ void uc_init(struct uc_struct *uc)
+ {
+@@ -788,4 +796,5 @@
+     uc->context_save = uc_arm_context_save;
+     uc->context_restore = uc_arm_context_restore;
+     uc_common_init(uc);
++    its_init_write_tracking(uc);
+ }
+--- a/qemu/tcg/i386/tcg-target.inc.c
++++ b/qemu/tcg/i386/tcg-target.inc.c
+@@ -1733,6 +1733,16 @@
+     }
+ 
+     tcg_out_mov(s, tlbtype, r0, addrlo);
++#if (defined(__x86_64__) || defined(_M_X64)) && !defined(TLB_INDEX_FOLD)
++#error "TLB_INDEX_FOLD (exec/cpu-defs.h) must be visible: tlb_index() uses it"
++#endif
++#ifdef TLB_INDEX_FOLD
++    /* ITS-EMU: index of tlb_index(): addr ^ (addr >> TLB_INDEX_FOLD).
++       L1 is free until it gets the address below. */
++    tcg_out_mov(s, tlbtype, r1, addrlo);
++    tcg_out_shifti(s, SHIFT_SHR + tlbrexw, r1, TLB_INDEX_FOLD);
++    tgen_arithr(s, ARITH_XOR + tlbrexw, r0, r1);
++#endif
+     tcg_out_shifti(s, SHIFT_SHR + tlbrexw, r0,
+                    TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
+ 
+--- a/qemu/tcg/tcg-op.c
++++ b/qemu/tcg/tcg-op.c
+@@ -2917,7 +2917,8 @@
+         }
+     }
+ 
+-    check_exit_request(tcg_ctx);
++    /* Unicorn (ITS-EMU): no exit check after memory accesses; invalid
++     * accesses leave the TB with cpu_loop_exit_restore (cputlb.c). */
+ }
+ 
+ void tcg_gen_qemu_st_i32(TCGContext *tcg_ctx, TCGv_i32 val, TCGv addr, TCGArg idx, MemOp memop)
+@@ -2952,7 +2953,8 @@
+         tcg_temp_free_i32(tcg_ctx, swap);
+     }
+ 
+-    check_exit_request(tcg_ctx);
++    /* Unicorn (ITS-EMU): no exit check after memory accesses; invalid
++     * accesses leave the TB with cpu_loop_exit_restore (cputlb.c). */
+ }
+ 
+ void tcg_gen_qemu_ld_i64(TCGContext *tcg_ctx, TCGv_i64 val, TCGv addr, TCGArg idx, MemOp memop)
+@@ -2967,7 +2969,8 @@
+         } else {
+             tcg_gen_movi_i32(tcg_ctx, TCGV_HIGH(tcg_ctx, val), 0);
+         }
+-        check_exit_request(tcg_ctx);
++        /* Unicorn (ITS-EMU): no exit check after memory accesses; invalid
++     * accesses leave the TB with cpu_loop_exit_restore (cputlb.c). */
+         return;
+     }
+ #endif
+@@ -3009,7 +3012,8 @@
+             g_assert_not_reached();
+         }
+     }
+-    check_exit_request(tcg_ctx);
++    /* Unicorn (ITS-EMU): no exit check after memory accesses; invalid
++     * accesses leave the TB with cpu_loop_exit_restore (cputlb.c). */
+ }
+ 
+ void tcg_gen_qemu_st_i64(TCGContext *tcg_ctx, TCGv_i64 val, TCGv addr, TCGArg idx, MemOp memop)
+@@ -3019,7 +3023,8 @@
+ #if TCG_TARGET_REG_BITS == 32
+     if ((memop & MO_SIZE) < MO_64) {
+         tcg_gen_qemu_st_i32(tcg_ctx, TCGV_LOW(tcg_ctx, val), addr, idx, memop);
+-        check_exit_request(tcg_ctx);
++        /* Unicorn (ITS-EMU): no exit check after memory accesses; invalid
++     * accesses leave the TB with cpu_loop_exit_restore (cputlb.c). */
+         return;
+     }
+ #endif
+@@ -3055,7 +3060,8 @@
+     if (swap) {
+         tcg_temp_free_i64(tcg_ctx, swap);
+     }
+-    check_exit_request(tcg_ctx);
++    /* Unicorn (ITS-EMU): no exit check after memory accesses; invalid
++     * accesses leave the TB with cpu_loop_exit_restore (cputlb.c). */
+ }
+ 
+ static void tcg_gen_ext_i32(TCGContext *tcg_ctx, TCGv_i32 ret, TCGv_i32 val, MemOp opc)
+--- a/qemu/unicorn_common.h
++++ b/qemu/unicorn_common.h
+@@ -176,7 +176,19 @@
+ {
+     hwaddr xlat = 0;
+     hwaddr len = 1;
++    // ITS-EMU: every slow-path access (MMIO) asks; mappings are aligned to
++    // the target page (at least 1 KiB), so the answer holds for the page.
++    uint64_t page = address >> 10;
++    unsigned generation = uc->address_space_memory.generation;
++    // flash, SRAM and peripherals are at multiples of large powers of two
++    struct uc_mapping_cache_entry *c = &uc->mapping_cache[(page ^ (page >> 8) ^ (page >> 16)) & 255];
++    if (c->mr && c->page == page && c->generation == generation) {
++        return c->mr == &uc->io_mem_unassigned ? NULL : c->mr;
++    }
+     MemoryRegion *mr = address_space_translate(&uc->address_space_memory, address, &xlat, &len, false, MEMTXATTRS_UNSPECIFIED);
++    c->page = page;
++    c->generation = generation;
++    c->mr = mr;
+ 
+     if (mr == &uc->io_mem_unassigned) {
+         return NULL;
+--- a/uc.c
++++ b/uc.c
+@@ -683,6 +683,26 @@
+     return UC_ERR_OK;
+ }
+ 
++// ITS-EMU: write tracking for the emulator's idle detection. `cb` is called
++// with the address of the first store to each RAM page after
++// uc_its_rearm_writes, before the store (and for every store to pages that
++// contain translated code); NULL switches it off.
++UNICORN_EXPORT
++void uc_its_track_writes(uc_engine *uc, void (*cb)(void *opaque, uint64_t paddr),
++                         void *opaque)
++{
++    uc->its_first_write = cb;
++    uc->its_first_write_opaque = opaque;
++}
++
++UNICORN_EXPORT
++void uc_its_rearm_writes(uc_engine *uc)
++{
++    if (uc->init_done && uc->its_rearm_writes) {
++        uc->its_rearm_writes(uc);
++    }
++}
++
+ UNICORN_EXPORT
+ uc_err uc_reg_read(uc_engine *uc, int regid, void *value)
+ {

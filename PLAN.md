@@ -60,11 +60,29 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   Unicorn then restores the PC to the store itself (`cpu_loop_exit_restore`
   in `helper_check_exit_request`), so the store runs twice; skipping it by
   hand breaks for writeback stores, STM and IT blocks (no exit check there)
-- Speed: most time goes to Unicorn's per-block hook and MMIO callbacks
-  (measured with gdb stack sampling; perf is not available in the sandbox).
-  A hook that only advances the clock runs PrimzahlSieb 4× faster, so the
-  hook body itself is worth a closer look (careful: changing timing changes
-  what the programs execute, compare with `--no-idle-skip` fingerprints).
-  Unicorn also calls a helper after every load/store (`check_exit_request`)
+- Speed: Unicorn is vendored with patches (`vendor/README.md`). What is
+  left in busy programs: the per-block hook (~20–30 %), the lookup of the
+  next block after indirect branches (function returns, up to 25 %), the MMIO
+  path through QEMU's memory API (~20 % while polling a peripheral) and, at
+  every peripheral event, a sweep over all ~55 peripherals (`update`,
+  `next_event`; ~15 % while the display is drawn). A per-peripheral cache of
+  the next event would cut the sweeps, but `update` re-asserts interrupt
+  levels (which re-pends them) and some `next_event`s read shared state, so
+  it needs an audit of every model. The CPU stays on one thread (one
+  deterministic, cycle-counted core); the GUI renders the display on its own
+  thread. Idle detection tracks the RAM pages a loop stores to through
+  Unicorn's first-write path instead of copying RAM. `tools/perf/bench.sh` times the fixtures, `tools/perf/same-cycles.sh`
+  checks that a change leaves every fixture's cycles and output unchanged.
+  Busy-wait delay loops (`for (i = 0; i < N; i++);`) are the common case
+  that idle detection cannot skip (the counter changes): they run at about
+  1.5-2x real time, one block hook per iteration. Skipping them would need
+  the loop's exit condition. A sketch on top of idle detection: if two
+  consecutive visits of the loop head differ only in one register or RAM word
+  by a constant step (everything else equal, clean period, constant period),
+  and the loop's conditional branch compares that value with a constant or an
+  unchanged register (decoded by `timing`), the number of iterations left
+  follows; skip all but the last, as idle skipping does, up to the slice end.
+  `--no-idle-skip` benchmarks are sensitive to code layout (±10 % with
+  identical instruction counts): compare `perf stat` instruction counts
 - Packages use the `dist` profile (fat LTO): 15 MB GUI / 3.4 MB CLI
 - Release builds for students (cargo-dist)

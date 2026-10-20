@@ -224,6 +224,51 @@ impl Ili9486 {
         }
         ((r * 255 / 31) << 16) | ((g * 255 / 63) << 8) | (b * 255 / 31)
     }
+
+    /// Copies what the panel shows into `frame` (reusing its buffer), so
+    /// that it can be turned into colours elsewhere (another thread).
+    pub fn capture(&self, frame: &mut PanelFrame) {
+        frame.gram.clear();
+        frame.gram.extend_from_slice(&self.gram);
+        frame.flip_cols = self.dfc[1] & DFC_SS != 0;
+        frame.flip_rows = self.dfc[1] & DFC_GS != 0;
+        frame.inverted = self.inverted;
+        frame.bgr = self.madctl & MADCTL_BGR != 0;
+        frame.dark = self.is_dark();
+    }
+}
+
+/// The panel's image at one moment (see [`Ili9486::capture`]).
+#[derive(Clone, Debug, Default)]
+pub struct PanelFrame {
+    gram: Vec<u16>,
+    flip_cols: bool,
+    flip_rows: bool,
+    inverted: bool,
+    bgr: bool,
+    dark: bool,
+}
+
+impl PanelFrame {
+    /// Display off or in sleep.
+    pub fn is_dark(&self) -> bool {
+        self.dark
+    }
+
+    /// Calls `f(r, g, b)` for each glass position `(px, py)` that `at` yields,
+    /// in order, with the 5/6/5-bit levels of the colour components (as
+    /// [`Ili9486::panel_pixel`] scales them).
+    pub fn for_each_rgb565(&self, at: impl Iterator<Item = (usize, usize)>, mut f: impl FnMut(u16, u16, u16)) {
+        let invert = if self.inverted { 0xFFFF } else { 0 };
+        for (px, py) in at {
+            let gc = if self.flip_cols { GRAM_COLS - 1 - px } else { px };
+            let gr = if self.flip_rows { GRAM_ROWS - 1 - py } else { py };
+            let v = self.gram[gr * GRAM_COLS + gc] ^ invert;
+            let (r, g, b) = (v >> 11, (v >> 5) & 0x3F, v & 0x1F);
+            // The panel's colour filter is BGR; without the BGR bit red and blue swap.
+            if self.bgr { f(r, g, b) } else { f(b, g, r) }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +310,32 @@ mod tests {
         assert_eq!(d.gram[1], 2);
         assert_eq!(d.gram[GRAM_COLS], 3);
         assert_eq!(d.gram[GRAM_COLS + 1], 4);
+    }
+
+    #[test]
+    fn captured_frame_matches_panel_pixel() {
+        let mut d = Ili9486::new();
+        for (i, v) in d.gram.iter_mut().enumerate() {
+            *v = (i as u16).wrapping_mul(40503);
+        }
+        d.sleeping = false;
+        d.display_on = true;
+        for (madctl, dfc1, inverted) in
+            [(0x28, 0x62, false), (0x00, 0x00, true), (0x08, 0x20, false), (0x20, 0x40, true)]
+        {
+            (d.madctl, d.dfc[1], d.inverted) = (madctl, dfc1, inverted);
+            let mut frame = PanelFrame::default();
+            d.capture(&mut frame);
+            let at = [(0, 0), (319, 479), (17, 300), (200, 5)];
+            let mut got = Vec::new();
+            frame.for_each_rgb565(at.into_iter(), |r, g, b| {
+                got.push(
+                    ((u32::from(r) * 255 / 31) << 16) | ((u32::from(g) * 255 / 63) << 8) | (u32::from(b) * 255 / 31),
+                )
+            });
+            let want: Vec<u32> = at.iter().map(|&(x, y)| d.panel_pixel(x, y)).collect();
+            assert_eq!(got, want, "madctl {madctl:#x} dfc {dfc1:#x}");
+        }
     }
 
     #[test]
