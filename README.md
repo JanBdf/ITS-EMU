@@ -288,7 +288,9 @@ tests on Linux, Windows and macOS, each on x64 and arm64 (Windows on Arm is
 experimental: Unicorn does not build for it natively, so it runs the x64 build
 under emulation). It installs `gdb-multiarch` on Linux for the GDB server tests,
 records throughput in the job summary and keeps the binaries as artifacts for
-14 days. The tests that need the personal lab solutions in `tests/fixtures/ac6`
+14 days, together with the macOS app's disk images (arm64 and x86_64, built
+by `packaging/macos/build.sh`). It runs on pushes to `main` and
+`experimental` and on pull requests. The tests that need the personal lab solutions in `tests/fixtures/ac6`
 (not published) skip themselves there.
 
 ### Arch Linux package
