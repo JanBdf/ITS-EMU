@@ -68,6 +68,28 @@ pull-ups; the TIM8_1/TIM8_2 header pins suit TIM8's encoder mode) and
 
 The font table that ITS_BRD_LIB expects in flash at `0x0810_0000` is built in.
 
+### GUI on different systems
+
+- **File dialog.** *Open…* uses the system's file dialog. On Linux that is
+  the XDG desktop portal with a FileChooser backend (`xdg-desktop-portal-gtk`,
+  `-kde` or `-gnome`; the Hyprland and wlroots portals have none), or else
+  `zenity`. Where neither is installed (window managers without a desktop),
+  the GUI shows its own file browser instead; `ITS_EMU_FILE_DIALOG=builtin`
+  always uses it. Dropping a file onto the window works everywhere except on
+  Wayland, where winit does not support drag and drop yet.
+- **Graphics.** The GUI draws with wgpu (Vulkan, Metal, DirectX 12) and
+  switches to OpenGL when wgpu finds no graphics adapter (no Vulkan driver,
+  virtual machines, remote desktops). `--renderer gl` chooses OpenGL right
+  away, `--renderer wgpu` never falls back.
+- **Windows.** The release build of `its-emu-gui.exe` opens no console
+  window; started from a terminal it writes its log there.
+- **macOS.** Binaries from the CI are not signed: after unpacking,
+  `chmod +x its-emu its-emu-gui` (the artifact zip loses the permission) and
+  `xattr -d com.apple.quarantine its-emu its-emu-gui`, or Gatekeeper refuses
+  to start them.
+- **Log.** `RUST_LOG=info` (or `debug`) shows more; by default only
+  warnings and errors appear, without the window system's own notices.
+
 ## Debugging with GDB
 
 The GUI starts a GDB server on `127.0.0.1:3333` (`--gdb ADDR` to change,

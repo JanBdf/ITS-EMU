@@ -13,7 +13,11 @@ anyhow.workspace = true
 log.workspace = true
 env_logger.workspace = true
 clap.workspace = true
-eframe = "0.37"
+# glow: OpenGL where wgpu finds no adapter (see --renderer)
+eframe = { version = "0.37", features = ["glow"] }
 rfd = "0.17"
 png.workspace = true
 resvg = { version = "0.48", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }

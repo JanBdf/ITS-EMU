@@ -8,6 +8,7 @@ use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
 use crate::board::{self, BoardState};
 use crate::emu::{self, Command, EmuHandle, RunState, Speed, UsbStatus};
+use crate::files::FilePicker;
 use crate::settings::Settings;
 
 const OK_GREEN: Color32 = Color32::from_rgb(0x34, 0xD3, 0x59);
@@ -43,6 +44,7 @@ pub struct App {
     /// The toolbar switch of the ST-LINK.
     usb_on: bool,
     settings: Settings,
+    files: FilePicker,
 }
 
 /// Saves a picture of the own window and quits (`ITS_EMU_GUI_SCREENSHOT=file.png[:seconds]`).
@@ -157,14 +159,7 @@ impl App {
             self_screenshot: SelfScreenshot::from_env(),
             usb_on,
             settings,
-        }
-    }
-
-    fn open_dialog(&self) {
-        let file =
-            rfd::FileDialog::new().add_filter("Firmware", &["axf", "elf"]).add_filter("All files", &["*"]).pick_file();
-        if let Some(path) = file {
-            self.emu.send(Command::Load(path));
+            files: FilePicker::new(),
         }
     }
 }
@@ -218,7 +213,7 @@ impl eframe::App for App {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("📂 Open…").clicked() {
-                    self.open_dialog();
+                    self.files.open(&ctx);
                 }
                 if ui.button("⟲ Reset").on_hover_text("RESET button of the Nucleo board").clicked() {
                     self.emu.send(Command::Reset);
@@ -421,7 +416,7 @@ impl eframe::App for App {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect()
         });
-        if let Some(path) = dropped.into_iter().next() {
+        if let Some(path) = dropped.into_iter().next().or_else(|| self.files.show(&ctx)) {
             self.emu.send(Command::Load(path));
         }
     }
