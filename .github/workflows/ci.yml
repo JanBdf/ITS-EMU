@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, experimental]
   pull_request:
   workflow_dispatch:
 
@@ -97,5 +97,36 @@ jobs:
             ${{ env.BIN }}/its-emu-gui
             ${{ env.BIN }}/its-emu.exe
             ${{ env.BIN }}/its-emu-gui.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  # The macOS app as release.yml builds it, kept as a workflow artifact:
+  # packaging problems show up before a release tag.
+  macos-app:
+    name: macOS app (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, os: macos-15 }
+          - { arch: x86_64, os: macos-15-intel }
+    steps:
+      # full history: build.sh takes the package version from git
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-app-${{ matrix.arch }}
+      - name: Install rsvg-convert (icon)
+        run: brew install librsvg
+      - name: Build
+        run: packaging/macos/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: its-emu-macos-app-${{ matrix.arch }}
+          path: dist/*.dmg
           if-no-files-found: error
           retention-days: 14
