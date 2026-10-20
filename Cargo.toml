@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/emu-core", "apps/its-emu", "crates/stm32f429", "apps/its-emu-gui", "crates/usbip", "crates/stlink"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 

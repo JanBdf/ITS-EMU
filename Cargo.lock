@@ -1122,7 +1122,7 @@ dependencies = [
 
 [[package]]
 name = "emu-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "env_logger",
  "gdbstub",
@@ -1868,7 +1868,7 @@ dependencies = [
 
 [[package]]
 name = "its-emu"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1883,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "its-emu-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1902,7 +1902,7 @@ dependencies = [
 
 [[package]]
 name = "itsboard"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "emu-core",
  "log",
@@ -3537,7 +3537,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "stlink"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "emu-core",
  "log",
@@ -3547,7 +3547,7 @@ dependencies = [
 
 [[package]]
 name = "stm32f429"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "emu-core",
  "log",
@@ -3939,7 +3939,7 @@ dependencies = [
 
 [[package]]
 name = "usbip"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "log",
 ]
