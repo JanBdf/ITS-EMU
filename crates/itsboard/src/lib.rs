@@ -14,7 +14,10 @@
 
 pub mod devices;
 pub mod ili9486;
+pub mod pico;
+pub mod plugin;
 pub mod sim;
+pub mod spec;
 pub mod xpt2046;
 
 pub use sim::Simulator;
@@ -148,6 +151,8 @@ pub struct ItsBoard {
     encoders: RefCell<Vec<Rc<RefCell<RotaryEncoder>>>>,
     /// DS18B20 sensors: their 1-Wire line and their place on it.
     sensors: RefCell<Vec<(Rc<RefCell<OneWireBus>>, usize)>>,
+    /// Pins the devices are connected to.
+    device_pins: RefCell<Vec<(char, u32)>>,
 }
 
 impl ItsBoard {
@@ -166,8 +171,15 @@ impl ItsBoard {
             tp_cs_rises: 0,
             rst_rises: 0,
         }));
-        let board =
-            Self { mcu: mcu.clone(), lcd, touch, devices, encoders: RefCell::default(), sensors: RefCell::default() };
+        let board = Self {
+            mcu: mcu.clone(),
+            lcd,
+            touch,
+            devices,
+            encoders: RefCell::default(),
+            sensors: RefCell::default(),
+            device_pins: RefCell::default(),
+        };
         {
             let mut g = board.mcu.gpio.borrow_mut();
             for &(p, pin, level) in EXTERNAL_LEVELS {
@@ -193,6 +205,7 @@ impl ItsBoard {
     pub fn add_encoder(&self, a: (char, u32), b: (char, u32)) -> usize {
         let enc = Rc::new(RefCell::new(RotaryEncoder::new(self.mcu.gpio.clone(), a, b)));
         self.devices.borrow_mut().push(enc.clone());
+        self.device_pins.borrow_mut().extend([a, b]);
         let mut encoders = self.encoders.borrow_mut();
         encoders.push(enc);
         encoders.len() - 1
@@ -210,6 +223,7 @@ impl ItsBoard {
             None => {
                 let b = Rc::new(RefCell::new(OneWireBus::new(self.mcu.gpio.clone(), pin)));
                 self.devices.borrow_mut().push(b.clone());
+                self.device_pins.borrow_mut().push(pin);
                 b
             }
         };
@@ -220,6 +234,33 @@ impl ItsBoard {
         };
         sensors.push((bus, index));
         sensors.len() - 1
+    }
+
+    /// Wires the outputs of a [`plugin`] to header pins (`wiring[n]`: the pin
+    /// of output `n`, if any). Where an output does not drive its pin, the
+    /// board does: the buttons' pull-ups hold PF0–7 high, other pins float.
+    /// (A plugin driving a button pin wins over the button.)
+    pub fn add_plugin(&self, link: std::sync::Arc<plugin::Link>, wiring: &[Option<(char, u32)>]) {
+        self.device_pins.borrow_mut().extend(wiring.iter().flatten());
+        let wiring =
+            wiring.iter().map(|w| w.map(|(p, pin)| ((p, pin), (p == 'F' && pin < 8).then_some(true)))).collect();
+        let pins = plugin::PluginPins::new(link, self.mcu.gpio.clone(), wiring);
+        self.devices.borrow_mut().push(Rc::new(RefCell::new(pins)));
+    }
+
+    /// Disconnects all devices (encoders, sensors, plugins): their pins
+    /// return to what the board does with them (buttons released, INT open).
+    pub fn remove_devices(&self) {
+        self.devices.borrow_mut().clear();
+        self.encoders.borrow_mut().clear();
+        self.sensors.borrow_mut().clear();
+        let mut g = self.mcu.gpio.borrow_mut();
+        for (p, pin) in self.device_pins.take() {
+            let external = EXTERNAL_LEVELS.iter().find(|&&(ep, epin, _)| (ep, epin) == (p, pin)).map(|e| e.2);
+            let level = external.or((p == 'F' && pin < 8).then_some(true));
+            g.drive(port(p), pin, level);
+            g.ports[port(p)].log_watch &= !(1 << pin);
+        }
     }
 
     /// Temperature at DS18B20 `n` (°C, -55..125); the next conversion measures it.
@@ -464,6 +505,22 @@ fn screen_to_raw_touch(x: f32, y: f32) -> RawTouch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_devices_leave_their_pins_to_the_board() {
+        let (mut bus, mcu) = stm32f429::build();
+        let board = ItsBoard::attach(&mcu, &mut bus);
+        let level = |p, pin| mcu.gpio.borrow().level(port(p), pin);
+        board.add_encoder(('F', 0), ('G', 1));
+        board.add_ds18b20(('B', 8));
+        board.rotate_encoder(0, 1).unwrap();
+        board.remove_devices();
+        assert!(level('F', 0), "button S0 released: pulled up");
+        assert!(level('B', 8), "the I2C pull-up of the carrier board");
+        assert_eq!(mcu.gpio.borrow().ports[port('G')].ext_mask & 2, 0, "INT1 open");
+        assert!(board.rotate_encoder(0, 1).is_err());
+        assert_eq!(board.add_encoder(('C', 6), ('C', 7)), 0, "numbered from 0 again");
+    }
 
     #[test]
     fn touch_mapping_matches_course_calibration() {
