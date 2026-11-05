@@ -5,6 +5,7 @@
 
 mod app;
 mod board;
+mod devices;
 mod emu;
 mod files;
 mod pins;
@@ -46,6 +47,20 @@ struct Args {
     /// Only export the ST-LINK; attach it yourself (`sudo usbip attach -r 127.0.0.1 -b 1-1`)
     #[arg(long)]
     no_usb_attach: bool,
+
+    /// External device on header pins (repeatable), instead of the ones
+    /// added in the Devices panel last time: `encoder@PC6,PC7`,
+    /// `ds18b20@PG2`, `pico=FIRMWARE.uf2@GP0=PF0,GP5=PF1` (a Raspberry Pi Pico
+    /// running the firmware, its GPIOs wired to the pins)
+    #[arg(long = "device", value_name = "DEVICE@PINS", value_parser = itsboard::spec::DeviceSpec::parse)]
+    devices: Vec<itsboard::spec::DeviceSpec>,
+
+    /// Boot ROM of the Pico's RP2040 (16 KiB, or the ELF file of the
+    /// pico-bootrom release), instead of the one chosen in the Devices panel.
+    /// Default: downloaded once from the Raspberry Pi GitHub release and kept
+    /// in the cache directory
+    #[arg(long, value_name = "FILE")]
+    pico_bootrom: Option<PathBuf>,
 
     /// Show the display with the frame buffer's ideal colours instead of the
     /// look of the real panel (darker mid tones, grey black)
@@ -113,13 +128,17 @@ fn run(args: Args, renderer: eframe::Renderer) -> eframe::Result {
         options,
         Box::new(move |cc| {
             let gdb = (!args.no_gdb).then_some(args.gdb);
-            let settings = settings::Settings::load();
+            let mut settings = settings::Settings::load();
+            if !args.devices.is_empty() {
+                settings.devices = args.devices;
+            }
             let usb = emu::UsbConfig {
                 enabled: if args.no_usb { false } else { args.usb.is_some() || settings.usb },
                 addr: args.usb.unwrap_or_else(|| format!("127.0.0.1:{}", stlink::DEFAULT_PORT)),
                 attach: !args.no_usb_attach,
             };
-            Ok(Box::new(app::App::new(cc, args.firmware, gdb, usb, settings, args.ideal_colors)))
+            let bootrom = args.pico_bootrom.or_else(|| settings.pico_bootrom.clone());
+            Ok(Box::new(app::App::new(cc, args.firmware, gdb, usb, bootrom, settings, args.ideal_colors)))
         }),
     )
 }

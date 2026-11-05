@@ -4,6 +4,8 @@
 
 use std::path::PathBuf;
 
+use itsboard::spec::DeviceSpec;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     /// The ST-LINK is plugged in (USB/IP) at start.
@@ -12,6 +14,14 @@ pub struct Settings {
     pub auto_reload: bool,
     /// Firmware files opened last, the latest first.
     pub recent: Vec<PathBuf>,
+    /// Devices on the header pins.
+    pub devices: Vec<DeviceSpec>,
+    /// Boot ROM of the Picos (`None`: downloaded into the cache).
+    pub pico_bootrom: Option<PathBuf>,
+    /// Python interpreter for the programs on a Pico's serial port.
+    pub python: String,
+    /// The Python program started for a Pico last.
+    pub python_program: Option<PathBuf>,
 }
 
 const MAX_RECENT: usize = 8;
@@ -19,7 +29,15 @@ const MAX_RECENT: usize = 8;
 impl Default for Settings {
     fn default() -> Self {
         // Like the real board: the probe is there when the emulator runs.
-        Self { usb: cfg!(target_os = "linux"), auto_reload: true, recent: Vec::new() }
+        Self {
+            usb: cfg!(target_os = "linux"),
+            auto_reload: true,
+            recent: Vec::new(),
+            devices: Vec::new(),
+            pico_bootrom: None,
+            python: if cfg!(windows) { "python" } else { "python3" }.to_owned(),
+            python_program: None,
+        }
     }
 }
 
@@ -48,6 +66,13 @@ impl Settings {
                 "usb" => self.usb = on,
                 "auto_reload" => self.auto_reload = on,
                 "recent" if self.recent.len() < MAX_RECENT => self.recent.push(PathBuf::from(value.trim())),
+                "device" => match DeviceSpec::parse(value.trim()) {
+                    Ok(d) => self.devices.push(d),
+                    Err(e) => log::warn!("settings: device {}: {e}", value.trim()),
+                },
+                "pico_bootrom" => self.pico_bootrom = Some(PathBuf::from(value.trim())),
+                "python" => self.python = value.trim().to_owned(),
+                "python_program" => self.python_program = Some(PathBuf::from(value.trim())),
                 _ => {}
             }
         }
@@ -67,6 +92,16 @@ impl Settings {
         for p in &self.recent {
             text += &format!("recent = {}\n", p.display());
         }
+        for d in &self.devices {
+            text += &format!("device = {d}\n");
+        }
+        if let Some(p) = &self.pico_bootrom {
+            text += &format!("pico_bootrom = {}\n", p.display());
+        }
+        text += &format!("python = {}\n", self.python);
+        if let Some(p) = &self.python_program {
+            text += &format!("python_program = {}\n", p.display());
+        }
         let result = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, text));
         if let Err(e) = result {
             log::warn!("cannot save settings to {}: {e}", path.display());
@@ -80,7 +115,7 @@ mod tests {
 
     #[test]
     fn parses_switch() {
-        let mut s = Settings { usb: true, auto_reload: true, recent: Vec::new() };
+        let mut s = Settings { usb: true, ..Settings::default() };
         s.parse("# comment\nusb = false\nother = 3\nauto_reload = no\nrecent = /a/b c.axf\nrecent = /d.axf\n");
         assert!(!s.usb);
         assert!(!s.auto_reload);
@@ -89,5 +124,13 @@ mod tests {
         assert_eq!(s.recent, [PathBuf::from("/d.axf"), PathBuf::from("/a/b c.axf")]);
         s.parse("usb=on");
         assert!(s.usb);
+    }
+
+    #[test]
+    fn parses_devices() {
+        let mut s = Settings::default();
+        s.parse("device = encoder@PC6,PC7\ndevice = pico=/x/gen 2.uf2@GP0=PF0,GP5=PF1\ndevice = lamp@PA1\n");
+        let names: Vec<String> = s.devices.iter().map(ToString::to_string).collect();
+        assert_eq!(names, ["encoder@PC6,PC7", "pico=/x/gen 2.uf2@GP0=PF0,GP5=PF1"]);
     }
 }

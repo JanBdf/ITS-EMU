@@ -56,6 +56,9 @@ pub struct App {
     title: String,
     /// The pin inspector is open.
     show_pins: bool,
+    /// The Devices panel is open.
+    show_devices: bool,
+    devices: crate::devices::DevicesPanel,
     files: FilePicker,
 }
 
@@ -147,12 +150,14 @@ impl App {
         firmware: Option<PathBuf>,
         gdb_addr: Option<String>,
         usb: emu::UsbConfig,
+        bootrom_override: Option<PathBuf>,
         settings: Settings,
         ideal_colors: bool,
     ) -> Self {
         let ctx = cc.egui_ctx.clone();
         let usb_on = usb.enabled;
-        let emu = emu::spawn(move || ctx.request_repaint(), gdb_addr, usb);
+        let bootrom = bootrom_override.clone().or_else(|| settings.pico_bootrom.clone());
+        let emu = emu::spawn(move || ctx.request_repaint(), gdb_addr, usb, settings.devices.clone(), bootrom);
         if ideal_colors {
             emu.send(Command::IdealColors(true));
         }
@@ -188,6 +193,8 @@ impl App {
             ideal_colors,
             title: String::new(),
             show_pins: start_view("pins"),
+            show_devices: start_view("devices"),
+            devices: crate::devices::DevicesPanel::new(bootrom_override),
             files,
         };
         if let Some(path) = firmware {
@@ -252,6 +259,11 @@ impl eframe::App for App {
             )
         };
         let pins = if self.show_pins { Some(self.emu.snapshot.lock().unwrap().pins) } else { None };
+        let devices = {
+            let mut snap = self.emu.snapshot.lock().unwrap();
+            self.devices.take_output(std::mem::take(&mut snap.pico_output));
+            snap.devices.clone()
+        };
 
         // shown alone and enlarged, the display's pixels stay sharp
         let options = if self.lcd_focus {
@@ -284,6 +296,9 @@ impl eframe::App for App {
         }
         if shortcut(Key::P) {
             self.show_pins = !self.show_pins;
+        }
+        if shortcut(Key::E) {
+            self.show_devices = !self.show_devices;
         }
         if shortcut(Key::T) {
             self.see_through = self.see_through.is_none().then_some(SEE_THROUGH_DEFAULT);
@@ -351,6 +366,12 @@ impl eframe::App for App {
                 }
                 ui.toggle_value(&mut self.show_pins, "Pins")
                     .on_hover_text("Mode and level of every pin of ports A–G · Ctrl+P");
+                let label = match devices.len() {
+                    0 => "🔌 Devices".to_owned(),
+                    n => format!("🔌 Devices ({n})"),
+                };
+                ui.toggle_value(&mut self.show_devices, label)
+                    .on_hover_text("Devices on the header pins: Raspberry Pi Pico, rotary encoder, DS18B20 · Ctrl+E");
                 ui.separator();
                 ui.menu_button("☰", |ui| {
                     let mut auto = self.settings.auto_reload;
@@ -505,6 +526,13 @@ impl eframe::App for App {
                 }
             });
         });
+
+        // ---- devices
+        if self.show_devices {
+            egui::Panel::right("devices").resizable(true).default_size(340.0).show(ui, |ui| {
+                self.devices.show(ui, &devices, &mut self.settings, &self.emu);
+            });
+        }
 
         // ---- pin inspector
         if let Some(pins) = &pins {
