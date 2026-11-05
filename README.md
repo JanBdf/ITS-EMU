@@ -44,7 +44,8 @@ as workflow artifacts for 14 days.
 | CPU | Cortex-M4F (Thumb-2, FPU) via [Unicorn](https://www.unicorn-engine.org/); NVIC, SysTick, exceptions, faults in Rust |
 | Clock | RCC clock tree, virtual time in CPU cycles (16 MHz HSI → 180 MHz PLL); cycle model of the Cortex-M4 (loads, branches, divisions, exceptions, APB wait states) measured on the board |
 | Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (up/down/center-aligned counting, output compare and PWM on the pins, input capture, encoder mode, slave modes reset/gated/trigger/external clock with TI1/TI2, TIM1/8 repetition counter), ADC1–3 (regular group started by TIM2/TIM3/TIM8 TRGO), DAC (timer triggers, noise/triangle waves), I²C1–3 (master; nothing connected answers with NACK), SPI1–6, USART1–6 + UART4/5/7/8 (only USART3 connected), IWDG (watchdog reset, reset flags in RCC_CSR), CRC, RNG, DMA1/2 (direct mode; requests from the ADCs, U(S)ARTs, SPIs and the DAC), PWR, flash interface (programming and sector/mass erase with the datasheet's timing), bit-banding |
-| Board | LEDs OUT0–15, buttons S0–S7, INT0–5, Analog header (voltages on the ADC pins, DAC1), Nucleo LEDs and USER button; external devices on any pins: rotary encoder, DS18B20 1-Wire temperature sensors (command line) |
+| Board | LEDs OUT0–15, buttons S0–S7, INT0–5, Analog header (voltages on the ADC pins, DAC1), Nucleo LEDs and USER button; external devices on any pins: rotary encoder, DS18B20 1-Wire temperature sensors, a Raspberry Pi Pico running its own firmware |
+| Pico | RP2040 with both Cortex-M0+ cores and the real boot ROM, the firmware from a UF2 file; clocks, resets, timer, SIO (FIFOs, divider, spinlocks), PIO0/1, XIP flash, and the USB controller with a built-in host that makes the USB serial port (CDC) a pseudo terminal of the computer. Runs on its own thread |
 | Display | ILI9486 480×320 TFT with SPI timing, XPT2046 touch, backlight PWM, tone response of the real panel (GUI; `--ideal-colors` to switch off) |
 | Serial | Virtual COM port (USART3, `printf` / `stdin_getchar`) |
 | Debugging | GDB remote server: breakpoints, single step, watchpoints, registers incl. FPU, memory, `monitor reset halt` |
@@ -77,6 +78,17 @@ new build replaces the firmware file, the GUI loads it again and restarts
 saves the display as a PNG, Ctrl+S). *Pins* (Ctrl+P) shows the mode and
 level of every pin of ports A–G and what the board connects to it. Ctrl+O
 opens a file (☰ also lists the recent ones), Ctrl+R resets.
+
+*Devices* (Ctrl+E) connects and removes devices on the header pins while the
+board runs: a Raspberry Pi Pico (firmware file and wiring, see below), a
+rotary encoder (buttons turn it 1 or 10 detents either way) and DS18B20
+temperature sensors (slider). For a Pico the panel shows its serial port, a
+terminal on it (with a choice of line end), *Power cycle*, the boot ROM in
+use and *Python program…*, which starts a Python program written for the
+Pico (such as the square wave generator's GUI) on the emulated one's port.
+The devices stay connected when other firmware is loaded and are there
+again at the next start.
+
 On the command line,
 `--input 2:PC3=1.65` applies 1.65 V to PC3 (`open` disconnects it).
 `--device encoder@PC6,PC7` connects a rotary encoder (contacts to GND,
@@ -84,6 +96,47 @@ pull-ups; the TIM8_1/TIM8_2 header pins suit TIM8's encoder mode) and
 `--input 3:ENC=5` turns it five detents clockwise (`ENC=-5` back).
 `--device ds18b20@PG2` connects a DS18B20 temperature sensor (21 °C,
 `--input 4:TEMP=30.5` changes it); several on one pin share the 1-Wire line.
+
+### Raspberry Pi Pico
+
+In the Devices panel, or with `--device pico=FIRMWARE.uf2@GP0=PF0,GP5=PF1`
+(command line and GUI; in the GUI `--device` replaces the saved devices for
+that run), the emulator runs a Pico with the firmware and wires its GPIOs to board pins; without `@...` the
+wiring is that of the square wave generator of the Drehgeber exercise
+(A0 = GP0 to PF0, A5 = GP5 to PF1). The Pico's USB serial port is a pseudo
+terminal; its path is printed at start (`Pico 0: serial port /dev/ttys004`)
+and what the firmware prints is logged (`RUST_LOG=itsboard=info`). Programs
+that look for the Pico by its USB IDs, such as the generator's Python GUI,
+find the port when started with *Python program…* in the Devices panel
+(interpreter `python3`, changeable there; needs pyserial) or through
+`tools/pico/run_gui.py`:
+
+```sh
+its-emu-gui Drehgeber.axf --device pico=pio_2_squarewaves.uf2
+python3 tools/pico/run_gui.py /dev/ttys004 Rechteckgenerator/Python_GUI/main.py
+```
+
+On the command line, `--input 1:PICO=s3600\r\n` sends text to the Pico's port.
+The Pico runs on its own thread with its own clock, up to 20 ms (virtual)
+ahead of the board; each pin change reaches the board at the board time it
+was generated at, the board waits for the Pico when it gets ahead. While
+the board is paused, the Pico runs in real time. It keeps running when other
+board firmware is loaded. The RP2040's boot ROM may only be used with RP2040
+devices and is not part of the emulator: the first start downloads it from
+the [Raspberry Pi release](https://github.com/raspberrypi/pico-bootrom-rp2040/releases)
+into the cache directory (*Choose…* in the Devices panel or `--pico-bootrom
+FILE` take a local copy instead).
+The emulated Pico runs at about 0.7–0.8× real time while its firmware
+busy-waits; a board with a Pico runs at that speed too.
+
+`tests/fixtures/ac6-src/PicoQuadrature` is a test program for the board that
+decodes the generator's signals on PF0/PF1 with EXTI interrupts and shows
+phase changes, angle, speed, direction and errors (display, LEDs, serial
+port). The board library's initialisation takes about 2 s, so commands sent
+to the Pico before *PicoQuadrature ready* are not counted; and connecting
+the generator (`h`) pulls PF0 and PF1 low one after the other (two steps
+backwards). `ITS_EMU_PICO_UF2=pio_2_squarewaves.uf2 cargo test -p itsboard
+--test pico` runs it with the generator.
 
 The font table that ITS_BRD_LIB expects in flash at `0x0810_0000` is built in.
 
