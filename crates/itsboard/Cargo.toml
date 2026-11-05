@@ -7,8 +7,12 @@ license.workspace = true
 [dependencies]
 emu-core.workspace = true
 stm32f429.workspace = true
+rp2040.workspace = true
 log.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 png.workspace = true
