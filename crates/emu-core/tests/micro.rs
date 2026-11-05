@@ -1,6 +1,6 @@
 //! Runs the clang-built self-test firmware in `tests/fixtures/micro`.
 
-use emu_core::{Bus, CoreReg, ElfImage, Machine, MachineConfig, MemoryMap, StopReason, WatchKind};
+use emu_core::{Bus, CoreReg, CpuModel, ElfImage, Machine, MachineConfig, MemoryMap, StopReason, WatchKind};
 
 fn fixture(name: &str) -> Vec<u8> {
     let path = format!("{}/../../tests/fixtures/micro/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -18,10 +18,14 @@ fn stm32f4_config() -> MachineConfig {
             sram_bitband: Some((0x2000_0000, 0x2200_0000)),
             periph_base: 0x4000_0000,
             periph_size: 0x2000_0000,
+            extra_periph: Vec::new(),
+            flash_aliases: Vec::new(),
         },
         reset_cpu_hz: 16_000_000,
         quantum: 100_000,
         masked_quantum: 1_000,
+        cpu: CpuModel::CortexM4,
+        vector_table: 0,
     }
 }
 
