@@ -13,7 +13,7 @@ pub mod spi;
 pub mod timer;
 pub mod usart;
 
-use emu_core::{Bus, DebugIds, Machine, MachineConfig, MachineError, MemoryMap};
+use emu_core::{Bus, CpuModel, DebugIds, Machine, MachineConfig, MachineError, MemoryMap};
 
 use dma::DmaLine;
 use gpio::{GPIOA_BASE, GpioPort, NUM_PORTS, PORT_STRIDE, SharedGpio};
@@ -46,11 +46,20 @@ pub fn memory_map() -> MemoryMap {
         sram_bitband: Some((0x2000_0000, 0x2200_0000)),
         periph_base: PERIPH_BASE,
         periph_size: PERIPH_SIZE,
+        extra_periph: Vec::new(),
+        flash_aliases: Vec::new(),
     }
 }
 
 pub fn machine_config() -> MachineConfig {
-    MachineConfig { memory: memory_map(), reset_cpu_hz: HSI_HZ, quantum: 200_000, masked_quantum: 1_000 }
+    MachineConfig {
+        memory: memory_map(),
+        reset_cpu_hz: HSI_HZ,
+        quantum: 200_000,
+        masked_quantum: 1_000,
+        cpu: CpuModel::CortexM4,
+        vector_table: 0,
+    }
 }
 
 /// Pins of the timer channels (LQFP144) and their alternate function.

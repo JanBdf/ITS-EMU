@@ -3,7 +3,9 @@
 //! Unicorn executes instructions. Everything around it — memory map, private
 //! peripheral bus, NVIC, exception entry/return, time keeping — lives here.
 
+use std::cell::UnsafeCell;
 use std::collections::BTreeSet;
+use std::rc::Rc;
 
 use unicorn_engine::{
     Arch, ArmCpuModel, HookType, MemType, Mode, Prot, RegisterARM, TlbEntry, TlbType, UcHookId, Unicorn, uc_error,
@@ -34,6 +36,27 @@ pub struct MemoryMap {
     /// Peripheral window dispatched to the [`Bus`].
     pub periph_base: u32,
     pub periph_size: u32,
+    /// Further peripheral windows (base, size), also dispatched to the [`Bus`].
+    pub extra_periph: Vec<(u32, u32)>,
+    /// Further addresses at which flash is visible read-only (XIP aliases).
+    pub flash_aliases: Vec<u32>,
+}
+
+impl MemoryMap {
+    /// The address belongs to a peripheral window.
+    pub fn is_periph(&self, addr: u32) -> bool {
+        addr.wrapping_sub(self.periph_base) < self.periph_size
+            || self.extra_periph.iter().any(|&(base, size)| addr.wrapping_sub(base) < size)
+    }
+}
+
+/// The CPU core Unicorn emulates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuModel {
+    /// Cortex-M4F (ARMv7E-M with FPU).
+    CortexM4,
+    /// Cortex-M0+ (ARMv6-M; Unicorn's Cortex-M0).
+    CortexM0Plus,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +69,10 @@ pub struct MachineConfig {
     /// Shorter slice used while an exception is pending but masked, so that
     /// unmasking (CPSIE, BASEPRI writes) is noticed soon.
     pub masked_quantum: u64,
+    pub cpu: CpuModel,
+    /// Vector table at reset (initial SP and PC; VTOR's reset value). 0 on
+    /// the STM32; the RP2040's boot stage 2 hands over to the one in flash.
+    pub vector_table: u32,
 }
 
 /// Why [`Machine::run`] returned.
@@ -165,6 +192,9 @@ pub struct System {
     idle: IdleDetector,
     /// Fast-forward idle loops to the next event (disable for debugging).
     pub idle_skipping: bool,
+    /// Another core shares the memory and peripherals: WFI/WFE sleep at most
+    /// until the end of the run slice (the other core may wake this one).
+    multicore: bool,
     /// A BKPT without halting debug ends [`Machine::run`] with
     /// [`StopReason::Breakpoint`] (default; test programs end that way).
     /// Otherwise it escalates to HardFault (HFSR.DEBUGEVT) like on the chip,
@@ -358,13 +388,20 @@ impl System {
     }
 }
 
+/// Backing store of a memory region, shared by the cores of a multi-core MCU.
+type Backing = Rc<UnsafeCell<Box<[u8]>>>;
+
+fn backing(size: u32, fill: u8) -> Backing {
+    Rc::new(UnsafeCell::new(vec![fill; size as usize].into_boxed_slice()))
+}
+
 pub struct Machine {
     uc: Unicorn<'static, System>,
     /// Backing store for flash; mapped into Unicorn with `mem_map_ptr`.
     /// Declared after `uc` so it is dropped after the emulator.
-    flash: Box<[u8]>,
+    flash: Backing,
     /// Backing store for RAM (also accessed by the DMA).
-    _ram: Vec<Box<[u8]>>,
+    _ram: Vec<Backing>,
     /// Debugger breakpoints, implemented as Unicorn exits: execution stops
     /// before an instruction at one of these addresses.
     breakpoints: BTreeSet<u32>,
@@ -844,6 +881,39 @@ const EXCP_UNALIGNED: u32 = 22;
 
 impl Machine {
     pub fn new(config: MachineConfig, bus: Bus) -> Result<Self, MachineError> {
+        let mem = &config.memory;
+        let flash = backing(mem.flash_size, 0xFF);
+        let ram = mem.ram.iter().map(|&(_, size)| backing(size, 0)).collect();
+        Self::with_memory(config, bus, flash, ram)
+    }
+
+    /// A second core of the MCU of `other`: it executes from the same flash
+    /// and RAM. `config` must have the same memory map; `bus` holds this
+    /// core's view of the peripherals (shared ones through proxies).
+    pub fn new_sharing_memory(config: MachineConfig, bus: Bus, other: &Machine) -> Result<Self, MachineError> {
+        let ours = &config.memory;
+        let theirs = &other.uc.get_data().config.memory;
+        assert!(
+            ours.flash_base == theirs.flash_base && ours.flash_size == theirs.flash_size && ours.ram == theirs.ram,
+            "cores sharing memory need the same memory map"
+        );
+        let mut machine = Self::with_memory(config, bus, other.flash.clone(), other._ram.clone())?;
+        machine.uc.get_data_mut().multicore = true;
+        Ok(machine)
+    }
+
+    /// Lets WFI/WFE sleep at most until the end of the run slice, as another
+    /// core (one made with [`Self::new_sharing_memory`]) may wake this one.
+    pub fn set_multicore(&mut self, on: bool) {
+        self.uc.get_data_mut().multicore = on;
+    }
+
+    fn with_memory(
+        config: MachineConfig,
+        bus: Bus,
+        flash: Backing,
+        ram_backing: Vec<Backing>,
+    ) -> Result<Self, MachineError> {
         let system = System {
             clock: Clock::new(config.reset_cpu_hz),
             nvic: Nvic::new(),
@@ -876,30 +946,38 @@ impl Machine {
             reset_requested: None,
             idle: IdleDetector::default(),
             idle_skipping: true,
+            multicore: false,
             bkpt_stops: true,
             stepping: false,
             watch_hit: None,
         };
         let mut uc = Unicorn::new_with_data(Arch::ARM, Mode::THUMB | Mode::MCLASS, system)?;
-        uc.ctl_set_cpu_model(ArmCpuModel::CORTEX_M4 as i32)?;
+        let model = match config.cpu {
+            CpuModel::CortexM4 => ArmCpuModel::CORTEX_M4,
+            CpuModel::CortexM0Plus => ArmCpuModel::CORTEX_M0,
+        };
+        uc.ctl_set_cpu_model(model as i32)?;
         // Breakpoints are exits; `emu_start`'s `until` is not used.
         uc.ctl_exits_enable()?;
         uc.ctl_set_exits(&[])?;
 
         let mem = &config.memory;
-        let mut flash = vec![0xFFu8; mem.flash_size as usize].into_boxed_slice();
-        let flash_ptr = flash.as_mut_ptr().cast();
+        // SAFETY: the buffer is (co-)owned by the machine and never reallocated
+        let flash_raw: *mut u8 = unsafe { (*flash.get()).as_mut_ptr() };
+        let flash_ptr = flash_raw.cast();
         // SAFETY: `flash` is owned by the machine, never reallocated and outlives `uc`.
         unsafe {
             uc.mem_map_ptr(u64::from(mem.flash_base), u64::from(mem.flash_size), Prot::READ | Prot::EXEC, flash_ptr)?;
             if mem.flash_alias_at_zero {
                 uc.mem_map_ptr(0, u64::from(mem.flash_size), Prot::READ | Prot::EXEC, flash_ptr)?;
             }
+            for &alias in &mem.flash_aliases {
+                uc.mem_map_ptr(u64::from(alias), u64::from(mem.flash_size), Prot::READ | Prot::EXEC, flash_ptr)?;
+            }
         }
-        let mut ram = Vec::new();
-        for &(base, size) in &mem.ram {
-            let mut buf = vec![0u8; size as usize].into_boxed_slice();
-            let ptr = buf.as_mut_ptr();
+        for (&(base, size), buf) in mem.ram.iter().zip(&ram_backing) {
+            // SAFETY: as for flash
+            let ptr: *mut u8 = unsafe { (*buf.get()).as_mut_ptr() };
             // SAFETY: the buffers are owned by the machine, never reallocated and outlive `uc`;
             // the DMA accesses them only between Unicorn's accesses (from its callbacks).
             unsafe {
@@ -907,51 +985,53 @@ impl Machine {
                 uc.mem_map_ptr(u64::from(base), u64::from(size), Prot::READ | Prot::WRITE, ptr.cast())?;
                 uc.get_data_mut().ram.add(base, ptr, size, true);
             }
-            ram.push(buf);
         }
         // SAFETY: as above
-        unsafe { uc.get_data_mut().ram.add(mem.flash_base, flash.as_mut_ptr(), mem.flash_size, false) };
+        unsafe { uc.get_data_mut().ram.add(mem.flash_base, flash_raw, mem.flash_size, false) };
         for &(base, size) in &mem.rom_zero {
             uc.mem_map(u64::from(base), u64::from(size), Prot::READ)?;
         }
 
-        uc.mmio_map(
-            u64::from(mem.periph_base),
-            u64::from(mem.periph_size),
-            Some(move |uc: &mut Unicorn<System>, off: u64, size: usize| {
-                let sys = uc.get_data_mut();
-                let addr = sys.config.memory.periph_base + off as u32;
-                let ws = sys.bus.wait_states(addr, false, sys.clock.cycles() - sys.mmio_shift);
-                sys.clock.advance(ws);
-                let (mut ctx, bus) = sys.ctx();
-                let value = bus.read(&mut ctx, addr, size as u32);
-                sys.service_master();
-                let now = sys.clock.cycles();
-                let until = sys.bus.read_stable_until(addr, &sys.clock);
-                sys.idle.note_read(until, now);
-                sys.clip_slice_to_events();
-                u64::from(value)
-            }),
-            Some(move |uc: &mut Unicorn<System>, off: u64, size: usize, value: u64| {
-                let sys = uc.get_data_mut();
-                let addr = sys.config.memory.periph_base + off as u32;
-                if !sys.bus.write_is_inert(addr) {
-                    sys.idle.dirty();
-                }
-                let ws = sys.bus.wait_states(addr, true, sys.clock.cycles() - sys.mmio_shift);
-                sys.clock.advance(ws);
-                let (mut ctx, bus) = sys.ctx();
-                bus.write(&mut ctx, addr, size as u32, value as u32);
-                sys.service_master();
-                sys.service_flash();
-                // A device may have raised an interrupt: let the run loop look at it.
-                if sys.nvic.any_pending() {
-                    sys.request_stop();
-                }
-                sys.take_reset_request();
-                sys.clip_slice_to_events();
-            }),
-        )?;
+        let windows = std::iter::once((mem.periph_base, mem.periph_size)).chain(mem.extra_periph.iter().copied());
+        for (base, size) in windows {
+            uc.mmio_map(
+                u64::from(base),
+                u64::from(size),
+                Some(move |uc: &mut Unicorn<System>, off: u64, size: usize| {
+                    let sys = uc.get_data_mut();
+                    let addr = base + off as u32;
+                    let ws = sys.bus.wait_states(addr, false, sys.clock.cycles() - sys.mmio_shift);
+                    sys.clock.advance(ws);
+                    let (mut ctx, bus) = sys.ctx();
+                    let value = bus.read(&mut ctx, addr, size as u32);
+                    sys.service_master();
+                    let now = sys.clock.cycles();
+                    let until = sys.bus.read_stable_until(addr, &sys.clock);
+                    sys.idle.note_read(until, now);
+                    sys.clip_slice_to_events();
+                    u64::from(value)
+                }),
+                Some(move |uc: &mut Unicorn<System>, off: u64, size: usize, value: u64| {
+                    let sys = uc.get_data_mut();
+                    let addr = base + off as u32;
+                    if !sys.bus.write_is_inert(addr) {
+                        sys.idle.dirty();
+                    }
+                    let ws = sys.bus.wait_states(addr, true, sys.clock.cycles() - sys.mmio_shift);
+                    sys.clock.advance(ws);
+                    let (mut ctx, bus) = sys.ctx();
+                    bus.write(&mut ctx, addr, size as u32, value as u32);
+                    sys.service_master();
+                    sys.service_flash();
+                    // A device may have raised an interrupt: let the run loop look at it.
+                    if sys.nvic.any_pending() {
+                        sys.request_stop();
+                    }
+                    sys.take_reset_request();
+                    sys.clip_slice_to_events();
+                }),
+            )?;
+        }
 
         uc.mmio_map(
             u64::from(PPB_BASE),
@@ -1158,7 +1238,7 @@ impl Machine {
         Ok(Self {
             uc,
             flash,
-            _ram: ram,
+            _ram: ram_backing,
             breakpoints: BTreeSet::new(),
             hw_breakpoints: std::collections::BTreeMap::new(),
             watchpoints: Vec::new(),
@@ -1234,6 +1314,12 @@ impl Machine {
         self.read_mem(addr, &mut b).then(|| u32::from_le_bytes(b))
     }
 
+    fn flash_mut(&mut self) -> &mut [u8] {
+        // SAFETY: the cores sharing the buffer run one at a time, and none
+        // holds a reference into it across calls
+        unsafe { &mut *self.flash.get() }
+    }
+
     /// Writes to memory, including flash (as a debugger/programmer would).
     pub fn write_mem(&mut self, addr: u32, data: &[u8]) -> bool {
         let mem = &self.uc.get_data().config.memory;
@@ -1243,7 +1329,7 @@ impl Machine {
         let alias = mem.flash_alias_at_zero;
         let ok = if in_flash(addr) {
             let off = (addr - fb) as usize;
-            self.flash[off..off + data.len()].copy_from_slice(data);
+            self.flash_mut()[off..off + data.len()].copy_from_slice(data);
             self.flash_writes += 1;
             if alias {
                 // The same code may also have been translated at its alias at 0.
@@ -1381,7 +1467,7 @@ impl Machine {
             let now = sys.clock.cycles();
             return Ok(sys.scs.read(&sys.nvic, now, ipsr, off, size));
         }
-        if addr.wrapping_sub(mem.periph_base) < mem.periph_size {
+        if mem.is_periph(addr) {
             let (mut ctx, bus) = sys.ctx();
             let v = bus.read(&mut ctx, addr, size);
             sys.service_master();
@@ -1420,7 +1506,7 @@ impl Machine {
             }
             return Ok(());
         }
-        if addr.wrapping_sub(mem.periph_base) < mem.periph_size {
+        if mem.is_periph(addr) {
             let (mut ctx, bus) = sys.ctx();
             bus.write(&mut ctx, addr, size, value);
             sys.service_master();
@@ -1444,7 +1530,7 @@ impl Machine {
                 return Err(fault);
             }
             let bytes = value.to_le_bytes();
-            self.flash[off as usize..(off + size) as usize].copy_from_slice(&bytes[..size as usize]);
+            self.flash_mut()[off as usize..(off + size) as usize].copy_from_slice(&bytes[..size as usize]);
             self.take_flash_dirty();
             return Ok(());
         }
@@ -1693,8 +1779,10 @@ impl Machine {
         // Halts at the reset vector with reset vector catch.
         sys.debug.on_reset();
 
-        let msp = self.read_u32(0).unwrap_or(0);
-        let reset_vector = self.read_u32(4).unwrap_or(0);
+        let vt = sys.config.vector_table;
+        sys.scs.vtor = vt;
+        let msp = self.read_u32(vt).unwrap_or(0);
+        let reset_vector = self.read_u32(vt + 4).unwrap_or(0);
         let mut core = UcCore(&mut self.uc);
         core.set_reg(CoreReg::Xpsr, 1 << 24);
         core.set_reg(CoreReg::Control, 0);
@@ -1966,7 +2054,10 @@ impl Machine {
         if is_wait {
             // Sleep until the next timed event.
             let sys = self.uc.get_data_mut();
-            let next = [sys.scs.systick.next_event(), sys.bus.next_event()].into_iter().flatten().min();
+            let mut next = [sys.scs.systick.next_event(), sys.bus.next_event()].into_iter().flatten().min();
+            if sys.multicore {
+                next = Some(next.map_or(sys.slice_limit, |t| t.min(sys.slice_limit)));
+            }
             match next {
                 Some(t) => {
                     let now = sys.clock.cycles();
@@ -1979,8 +2070,20 @@ impl Machine {
         }
     }
 
+    /// The instruction before `pc` is WFE or YIELD.
+    fn after_hint(&mut self, pc: u32) -> bool {
+        let mut prev = [0u8; 2];
+        self.read_mem(pc.wrapping_sub(2), &mut prev) && matches!(u16::from_le_bytes(prev), 0xBF20 | 0xBF10)
+    }
+
     fn sync_devices(&mut self) {
         self.uc.get_data_mut().sync_devices();
+    }
+
+    /// Brings all peripherals up to the current cycle (as at the start of a
+    /// run slice), e.g. before looking at their outputs between runs.
+    pub fn update_devices(&mut self) {
+        self.sync_devices();
     }
 
     fn take_pending_exception(&mut self) {
@@ -2054,6 +2157,7 @@ impl Machine {
     fn on_cpu_exception(uc: &mut Unicorn<System>, intno: u32) {
         uc.get_data_mut().idle.dirty();
         let pc = uc.reg_read(RegisterARM::PC).unwrap_or(0) as u32;
+        log::trace!("CPU exception {intno} at {pc:#010x}");
         match intno {
             EXCP_EXCEPTION_EXIT => {
                 let mut nvic = uc.get_data().nvic.clone();
@@ -2166,6 +2270,9 @@ impl Machine {
             return;
         }
         match (err, invalid) {
+            // QEMU leaves WFE / YIELD with EXCP_YIELD, which Unicorn reports
+            // as an invalid instruction (with the PC after it).
+            (uc_error::INSN_INVALID, _) if self.after_hint(pc) => self.on_idle_return(),
             (uc_error::INSN_INVALID, _) => {
                 self.uc.get_data_mut().scs.cfsr |= scs::CFSR_UNDEFINSTR;
                 Self::raise_fault(&mut self.uc, nvic::USAGE_FAULT, pc);

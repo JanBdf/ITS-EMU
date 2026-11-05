@@ -51,8 +51,16 @@ impl Clock {
 
     /// Virtual time since reset in picoseconds.
     pub fn time_ps(&self) -> u64 {
-        let delta = u128::from(self.cycles - self.seg_cycles);
-        self.seg_ps + (delta * PS_PER_S / u128::from(self.cpu_hz)) as u64
+        self.ps_at_cycle(self.cycles)
+    }
+
+    /// Takes over the frequency (and when it last changed) of `other`, the
+    /// clock of another core on the same clock: equal cycle counts then mean
+    /// the same time. A core behind `other` may lag the frequency change.
+    pub fn follow(&mut self, other: &Clock) {
+        self.cpu_hz = other.cpu_hz;
+        self.seg_cycles = other.seg_cycles;
+        self.seg_ps = other.seg_ps;
     }
 
     /// First cycle (not before the last frequency change) at which

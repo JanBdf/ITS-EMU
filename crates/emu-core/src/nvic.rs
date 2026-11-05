@@ -174,6 +174,17 @@ impl Nvic {
         self.set_irq_level(irq, level);
     }
 
+    /// Current level of external interrupt line `irq`.
+    pub fn irq_level(&self, irq: u32) -> bool {
+        irq < NUM_IRQS && self.level.get(IRQ0 + irq)
+    }
+
+    /// Levels of the external interrupt lines 0..32 (bit n: line n).
+    pub fn irq_levels_low(&self) -> u32 {
+        // IRQ0 = 16: lines 0..16 in the first word, 16..32 in the second
+        (self.level.0[0] >> IRQ0) | (self.level.0[1] << (32 - IRQ0))
+    }
+
     #[inline]
     pub fn set_irq_level(&mut self, irq: u32, high: bool) {
         if irq >= NUM_IRQS {
@@ -291,6 +302,15 @@ impl Nvic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn irq_levels_as_a_mask() {
+        let mut n = Nvic::new();
+        for irq in [0, 15, 16, 31, 32] {
+            n.set_irq_level(irq, true);
+        }
+        assert_eq!(n.irq_levels_low(), 1 | 1 << 15 | 1 << 16 | 1 << 31);
+    }
 
     #[test]
     fn selects_highest_priority_and_respects_masks() {
