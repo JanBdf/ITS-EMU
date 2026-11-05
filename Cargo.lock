@@ -1895,6 +1895,7 @@ dependencies = [
  "png",
  "resvg",
  "rfd",
+ "rp2040",
  "stlink",
  "stm32f429",
  "windows-sys 0.61.2",

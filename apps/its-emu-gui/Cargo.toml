@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 itsboard.workspace = true
+rp2040.workspace = true
 emu-core = { workspace = true, features = ["gdb"] }
 stm32f429.workspace = true
 stlink.workspace = true

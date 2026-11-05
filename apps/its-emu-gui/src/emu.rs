@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use emu_core::gdb::{Execution, GdbServer};
 use emu_core::{ElfImage, StopReason};
+use itsboard::pico::PicoPlugin;
 use itsboard::sim::DEFAULT_FONTS;
+use itsboard::spec::DeviceSpec;
 use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH, Simulator};
 
 use crate::render::Renderer;
@@ -44,10 +46,52 @@ pub enum Command {
     SetUsb(bool),
     /// Load the firmware file again when it changes on disk (a new build).
     SetAutoReload(bool),
+    /// Connect a device to the header pins; it gets the next [`DeviceView::id`].
+    AddDevice(DeviceSpec),
+    RemoveDevice(u64),
+    /// Switch a Pico off and on again (the firmware file is read again).
+    RestartDevice(u64),
+    /// Turn an encoder by that many detents (negative: counter-clockwise).
+    Turn(u64, i32),
+    /// Temperature at a DS18B20 (°C).
+    Temperature(u64, f32),
+    /// Bytes for a Pico's USB serial port.
+    PicoSend(u64, Vec<u8>),
+    /// Boot ROM file for Picos started from now on (`None`: the cached download).
+    SetBootrom(Option<PathBuf>),
     /// A USB request arrived.
     Wake,
     Quit,
 }
+
+/// A device on the header pins as the UI shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceView {
+    pub id: u64,
+    pub spec: DeviceSpec,
+    pub state: DeviceState,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeviceState {
+    /// An encoder.
+    Connected,
+    /// A DS18B20: its temperature and ROM code.
+    Sensor {
+        celsius: f32,
+        rom: Option<[u8; 8]>,
+    },
+    /// A Pico boots (its boot ROM may be downloaded first).
+    Starting,
+    /// A Pico runs; host programs open its USB serial port here.
+    Running {
+        port: Option<PathBuf>,
+    },
+    Failed(String),
+}
+
+/// Temperature of a newly connected DS18B20.
+pub const DEFAULT_CELSIUS: f32 = 21.0;
 
 /// The board's ST-LINK on USB/IP.
 #[derive(Debug, Clone)]
@@ -121,6 +165,9 @@ pub struct Snapshot {
     pub dac1: Option<f32>,
     /// Mode and level of the pins of ports A–G.
     pub pins: crate::pins::PinsView,
+    pub devices: Vec<DeviceView>,
+    /// Serial output of the Picos not yet taken by the UI.
+    pub pico_output: Vec<(u64, Vec<u8>)>,
 }
 
 impl Default for Snapshot {
@@ -145,6 +192,8 @@ impl Default for Snapshot {
             usb: UsbStatus::Off,
             dac1: None,
             pins: Default::default(),
+            devices: Vec::new(),
+            pico_output: Vec::new(),
         }
     }
 }
@@ -175,7 +224,13 @@ impl Drop for EmuHandle {
 /// Starts the emulator thread. `repaint` is called whenever the snapshot
 /// changed. With `gdb_addr`, a GDB server listens there (except while
 /// pyOCD uses the ST-LINK: its own GDB server takes the port).
-pub fn spawn(repaint: impl Fn() + Send + Sync + 'static, gdb_addr: Option<String>, usb: UsbConfig) -> EmuHandle {
+pub fn spawn(
+    repaint: impl Fn() + Send + Sync + 'static,
+    gdb_addr: Option<String>,
+    usb: UsbConfig,
+    devices: Vec<DeviceSpec>,
+    bootrom: Option<PathBuf>,
+) -> EmuHandle {
     let (tx, rx) = channel();
     let snapshot = SharedSnapshot::default();
     let shared = snapshot.clone();
@@ -190,7 +245,14 @@ pub fn spawn(repaint: impl Fn() + Send + Sync + 'static, gdb_addr: Option<String
     });
     let thread = std::thread::Builder::new()
         .name("emulator".into())
-        .spawn(move || Worker::new(rx, shared, Arc::new(repaint), gdb_addr, usb, wake, pending).run())
+        .spawn(move || {
+            let mut worker = Worker::new(rx, shared, Arc::new(repaint), gdb_addr, usb, wake, pending);
+            worker.bootrom = bootrom;
+            for spec in devices {
+                worker.add_device(spec);
+            }
+            worker.run()
+        })
         .expect("spawn emulator thread");
     EmuHandle { commands: tx, snapshot, thread: Some(thread) }
 }
@@ -261,6 +323,42 @@ struct Worker {
     file_stamp: Option<FileStamp>,
     file_changed: Option<(FileStamp, Instant)>,
     file_check_at: Instant,
+    /// Devices on the header pins, kept across loads of firmware.
+    devices: Vec<Device>,
+    next_device_id: u64,
+    bootrom: Option<PathBuf>,
+}
+
+/// A device on the header pins.
+struct Device {
+    id: u64,
+    spec: DeviceSpec,
+    /// Its number among the board's encoders or sensors.
+    board_index: Option<usize>,
+    celsius: f32,
+    pico: Option<PicoPlugin>,
+    /// A Pico being started (on a thread of its own: the boot ROM may be downloaded).
+    starting: Option<Receiver<Result<PicoPlugin, String>>>,
+    error: Option<String>,
+}
+
+impl Device {
+    fn state(&self, board: Option<&itsboard::ItsBoard>) -> DeviceState {
+        if let Some(e) = self.error.clone().or_else(|| self.pico.as_ref().and_then(PicoPlugin::failure)) {
+            return DeviceState::Failed(e);
+        }
+        match &self.spec {
+            DeviceSpec::Encoder(..) => DeviceState::Connected,
+            DeviceSpec::Ds18b20(_) => DeviceState::Sensor {
+                celsius: self.celsius,
+                rom: board.zip(self.board_index).and_then(|(b, n)| b.ds18b20_rom(n)),
+            },
+            DeviceSpec::Pico(_) => match &self.pico {
+                Some(p) => DeviceState::Running { port: p.serial_port().map(PathBuf::from) },
+                None => DeviceState::Starting,
+            },
+        }
+    }
 }
 
 /// Modification time and size of a file.
@@ -327,6 +425,9 @@ impl Worker {
             file_stamp: None,
             file_changed: None,
             file_check_at: now,
+            devices: Vec::new(),
+            next_device_id: 0,
+            bootrom: None,
         };
         w.manage_gdb();
         if usb_config.enabled {
@@ -435,6 +536,134 @@ impl Worker {
         }
     }
 
+    /// Connects a device (a Pico once it has started).
+    fn add_device(&mut self, spec: DeviceSpec) {
+        let id = self.next_device_id;
+        self.next_device_id += 1;
+        let mut device =
+            Device { id, spec, board_index: None, celsius: DEFAULT_CELSIUS, pico: None, starting: None, error: None };
+        self.start_pico(&mut device);
+        self.devices.push(device);
+        self.wire_devices();
+    }
+
+    /// Starts the Pico of a Pico device.
+    fn start_pico(&self, device: &mut Device) {
+        let DeviceSpec::Pico(spec) = &device.spec else { return };
+        let (spec, bootrom) = (spec.clone(), self.bootrom.clone());
+        let (tx, rx) = channel();
+        let (wake, repaint) = (self.wake.clone(), self.repaint.clone());
+        std::thread::spawn(move || {
+            let result = spec.start(bootrom.as_deref()).map_err(|e| e.to_string());
+            if let Ok(pico) = &result
+                && let Some(port) = pico.serial_port()
+            {
+                log::info!("Pico ({}): serial port {}", spec.firmware.display(), port.display());
+            }
+            let _ = tx.send(result);
+            wake();
+            repaint();
+        });
+        device.pico = None;
+        device.error = None;
+        device.starting = Some(rx);
+    }
+
+    fn device(&mut self, id: u64) -> Option<&mut Device> {
+        self.devices.iter_mut().find(|d| d.id == id)
+    }
+
+    /// Connects the devices to the board again (after a change, or to a new
+    /// board): the inputs set in the UI first, the devices drive over them.
+    fn wire_devices(&mut self) {
+        let Some(sim) = &self.sim else { return };
+        let board = &sim.board;
+        board.remove_devices();
+        self.restore_inputs();
+        for d in &mut self.devices {
+            d.board_index = match (&d.spec, &d.pico) {
+                (DeviceSpec::Encoder(a, b), _) => Some(board.add_encoder(*a, *b)),
+                (DeviceSpec::Ds18b20(pin), _) => {
+                    let n = board.add_ds18b20(*pin);
+                    let _ = board.set_temperature(n, d.celsius);
+                    Some(n)
+                }
+                (DeviceSpec::Pico(spec), Some(pico)) => {
+                    board.add_plugin(pico.link(), &spec.board_pins());
+                    None
+                }
+                (DeviceSpec::Pico(_), None) => None,
+            };
+        }
+    }
+
+    /// Takes the Picos that have started and their serial output.
+    fn poll_devices(&mut self) {
+        let mut started = false;
+        for d in &mut self.devices {
+            let Some(rx) = &d.starting else { continue };
+            match rx.try_recv() {
+                Ok(result) => {
+                    d.starting = None;
+                    match result {
+                        Ok(pico) => d.pico = Some(pico),
+                        Err(e) => d.error = Some(e),
+                    }
+                    started = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    d.starting = None;
+                    d.error = Some("the Pico did not start".to_owned());
+                }
+            }
+        }
+        if started {
+            self.wire_devices();
+            self.publish(true);
+        }
+    }
+
+    fn handle_device(&mut self, cmd: Command) {
+        match cmd {
+            Command::AddDevice(spec) => self.add_device(spec),
+            Command::RemoveDevice(id) => {
+                self.devices.retain(|d| d.id != id);
+                self.wire_devices();
+            }
+            Command::RestartDevice(id) => {
+                let Some(i) = self.devices.iter().position(|d| d.id == id) else { return };
+                let mut d = self.devices.remove(i);
+                // stopped before its successor starts (the pins are free again)
+                d.pico = None;
+                self.wire_devices();
+                self.start_pico(&mut d);
+                self.devices.insert(i, d);
+            }
+            Command::Turn(id, detents) => {
+                let index = self.device(id).and_then(|d| d.board_index);
+                if let (Some(n), Some(sim)) = (index, &self.sim) {
+                    let _ = sim.board.rotate_encoder(n, detents);
+                }
+            }
+            Command::Temperature(id, celsius) => {
+                let Some(d) = self.device(id) else { return };
+                d.celsius = celsius;
+                let index = d.board_index;
+                if let (Some(n), Some(sim)) = (index, &self.sim) {
+                    let _ = sim.board.set_temperature(n, celsius);
+                }
+            }
+            Command::PicoSend(id, data) => {
+                if let Some(pico) = self.device(id).and_then(|d| d.pico.as_ref()) {
+                    pico.send(&data);
+                }
+            }
+            Command::SetBootrom(path) => self.bootrom = path,
+            _ => unreachable!("not a device command"),
+        }
+    }
+
     fn virtual_ns(&self) -> u64 {
         self.sim.as_ref().map_or(0, Simulator::time_ns)
     }
@@ -464,6 +693,7 @@ impl Worker {
                 }
                 Err(RecvTimeoutError::Timeout) => {}
             }
+            self.poll_devices();
             self.poll_gdb();
             self.poll_usb();
             self.poll_firmware_file();
@@ -534,6 +764,13 @@ impl Worker {
                 self.published_generation = u64::MAX;
             }
             Command::SetUsb(on) => self.set_usb(on),
+            cmd @ (Command::AddDevice(_)
+            | Command::RemoveDevice(_)
+            | Command::RestartDevice(_)
+            | Command::Turn(..)
+            | Command::Temperature(..)
+            | Command::PicoSend(..)
+            | Command::SetBootrom(_)) => self.handle_device(cmd),
             Command::SetAutoReload(on) => {
                 self.auto_reload = on;
                 self.file_stamp = self.firmware.as_deref().and_then(file_stamp);
@@ -694,7 +931,7 @@ impl Worker {
         }
         self.adopt_sim();
         self.core_halted = false;
-        self.restore_inputs();
+        self.wire_devices();
         self.file_stamp = file_stamp(&path);
         self.file_changed = None;
         self.firmware = Some(path);
@@ -823,6 +1060,15 @@ impl Worker {
         changed |= set(&mut snap.gdb, self.gdb_status.clone());
         changed |= set(&mut snap.gdb_attached, self.gdb.as_ref().is_some_and(GdbServer::has_controller));
         changed |= set(&mut snap.usb, self.usb_status());
+        let board = self.sim.as_ref().map(|s| &s.board);
+        let devices = self.devices.iter().map(|d| DeviceView { id: d.id, spec: d.spec.clone(), state: d.state(board) });
+        changed |= set(&mut snap.devices, devices.collect());
+        for d in &self.devices {
+            if let Some(out) = d.pico.as_ref().map(PicoPlugin::take_output).filter(|o| !o.is_empty()) {
+                snap.pico_output.push((d.id, out));
+                changed = true;
+            }
+        }
         if let Some(sim) = &self.sim {
             let b = &sim.board;
             changed |= set(&mut snap.leds, b.leds());
