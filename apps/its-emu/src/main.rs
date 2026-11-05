@@ -8,6 +8,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use emu_core::gdb::{Execution, GdbServer};
 use emu_core::{CoreReg, ElfImage, Machine, StopReason};
+use itsboard::pico::PicoPlugin;
+use itsboard::spec::DeviceSpec;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "ITS-Board emulator (STM32F429ZI)")]
@@ -58,7 +60,8 @@ struct Args {
     /// port (`\n` = newline, no commas), a pin such as `PC3` takes a voltage
     /// or `open` (analog input), `ENC` (`ENC1`, ...) turns a rotary encoder
     /// of `--device` by that many detents (negative: counter-clockwise),
-    /// `TEMP` (`TEMP1`, ...) sets the temperature of a DS18B20 in °C.
+    /// `TEMP` (`TEMP1`, ...) sets the temperature of a DS18B20 in °C,
+    /// `PICO` (`PICO1`, ...) takes text for the serial port of a Pico.
     /// Example: `2.5:S7=1,2.6:S7=0,3:SERIAL=hi\n,4:PC3=1.65,5:ENC=-3,6:TEMP=30.5`
     #[arg(long, value_parser = parse_inputs)]
     input: Option<InputScript>,
@@ -66,9 +69,18 @@ struct Args {
     /// External device on header pins (repeatable): `encoder@PC6,PC7` is a
     /// rotary encoder with contacts A, B to GND and pull-ups (clockwise, A
     /// falls first; turn it with the `ENC` input), `ds18b20@PG2` a 1-Wire
-    /// temperature sensor (21 °C; change it with the `TEMP` input)
-    #[arg(long = "device", value_name = "DEVICE@PINS", value_parser = parse_device)]
-    devices: Vec<Device>,
+    /// temperature sensor (21 °C; change it with the `TEMP` input),
+    /// `pico=FIRMWARE.uf2@GP0=PF0,GP5=PF1` a Raspberry Pi Pico running the
+    /// firmware with its GPIOs wired to the pins (default wiring GP0=PF0,
+    /// GP5=PF1); its USB serial port is a pseudo terminal (path printed)
+    #[arg(long = "device", value_name = "DEVICE@PINS", value_parser = DeviceSpec::parse)]
+    devices: Vec<DeviceSpec>,
+
+    /// Boot ROM of the Pico's RP2040 (16 KiB, or the ELF file of the
+    /// pico-bootrom release). Default: downloaded once from the Raspberry Pi
+    /// GitHub release and kept in the cache directory
+    #[arg(long, value_name = "FILE")]
+    pico_bootrom: Option<PathBuf>,
 
     /// Forward the terminal's standard input to the virtual COM port
     #[arg(long)]
@@ -95,38 +107,6 @@ struct Args {
 const GDB_SLICE_NS: u64 = 1_000_000;
 
 #[derive(Debug, Clone)]
-enum Device {
-    Encoder((char, u32), (char, u32)),
-    Ds18b20((char, u32)),
-}
-
-/// `PC6` -> ('C', 6)
-fn parse_pin(s: &str) -> Result<(char, u32), String> {
-    let s = s.trim().to_ascii_uppercase();
-    let b = s.as_bytes();
-    if b.len() >= 3
-        && b[0] == b'P'
-        && (b'A'..=b'K').contains(&b[1])
-        && let Some(n) = s[2..].parse::<u32>().ok().filter(|&n| n < 16)
-    {
-        return Ok((b[1] as char, n));
-    }
-    Err(format!("expected a pin such as PC6, got {s:?}"))
-}
-
-fn parse_device(s: &str) -> Result<Device, String> {
-    let (kind, pins) = s.split_once('@').ok_or_else(|| format!("expected DEVICE@PINS, got {s:?}"))?;
-    let pins = pins.split(',').map(parse_pin).collect::<Result<Vec<_>, _>>()?;
-    match (kind.to_ascii_lowercase().as_str(), pins.as_slice()) {
-        ("encoder", &[a, b]) => Ok(Device::Encoder(a, b)),
-        ("encoder", _) => Err("an encoder needs two pins: encoder@PA,PB".to_owned()),
-        ("ds18b20", &[pin]) => Ok(Device::Ds18b20(pin)),
-        ("ds18b20", _) => Err("a DS18B20 needs one pin: ds18b20@PG2".to_owned()),
-        _ => Err(format!("unknown device {kind:?} (known: encoder, ds18b20)")),
-    }
-}
-
-#[derive(Debug, Clone)]
 enum Input {
     Button(u32, bool),
     User(bool),
@@ -138,6 +118,8 @@ enum Input {
     Encoder(usize, i32),
     /// Temperature of DS18B20 n.
     Temperature(usize, f32),
+    /// Text for the serial port of Pico n.
+    Pico(usize, Vec<u8>),
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +150,11 @@ fn parse_inputs(s: &str) -> Result<InputScript, String> {
                 let (x, y) = value.split_once(';').ok_or_else(|| format!("expected x;y in {item:?}"))?;
                 let parse = |v: &str| v.parse::<f32>().map_err(|_| format!("bad coordinate in {item:?}"));
                 Input::Touch(Some((parse(x)?, parse(y)?)))
+            }
+            t if t.starts_with("PICO") => {
+                let n = if t.len() == 4 { Some(0) } else { t[4..].parse::<usize>().ok() };
+                let n = n.ok_or_else(|| format!("unknown input {name}"))?;
+                Input::Pico(n, value.replace("\\n", "\n").replace("\\r", "\r").into_bytes())
             }
             p if p.len() >= 3 && p.starts_with('P') && (b'A'..=b'K').contains(&p.as_bytes()[1]) => {
                 let pin =
@@ -203,8 +190,12 @@ fn parse_inputs(s: &str) -> Result<InputScript, String> {
     Ok(InputScript(events))
 }
 
-fn apply_input(board: &itsboard::ItsBoard, input: &Input) {
+fn apply_input(board: &itsboard::ItsBoard, picos: &[PicoPlugin], input: &Input) {
     match input {
+        Input::Pico(n, data) => match picos.get(*n) {
+            Some(p) => p.send(data),
+            None => log::warn!("input PICO: there is no Pico {n} (add one with --device pico=FILE.uf2)"),
+        },
         Input::Temperature(n, celsius) => {
             if let Err(e) = board.set_temperature(*n, *celsius) {
                 log::warn!("input TEMP: {e} (add one with --device ds18b20@PIN)");
@@ -242,12 +233,21 @@ fn main() -> Result<()> {
         None => itsboard::Simulator::blank(fonts.as_deref())?,
     };
     let itsboard::Simulator { mut machine, board, mut image } = sim;
+    let mut picos = Vec::new();
     for device in &args.devices {
         match *device {
-            Device::Encoder(a, b) => {
+            DeviceSpec::Pico(ref spec) => {
+                let pico = spec.start(args.pico_bootrom.as_deref())?;
+                board.add_plugin(pico.link(), &spec.board_pins());
+                if let Some(port) = pico.serial_port() {
+                    println!("Pico {}: serial port {}", picos.len(), port.display());
+                }
+                picos.push(pico);
+            }
+            DeviceSpec::Encoder(a, b) => {
                 board.add_encoder(a, b);
             }
-            Device::Ds18b20(pin) => {
+            DeviceSpec::Ds18b20(pin) => {
                 board.add_ds18b20(pin);
             }
         }
@@ -306,7 +306,7 @@ fn main() -> Result<()> {
         }
         while let Some(ev) = inputs.next_if(|e| e.at_ns <= now_ns) {
             log::info!("input at {:.3} s: {:?}", now_ns as f64 / 1e9, ev.input);
-            apply_input(&board, &ev.input);
+            apply_input(&board, &picos, &ev.input);
         }
         let execution = match &mut gdb {
             Some(server) => {
