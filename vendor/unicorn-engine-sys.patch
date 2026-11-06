@@ -701,7 +701,26 @@
  /*
 --- a/qemu/target/arm/unicorn_arm.c
 +++ b/qemu/target/arm/unicorn_arm.c
-@@ -154,6 +154,12 @@
+@@ -131,6 +131,18 @@
+     return xpsr_read(env) & mask;
+ }
+ 
++// ITS-EMU: R0..R15 and xPSR (as UC_ARM_REG_XPSR reads it) in one call, for
++// the emulator's idle detection at loop heads: without the dispatch per
++// register and the JIT write protection bookkeeping of uc_reg_read_batch.
++UNICORN_EXPORT
++void uc_its_core_regs(uc_engine *uc, uint32_t *out)
++{
++    CPUARMState *env = uc->cpu->env_ptr;
++
++    memcpy(out, env->regs, 16 * sizeof(uint32_t));
++    out[16] = v7m_mrs_xpsr(env, 3);
++}
++
+ static void v7m_msr_xpsr(CPUARMState *env, uint32_t mask, uint32_t reg,
+                          uint32_t val)
+ {
+@@ -154,6 +166,12 @@
      }
  
      xpsr_write(env, val, xpsrmask);
@@ -714,7 +733,7 @@
  }
  
  static uc_err read_cp_reg(CPUARMState *env, uc_arm_cp_reg *cp)
-@@ -578,6 +584,8 @@
+@@ -578,6 +596,8 @@
          return false;
      case EXCP_UDEF:
      case EXCP_YIELD:
@@ -723,7 +742,7 @@
          return true;
      case EXCP_INVSTATE:
          uc->invalid_error = UC_ERR_EXCEPTION;
-@@ -770,6 +778,8 @@
+@@ -770,6 +790,8 @@
      return UC_ERR_OK;
  }
  
@@ -732,7 +751,7 @@
  DEFAULT_VISIBILITY
  void uc_init(struct uc_struct *uc)
  {
-@@ -788,4 +798,5 @@
+@@ -788,4 +810,5 @@
      uc->context_save = uc_arm_context_save;
      uc->context_restore = uc_arm_context_restore;
      uc_common_init(uc);
