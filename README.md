@@ -132,8 +132,9 @@ FILE` take a local copy instead).
 The emulated Pico runs at about 0.7–0.8× real time while its firmware
 busy-waits; a board with a Pico runs at that speed too.
 The Pico's PWM slices drive their pins (free-running and phase-correct,
-wrap interrupts; not the B-pin input modes).
-Not emulated on the Pico: DMA, ADC, SPI, I²C and the RTC (their
+wrap interrupts; not the B-pin input modes); its ADC converts the
+temperature sensor (27 °C) and GPIO 26–29 (the level on the pin: 0 or 3.3 V).
+Not emulated on the Pico: DMA, SPI, I²C and the RTC (their
 registers only store values), and programming or erasing its flash (the
 contents stay). Firmware that uses them does not work as on the real Pico;
 the first use of each shows a warning in the Devices panel and in the log.

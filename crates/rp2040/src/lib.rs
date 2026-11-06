@@ -4,6 +4,7 @@
 //! vector table at 0x1000_0100); core 1 starts in the boot ROM, which is the
 //! real one, and waits there for core 0 to launch it.
 
+pub mod adc;
 pub mod bootrom;
 pub mod flash;
 pub mod pico;
@@ -80,6 +81,8 @@ pub struct Rp2040 {
     pub serial: usb::SharedSerial,
     /// What the firmware uses that is not emulated.
     pub notices: Notices,
+    /// Voltages at the ADC inputs, temperature at the sensor.
+    pub analog: adc::SharedAnalog,
 }
 
 fn attach<B: Block + 'static>(bus: &mut Bus, base: u32, block: B) {
@@ -123,7 +126,8 @@ pub fn build() -> ([Bus; 2], Rp2040) {
     attach(&mut bus, 0x4004_0000, RegFile::unemulated("SPI1", 0x28, notices.clone()));
     attach(&mut bus, 0x4004_4000, RegFile::unemulated("I2C0", 0x100, notices.clone()));
     attach(&mut bus, 0x4004_8000, RegFile::unemulated("I2C1", 0x100, notices.clone()));
-    attach(&mut bus, 0x4004_C000, RegFile::unemulated("ADC", 0x24, notices.clone()));
+    let analog = adc::SharedAnalog::default();
+    attach(&mut bus, 0x4004_C000, adc::Adc::new(pins.clone(), tree.clone(), analog.clone(), notices.clone()));
     attach(&mut bus, 0x4005_0000, pwm::Pwm::new(pins.clone(), notices.clone()));
     attach(&mut bus, 0x4005_4000, timer::Timer::new());
     attach(&mut bus, 0x4005_8000, sys::Watchdog::new());
@@ -156,5 +160,5 @@ pub fn build() -> ([Bus; 2], Rp2040) {
         bus.attach_device(Box::new(shared.devices(core)));
         bus
     };
-    ([core_bus(0), core_bus(1)], Rp2040 { pins, serial, notices })
+    ([core_bus(0), core_bus(1)], Rp2040 { pins, serial, notices, analog })
 }

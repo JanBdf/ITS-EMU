@@ -60,8 +60,9 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   RTSR/FTSR/IMR) is to be measured on the board first. The timer TRGO
   triggers exist for both groups (update event, counter enable; UG with
   MMS = 000 triggers nothing, HwCheck `dacwave`)
-- Pico: DMA, ADC, SPI, I2C and RTC only store their registers (PWM: not
-  the DIVMODE inputs, PH_ADV/PH_RET, DREQs), flash
+- Pico: DMA, SPI, I2C and RTC only store their registers (PWM: not the
+  DIVMODE inputs, PH_ADV/PH_RET, DREQs; ADC: no DREQ, and the inputs see
+  only digital levels from the board: `Pico::analog` sets voltages), flash
   program/erase commands are ignored (both noted to the user once). A core
   writing flash or RAM drops only its own translations: code one core
   writes and the other one has already run stays stale there

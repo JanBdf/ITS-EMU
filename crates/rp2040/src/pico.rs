@@ -98,6 +98,12 @@ impl Pico {
         self.mcu.pins.borrow().outputs()
     }
 
+    /// Voltages at the ADC inputs (GPIO 26..29) and the temperature at the
+    /// sensor.
+    pub fn analog(&self) -> &crate::adc::SharedAnalog {
+        &self.mcu.analog
+    }
+
     /// The USB CDC serial port.
     pub fn serial(&self) -> &SharedSerial {
         &self.mcu.serial
