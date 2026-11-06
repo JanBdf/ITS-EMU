@@ -45,9 +45,8 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   the TIM10/11/13/14 OC1 inputs of TIM9/TIM12 are missing. On the board, UG while
   the counter is stopped does not change CNT until it runs again (the
   emulator clears it at once)
-- DMA FIFO/bursts. Ethernet: the MAC/DMA and the PHY exist (`stm32f429::eth`,
-  the Stack demo answers ARP and ping in `tests/ethernet.rs`); the cable
-  (`EthLink`) still needs a network behind it for the CLI and GUI. I2C with DMA keeps
+- DMA FIFO/bursts. Ethernet: the virtual network (`itsboard::net`, smoltcp)
+  has no NAT to the computer's network, and IPv6 frames go nowhere. I2C with DMA keeps
   the CPU's byte timing: BTF is set after each byte although the DMA keeps
   DR filled on the board (the HAL ignores BTF while DMAEN is set).
   Timer DMA is not compared with the board yet: record HwCheck `timdma`

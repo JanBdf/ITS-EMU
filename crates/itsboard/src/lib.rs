@@ -15,6 +15,7 @@
 pub mod devices;
 pub mod ili9486;
 pub mod lm75;
+pub mod net;
 pub mod pico;
 pub mod plugin;
 pub mod sim;
@@ -258,6 +259,16 @@ impl ItsBoard {
         let mut sensors = self.sensors.borrow_mut();
         sensors.push(Sensor::Lm75(celsius));
         sensors.len() - 1
+    }
+
+    /// Connects the Ethernet jack to a [`net::VirtualNet`] (gateway, DHCP,
+    /// ports of the computer forwarded to the board); returns the forwards
+    /// with the addresses they listen on.
+    pub fn add_network(&self, config: net::NetConfig) -> std::io::Result<Vec<(net::Forward, std::net::SocketAddr)>> {
+        let net = net::VirtualNet::new(self.mcu.eth_link.clone(), config)?;
+        let bound = net.bound().to_vec();
+        self.devices.borrow_mut().push(Rc::new(RefCell::new(net)));
+        Ok(bound)
     }
 
     /// Wires the outputs of a [`plugin`] to header pins (`wiring[n]`: the pin
