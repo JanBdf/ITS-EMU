@@ -11,6 +11,7 @@ use std::rc::Rc;
 use emu_core::nvic::Nvic;
 use emu_core::{Bus, Clock, DeviceCtx, Peripheral, ResetKind};
 
+use crate::dma::{self, SharedDma};
 use crate::sio::{SIO_IRQ_PROC0, SIO_IRQ_PROC1};
 
 /// The external interrupt lines of the RP2040's peripherals (0..26), except
@@ -29,6 +30,8 @@ struct Shared {
     next_event: Option<u64>,
     /// Interrupt lines each core's NVIC was given.
     applied: [u32; 2],
+    /// The DMA, whose transfers are made around every access and update.
+    dma: Option<SharedDma>,
 }
 
 #[derive(Clone)]
@@ -43,7 +46,13 @@ impl SharedBus {
             reset_hz,
             next_event: None,
             applied: [0; 2],
+            dma: None,
         })))
+    }
+
+    /// The DMA that moves data on this bus.
+    pub fn set_dma(&self, dma: SharedDma) {
+        self.0.borrow_mut().dma = Some(dma);
     }
 
     /// Runs `f` on the bus at the time of core `core` (or later), then hands
@@ -62,9 +71,14 @@ impl SharedBus {
         if now > s.clock.cycles() {
             s.clock.advance(now - s.clock.cycles());
         }
-        let result = f(&mut s.bus, &mut DeviceCtx { clock: &mut s.clock, nvic: &mut s.nvic });
+        let mut shared_ctx = DeviceCtx { clock: &mut s.clock, nvic: &mut s.nvic };
+        // the DMA up to now before the access, and what the access lets it do
+        let pump = |bus: &mut Bus, ctx: &mut DeviceCtx| s.dma.as_ref().is_some_and(|d| dma::pump(d, bus, ctx));
+        let mut moved = pump(&mut s.bus, &mut shared_ctx);
+        let result = f(&mut s.bus, &mut shared_ctx);
+        moved |= pump(&mut s.bus, &mut shared_ctx);
         let accessed = s.bus.take_access_event();
-        if changes {
+        if changes || moved {
             s.next_event = s.bus.next_event();
         } else if let Some(t) = accessed {
             s.next_event = Some(s.next_event.map_or(t, |n| n.min(t)));

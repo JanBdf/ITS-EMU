@@ -11,6 +11,7 @@ use std::collections::VecDeque;
 
 use emu_core::{Clock, DeviceCtx};
 
+use crate::dma::SharedDma;
 use crate::pins::SharedPins;
 use crate::regs::{Block, Op};
 
@@ -158,6 +159,8 @@ pub struct Pio {
     /// The state machines have run up to (excluding) this cycle.
     now: u64,
     warned: bool,
+    /// Channels paced by the FIFOs feed and drain them directly.
+    dma: Option<SharedDma>,
 }
 
 impl Pio {
@@ -177,7 +180,67 @@ impl Pio {
             oe: 0,
             now: 0,
             warned: false,
+            dma: None,
         }
+    }
+
+    /// The DMA whose channels the FIFOs pace.
+    pub fn with_dma(mut self, dma: SharedDma) -> Self {
+        self.dma = Some(dma);
+        self
+    }
+
+    /// Fills the TX FIFO of state machine `i` from a DMA channel it paces
+    /// (the DMA keeps it full).
+    fn fill_tx(&mut self, ctx: &mut DeviceCtx, i: usize, cycle: u64) {
+        let Some(dma) = self.dma.clone() else { return };
+        while self.sm[i].tx.len() < self.sm[i].tx_cap() {
+            let Some(v) = dma.borrow_mut().feed_tx(ctx, self.index, i, cycle) else { break };
+            self.sm[i].tx.push_back(v);
+        }
+    }
+
+    /// The next word of the TX FIFO (a pull at `cycle`).
+    fn tx_pop(&mut self, ctx: &mut DeviceCtx, i: usize, cycle: u64) -> Option<u32> {
+        self.fill_tx(ctx, i, cycle);
+        let v = self.sm[i].tx.pop_front();
+        if v.is_some() {
+            self.fill_tx(ctx, i, cycle);
+        }
+        v
+    }
+
+    /// Hands the RX FIFO's words to a DMA channel it paces (at `cycle`).
+    fn drain_rx(&mut self, ctx: &mut DeviceCtx, i: usize, cycle: u64) {
+        let Some(dma) = self.dma.clone() else { return };
+        while let Some(&v) = self.sm[i].rx.front() {
+            if !dma.borrow_mut().take_rx(ctx, self.index, i, v, cycle) {
+                break;
+            }
+            self.sm[i].rx.pop_front();
+        }
+    }
+
+    /// The earliest end of a DMA channel paced by a FIFO: each tick of a
+    /// state machine pulls or pushes one word at most.
+    fn dma_end(&self) -> Option<u64> {
+        let dma = self.dma.as_ref()?.try_borrow().ok()?;
+        if !dma.any_busy() {
+            return None;
+        }
+        (0..4)
+            .filter(|&i| self.running(i))
+            .filter_map(|i| {
+                let sm = &self.sm[i];
+                let tx = dma.pio_remaining(self.index, i as u8).map(|left| {
+                    let room = sm.tx_cap().saturating_sub(sm.tx.len()) as u32;
+                    u64::from(left.saturating_sub(room).max(1))
+                });
+                let rx = dma.pio_remaining(self.index, 4 + i as u8).map(|left| u64::from(left.max(1)));
+                let words = [tx, rx].into_iter().flatten().min()?;
+                Some((sm.next + (words - 1) * sm.div()).div_ceil(256))
+            })
+            .min()
     }
 
     fn intr(&self) -> u32 {
@@ -384,6 +447,7 @@ impl Pio {
             // IN
             2 => {
                 let n = if arg2 == 0 { 32 } else { arg2 };
+                self.drain_rx(ctx, i, cycle);
                 let sm = &self.sm[i];
                 let autopush = sm.shiftctrl & (1 << 16) != 0;
                 if autopush && sm.isr_count + n >= sm.push_thresh() && sm.rx.len() >= sm.rx_cap() {
@@ -416,19 +480,19 @@ impl Pio {
                     sm.rx.push_back(sm.isr);
                     sm.isr = 0;
                     sm.isr_count = 0;
+                    self.drain_rx(ctx, i, cycle);
                 }
                 done
             }
             // OUT
             3 => {
                 let n = if arg2 == 0 { 32 } else { arg2 };
-                let sm = &mut self.sm[i];
-                let autopull = sm.shiftctrl & (1 << 17) != 0;
-                if autopull && sm.osr_count >= sm.pull_thresh() {
-                    match sm.tx.pop_front() {
+                let autopull = self.sm[i].shiftctrl & (1 << 17) != 0;
+                if autopull && self.sm[i].osr_count >= self.sm[i].pull_thresh() {
+                    match self.tx_pop(ctx, i, cycle) {
                         Some(v) => {
-                            sm.osr = v;
-                            sm.osr_count = 0;
+                            self.sm[i].osr = v;
+                            self.sm[i].osr_count = 0;
                         }
                         None => {
                             self.fdebug |= 1 << (24 + i); // TXSTALL
@@ -436,6 +500,7 @@ impl Pio {
                         }
                     }
                 }
+                let sm = &mut self.sm[i];
                 let right = sm.shiftctrl & (1 << 19) != 0;
                 let data = if n == 32 {
                     let d = sm.osr;
@@ -477,8 +542,9 @@ impl Pio {
             4 => {
                 let if_flag = instr & 0x40 != 0;
                 let block = instr & 0x20 != 0;
-                let sm = &mut self.sm[i];
                 if instr & 0x80 == 0 {
+                    self.drain_rx(ctx, i, cycle);
+                    let sm = &mut self.sm[i];
                     if if_flag && sm.isr_count < sm.push_thresh() {
                         return done;
                     }
@@ -492,11 +558,15 @@ impl Pio {
                     }
                     sm.isr = 0;
                     sm.isr_count = 0;
+                    self.drain_rx(ctx, i, cycle);
                 } else {
+                    let sm = &self.sm[i];
                     if if_flag && sm.osr_count < sm.pull_thresh() {
                         return done;
                     }
-                    match sm.tx.pop_front() {
+                    let v = self.tx_pop(ctx, i, cycle);
+                    let sm = &mut self.sm[i];
+                    match v {
                         Some(v) => sm.osr = v,
                         None if block => {
                             self.fdebug |= 1 << (24 + i); // TXSTALL
@@ -795,9 +865,11 @@ impl Block for Pio {
     }
 
     fn next_event(&self) -> Option<u64> {
-        // Only interrupts need the state machines on time; pins and FIFOs
-        // are brought up to date when they are looked at.
-        if self.inte[0] | self.inte[1] != 0 { self.next_instruction() } else { None }
+        // Only interrupts need the state machines on time (also the DMA's,
+        // when a FIFO paces a channel); pins and FIFOs are brought up to
+        // date when they are looked at.
+        let irq = if self.inte[0] | self.inte[1] != 0 { self.next_instruction() } else { None };
+        [irq, self.dma_end()].into_iter().flatten().min()
     }
 
     fn read_stable_until(&self, off: u32, _clock: &Clock) -> u64 {
@@ -808,8 +880,9 @@ impl Block for Pio {
     }
 
     fn reset(&mut self) {
-        let pins = self.pins.clone();
+        let (pins, dma) = (self.pins.clone(), self.dma.take());
         *self = Self::new(self.index, pins);
+        self.dma = dma;
     }
 }
 

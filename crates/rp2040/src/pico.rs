@@ -37,6 +37,7 @@ impl Pico {
             core0.load_bin(*addr, data)?;
         }
         core0.set_multicore(true);
+        mcu.dma.borrow_mut().set_memory(core0.memory_view());
         let core1 = Machine::new_sharing_memory(crate::machine_config(1), bus1, &core0)?;
         let mut pico = Self { cores: [core0, core1], mcu };
         pico.reset();
