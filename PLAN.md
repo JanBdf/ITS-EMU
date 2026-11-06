@@ -66,7 +66,7 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   RTSR/FTSR/IMR) is to be measured on the board first. The timer TRGO
   triggers exist for both groups (update event, counter enable; UG with
   MMS = 000 triggers nothing, HwCheck `dacwave`)
-- Pico: SPI, I2C and RTC only store their registers. DMA: no sniffer
+- Pico: SPI and I2C only store their registers. DMA: no sniffer
   (CRC), no pacing by PWM/SPI/I2C/XIP DREQs, one item per cycle per channel
   (channels do not share the bus), writes to RAM do not drop translated
   code. PWM: not the DIVMODE inputs, PH_ADV/PH_RET, DREQs; ADC: the inputs see

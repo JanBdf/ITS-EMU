@@ -13,6 +13,7 @@ pub mod pins;
 pub mod pio;
 pub mod pwm;
 pub mod regs;
+pub mod rtc;
 pub mod shared;
 pub mod sio;
 pub mod sys;
@@ -134,7 +135,7 @@ pub fn build() -> ([Bus; 2], Rp2040) {
     attach(&mut bus, 0x4005_0000, pwm::Pwm::new(pins.clone(), notices.clone()));
     attach(&mut bus, 0x4005_4000, timer::Timer::new());
     attach(&mut bus, 0x4005_8000, sys::Watchdog::new());
-    attach(&mut bus, 0x4005_C000, RegFile::unemulated("RTC", 0x30, notices.clone()));
+    attach(&mut bus, 0x4005_C000, rtc::Rtc::new(tree.clone()));
     attach(&mut bus, 0x4006_0000, sys::Oscillator::rosc());
     attach(&mut bus, 0x4006_4000, RegFile::new("VREG_AND_CHIP_RESET", 0xC, &VREG_RESET, &[]));
     attach(&mut bus, 0x4006_C000, RegFile::new("TBMAN", 0x4, &[], &TBMAN_FIXED));
