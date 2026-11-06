@@ -42,6 +42,33 @@ pub fn parse(data: &[u8], flash_base: u32, flash_size: u32) -> Result<Vec<(u32, 
     Ok(out)
 }
 
+/// A UF2 file programming `data` into flash at `addr` (256 bytes per block,
+/// as the SDK's elf2uf2 writes them).
+pub fn write(addr: u32, data: &[u8]) -> Vec<u8> {
+    let chunks: Vec<_> = data.chunks(256).collect();
+    let mut file = Vec::with_capacity(chunks.len() * 512);
+    for (n, chunk) in chunks.iter().enumerate() {
+        let mut block = [0u8; 512];
+        let header = [
+            0x0A32_4655,
+            0x9E5D_5157,
+            FLAG_FAMILY_ID,
+            addr + n as u32 * 256,
+            chunk.len() as u32,
+            n as u32,
+            chunks.len() as u32,
+            RP2040_FAMILY,
+        ];
+        for (i, w) in header.into_iter().enumerate() {
+            block[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        block[32..32 + chunk.len()].copy_from_slice(chunk);
+        block[508..].copy_from_slice(&0x0AB1_6F30u32.to_le_bytes());
+        file.extend_from_slice(&block);
+    }
+    file
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,5 +93,15 @@ mod tests {
         assert_eq!(parsed, vec![(0x1000_0000, vec![1, 2, 3]), (0x1000_0100, vec![4])]);
         assert_eq!(parse(&file[..100], 0x1000_0000, 0x20_0000), Err(Uf2Error::Magic(0)));
         assert!(matches!(parse(&block(0x2000_0000, &[1]), 0x1000_0000, 0x20_0000), Err(Uf2Error::OutOfFlash { .. })));
+    }
+
+    #[test]
+    fn writes_what_it_parses() {
+        let data: Vec<u8> = (0..600u32).map(|i| i as u8).collect();
+        let file = write(0x1000_0100, &data);
+        assert_eq!(file.len(), 3 * 512);
+        let parsed = parse(&file, 0x1000_0000, 0x20_0000).unwrap();
+        assert_eq!(parsed.iter().map(|(a, _)| *a).collect::<Vec<_>>(), [0x1000_0100, 0x1000_0200, 0x1000_0300]);
+        assert_eq!(parsed.into_iter().flat_map(|(_, d)| d).collect::<Vec<_>>(), data);
     }
 }
