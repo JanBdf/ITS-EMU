@@ -83,15 +83,14 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   thread. Idle detection tracks the RAM pages a loop stores to through
   Unicorn's first-write path instead of copying RAM. `tools/perf/bench.sh` times the fixtures, `tools/perf/same-cycles.sh`
   checks that a change leaves every fixture's cycles and output unchanged.
-  Busy-wait delay loops (`for (i = 0; i < N; i++);`) are the common case
-  that idle detection cannot skip (the counter changes): they run at about
-  1.5-2x real time, one block hook per iteration. Skipping them would need
-  the loop's exit condition. A sketch on top of idle detection: if two
-  consecutive visits of the loop head differ only in one register or RAM word
-  by a constant step (everything else equal, clean period, constant period),
-  and the loop's conditional branch compares that value with a constant or an
-  unchanged register (decoded by `timing`), the number of iterations left
-  follows; skip all but the last, as idle skipping does, up to the slice end.
+  Counting delay loops (`for (i = 0; i < N; i++);`, `Driver_Delay_us`) are
+  skipped too (`machine/delay.rs`): a small interpreter for affine Thumb code
+  (add/sub/mov/cmp, word loads and stores at fixed addresses, one conditional
+  branch) runs the loop body, is checked against Unicorn on consecutive head
+  visits with the same period, and solves for the exit iteration from the
+  branch operands; all but the last iteration are skipped, up to the slice
+  end. Off with breakpoints, watchpoints or halting debug.
+  (`tests/fixtures/ac6-src/DelayLoops`: 45x faster, same cycles.)
   `--no-idle-skip` benchmarks are sensitive to code layout (±10 % with
   identical instruction counts): compare `perf stat` instruction counts
 - Packages use the `dist` profile (fat LTO): 15 MB GUI / 3.4 MB CLI

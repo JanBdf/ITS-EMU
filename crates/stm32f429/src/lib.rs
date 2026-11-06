@@ -240,14 +240,18 @@ pub fn build() -> (Bus, Stm32f429) {
         tim_pwm.push(t.pwm());
         bus.attach(base, 0x400, Box::new(t));
     }
-    let timer = |name, irq, bus, en_bit| GpTimer::new(name, irq, false, bus, en_bit, clocks.clone()).with_itr(trgo.clone());
+    let timer =
+        |name, irq, bus, en_bit| GpTimer::new(name, irq, false, bus, en_bit, clocks.clone()).with_itr(trgo.clone());
     use ApbBus::{Apb1, Apb2};
     // TIM9..14 share their interrupt lines with TIM1/TIM8 (source 1), TIM6 with the DAC
     let g = || gpio.clone();
     let more = [
         (
             0x4001_0000,
-            timer("TIM1", 25, Apb2, 0).advanced(27).with_inputs(&TIM1_PINS, g()).with_trgo(triggers.clone(), timer::TRGO_TIM1),
+            timer("TIM1", 25, Apb2, 0)
+                .advanced(27)
+                .with_inputs(&TIM1_PINS, g())
+                .with_trgo(triggers.clone(), timer::TRGO_TIM1),
         ),
         (
             0x4001_0400,
