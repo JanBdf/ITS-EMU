@@ -88,7 +88,7 @@ impl DevicesPanel {
     pub fn new(bootrom_override: Option<PathBuf>) -> Self {
         Self {
             kind: Kind::Pico,
-            encoder_pins: "PC6,PC7".to_owned(),
+            encoder_pins: "PF0,PF1".to_owned(),
             sensor_pin: "PG2".to_owned(),
             lm75_addr: "0x48".to_owned(),
             net_forwards: "tcp:8080=80".to_owned(),

@@ -91,8 +91,9 @@ again at the next start.
 
 On the command line,
 `--input 2:PC3=1.65` applies 1.65 V to PC3 (`open` disconnects it).
-`--device encoder@PC6,PC7` connects a rotary encoder (contacts to GND,
-pull-ups; the TIM8_1/TIM8_2 header pins suit TIM8's encoder mode) and
+`--device encoder@PF0,PF1` connects a rotary encoder (contacts to GND,
+pull-ups) with A on IN0 and B on IN1 as in the course's task 2
+(`encoder@PC6,PC7`: the TIM8_1/TIM8_2 header pins, for TIM8's encoder mode) and
 `--input 3:ENC=5` turns it five detents clockwise (`ENC=-5` back).
 `--device ds18b20@PG2` connects a DS18B20 temperature sensor (21 °C,
 `--input 4:TEMP=30.5` changes it); several on one pin share the 1-Wire line.
