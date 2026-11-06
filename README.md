@@ -151,7 +151,8 @@ The Pico's PWM slices drive their pins (free-running and phase-correct,
 wrap interrupts; not the B-pin input modes); its ADC converts the
 temperature sensor (27 °C) and GPIO 26–29 (the level on the pin: 0 or 3.3 V).
 Its DMA copies memory and feeds the PIOs, the ADC and the UARTs (paced by
-their FIFOs, the pacing timers or unpaced; chaining, rings, control blocks).
+their FIFOs, the PWM wraps, the pacing timers or unpaced; chaining, rings,
+control blocks).
 Its RTC counts date and time from clk_rtc (alarm interrupt with the SDK's
 `rtc_set_alarm`; the date starts where the firmware sets it).
 Not emulated on the Pico: SPI and I²C (their

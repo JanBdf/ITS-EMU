@@ -132,7 +132,9 @@ pub fn build() -> ([Bus; 2], Rp2040) {
     attach(&mut bus, 0x4004_8000, RegFile::unemulated("I2C1", 0x100, notices.clone()));
     let analog = adc::SharedAnalog::default();
     attach(&mut bus, 0x4004_C000, adc::Adc::new(pins.clone(), tree.clone(), analog.clone(), notices.clone()));
-    attach(&mut bus, 0x4005_0000, pwm::Pwm::new(pins.clone(), notices.clone()));
+    let dma = dma::shared(notices.clone());
+    let pwm_dreq = dma.borrow().pwm_dreq();
+    attach(&mut bus, 0x4005_0000, pwm::Pwm::new(pins.clone(), notices.clone()).with_dreq(pwm_dreq));
     attach(&mut bus, 0x4005_4000, timer::Timer::new());
     attach(&mut bus, 0x4005_8000, sys::Watchdog::new());
     attach(&mut bus, 0x4005_C000, rtc::Rtc::new(tree.clone()));
@@ -141,7 +143,6 @@ pub fn build() -> ([Bus; 2], Rp2040) {
     attach(&mut bus, 0x4006_C000, RegFile::new("TBMAN", 0x4, &[], &TBMAN_FIXED));
     attach(&mut bus, 0x1400_0000, RegFile::new("XIP_CTRL", 0x20, &XIP_RESET, &XIP_FIXED));
     attach(&mut bus, 0x1800_0000, ssi);
-    let dma = dma::shared(notices.clone());
     attach(&mut bus, 0x5000_0000, dma::Dma(dma.clone()));
     let usb = usb::usb(serial.clone());
     bus.attach(0x5010_0000, 0x1000, Box::new(usb::UsbDpram(usb.clone())));

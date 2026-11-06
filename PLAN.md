@@ -68,9 +68,9 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   triggers exist for both groups (update event, counter enable; UG with
   MMS = 000 triggers nothing, HwCheck `dacwave`)
 - Pico: SPI and I2C only store their registers. DMA: no sniffer
-  (CRC), no pacing by PWM/SPI/I2C/XIP DREQs, one item per cycle per channel
+  (CRC), no pacing by SPI/I2C/XIP DREQs, one item per cycle per channel
   (channels do not share the bus), writes to RAM do not drop translated
-  code. PWM: not the DIVMODE inputs, PH_ADV/PH_RET, DREQs; ADC: the inputs see
+  code. PWM: not the DIVMODE inputs, PH_ADV/PH_RET; ADC: the inputs see
   only digital levels from the board: `Pico::analog` sets voltages), flash
   program/erase commands are ignored (both noted to the user once). A core
   writing flash or RAM drops only its own translations: code one core

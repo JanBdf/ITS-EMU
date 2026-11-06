@@ -6,7 +6,8 @@
 //! unpaced channels (permanent DREQ) and channels paced by a pacing timer
 //! move one item per cycle (or at the timer's rate) from their trigger on;
 //! channels paced by a peripheral (ADC, UART) move an item whenever its
-//! register says it has data or room.
+//! register says it has data or room, channels paced by a PWM slice one
+//! item per wrap (the PWM raises the DREQ while such a channel is busy).
 //!
 //! The PIOs work with channels paced by their FIFOs directly: a state
 //! machine that pulls takes the next word from the channel (the TX FIFO is
@@ -14,7 +15,7 @@
 //! machines run as on the chip, and they report when such a channel can
 //! end at the earliest (its interrupt is on time).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use emu_core::{Bus, Clock, DeviceCtx, Ram};
@@ -29,6 +30,8 @@ pub const CHANNELS: usize = 12;
 pub const TREQ_PIO0_TX0: u8 = 0x00;
 pub const TREQ_UART0_TX: u8 = 0x14;
 pub const TREQ_UART1_RX: u8 = 0x17;
+pub const TREQ_PWM_WRAP0: u8 = 0x18;
+pub const TREQ_PWM_WRAP7: u8 = 0x1F;
 pub const TREQ_ADC: u8 = 0x24;
 pub const TREQ_TIMER0: u8 = 0x3B;
 pub const TREQ_PERMANENT: u8 = 0x3F;
@@ -118,6 +121,17 @@ impl Channel {
     }
 }
 
+/// The wrap DREQs of the PWM slices: the slices a busy channel waits on
+/// (since which cycle), and the wraps the DMA has not taken yet.
+#[derive(Clone, Copy, Default)]
+pub struct PwmDreq {
+    pub wanted: u8,
+    pub since: [u64; 8],
+    pub pending: u8,
+}
+
+pub type SharedPwmDreq = Rc<Cell<PwmDreq>>;
+
 /// How a channel's transfers are paced.
 enum Pace {
     /// Items per cycle: x / y (permanent DREQ: one per cycle).
@@ -126,7 +140,7 @@ enum Pace {
     Pio,
     /// A peripheral's DREQ, read from its registers.
     Peripheral,
-    /// Not emulated (SPI, I2C, PWM, XIP).
+    /// Not emulated (SPI, I2C, XIP).
     Never,
 }
 
@@ -148,6 +162,7 @@ pub struct DmaCore {
     transfer_at: Option<u64>,
     /// The busy channels (a cheap test for the pump around every access).
     busy: u16,
+    pwm: SharedPwmDreq,
 }
 
 pub type SharedDma = Rc<RefCell<DmaCore>>;
@@ -166,6 +181,7 @@ pub fn shared(notices: Notices) -> SharedDma {
         noted: Vec::new(),
         transfer_at: None,
         busy: 0,
+        pwm: SharedPwmDreq::default(),
     }))
 }
 
@@ -183,6 +199,32 @@ impl DmaCore {
         self.ram = Some(ram);
     }
 
+    /// The PWM's wrap DREQs (the PWM raises them, the DMA takes them).
+    pub fn pwm_dreq(&self) -> SharedPwmDreq {
+        self.pwm.clone()
+    }
+
+    /// Tells the PWM which slices busy channels wait on (from `now`).
+    fn sync_pwm_wanted(&self, now: u64) {
+        let mut p = self.pwm.get();
+        let wanted = (0..CHANNELS)
+            .filter(|&n| self.ch[n].busy)
+            .map(|n| self.ch[n].treq())
+            .filter(|t| (TREQ_PWM_WRAP0..=TREQ_PWM_WRAP7).contains(t))
+            .fold(0u8, |acc, t| acc | 1 << (t - TREQ_PWM_WRAP0));
+        if wanted == p.wanted {
+            return;
+        }
+        for i in 0..8 {
+            if wanted & !p.wanted & (1 << i) != 0 {
+                p.since[i] = now;
+            }
+        }
+        p.pending &= wanted;
+        p.wanted = wanted;
+        self.pwm.set(p);
+    }
+
     fn note(&mut self, text: String) {
         if !self.noted.contains(&text) {
             self.noted.push(text.clone());
@@ -194,7 +236,7 @@ impl DmaCore {
         let treq = self.ch[n].treq();
         match treq {
             0x00..=0x0F => Pace::Pio,
-            TREQ_UART0_TX..=TREQ_UART1_RX | TREQ_ADC => Pace::Peripheral,
+            TREQ_UART0_TX..=TREQ_PWM_WRAP7 | TREQ_ADC => Pace::Peripheral,
             TREQ_TIMER0..=0x3E => {
                 let t = self.timers[usize::from(treq - TREQ_TIMER0)];
                 let (x, y) = (u64::from(t >> 16), u64::from(t & 0xFFFF));
@@ -235,7 +277,7 @@ impl DmaCore {
         self.busy |= 1 << n;
         if matches!(self.pace(n), Pace::Never) {
             let treq = self.ch[n].treq();
-            self.note(format!("DMA paced by DREQ {treq:#04x} (SPI, I2C, PWM or XIP), which is not emulated"));
+            self.note(format!("DMA paced by DREQ {treq:#04x} (SPI, I2C or XIP), which is not emulated"));
         }
         self.repace(n, at);
     }
@@ -365,8 +407,9 @@ impl DmaCore {
 }
 
 /// Whether the peripheral DREQ that paces channel `treq` is asserted.
-fn dreq(bus: &mut Bus, ctx: &mut DeviceCtx, treq: u8) -> bool {
+fn dreq(bus: &mut Bus, ctx: &mut DeviceCtx, treq: u8, pwm: &PwmDreq) -> bool {
     match treq {
+        TREQ_PWM_WRAP0..=TREQ_PWM_WRAP7 => pwm.pending & (1 << (treq - TREQ_PWM_WRAP0)) != 0,
         0x00..=0x0F => {
             let (pio, dreq) = (usize::from(treq >> 3), treq & 7);
             let fstat = bus.read(ctx, PIO_BASE[pio] + 0x4, 4);
@@ -403,10 +446,21 @@ pub fn pump(dma: &SharedDma, bus: &mut Bus, ctx: &mut DeviceCtx) -> bool {
     for _ in 0..1 << 20 {
         let now = ctx.now();
         let Some((n, at, check)) = dma.borrow().next_job(now, skip) else { break };
-        let treq = dma.borrow().ch[n].treq();
-        if check && !dreq(bus, ctx, treq) {
+        let (treq, pwm) = {
+            let d = dma.borrow();
+            d.sync_pwm_wanted(now);
+            (d.ch[n].treq(), d.pwm.get())
+        };
+        if check && !dreq(bus, ctx, treq, &pwm) {
             skip |= 1 << n;
             continue;
+        }
+        if (TREQ_PWM_WRAP0..=TREQ_PWM_WRAP7).contains(&treq) {
+            // the transfer takes the wrap's request
+            let d = dma.borrow();
+            let mut p = d.pwm.get();
+            p.pending &= !(1 << (treq - TREQ_PWM_WRAP0));
+            d.pwm.set(p);
         }
         let (read_addr, write_addr, size) = {
             let d = dma.borrow();
@@ -435,6 +489,7 @@ pub fn pump(dma: &SharedDma, bus: &mut Bus, ctx: &mut DeviceCtx) -> bool {
         dma.borrow_mut().transferred(ctx, n, at);
         moved = true;
     }
+    dma.borrow().sync_pwm_wanted(ctx.now());
     moved
 }
 
@@ -542,6 +597,7 @@ impl Block for Dma {
             }
             _ => {}
         }
+        d.sync_pwm_wanted(ctx.now());
         d.sync_irq(ctx);
     }
 
@@ -568,6 +624,8 @@ impl Block for Dma {
     fn reset(&mut self) {
         let mut d = self.0.borrow_mut();
         let (ram, notices, noted) = (d.ram.take(), d.notices.clone(), std::mem::take(&mut d.noted));
+        let pwm = d.pwm.clone();
+        pwm.set(PwmDreq::default());
         *d = DmaCore {
             ch: Default::default(),
             intr: 0,
@@ -581,6 +639,7 @@ impl Block for Dma {
             noted,
             transfer_at: None,
             busy: 0,
+            pwm,
         };
     }
 }
@@ -623,7 +682,7 @@ mod tests {
 
         fn write(&mut self, addr: u32, v: u32) {
             let (mut ctx, bus, dma) = self.ctx();
-            if addr >= CH {
+            if !(RAM..RAM + 0x1000).contains(&addr) {
                 bus.write(&mut ctx, addr, 4, v);
             } else {
                 dma.borrow_mut().ram.as_mut().unwrap().write(addr, 4, v);
@@ -633,7 +692,11 @@ mod tests {
 
         fn read(&mut self, addr: u32) -> u32 {
             let (mut ctx, bus, dma) = self.ctx();
-            if addr >= CH { bus.read(&mut ctx, addr, 4) } else { dma.borrow().mem_read(addr, 4).unwrap() }
+            if (RAM..RAM + 0x1000).contains(&addr) {
+                dma.borrow().mem_read(addr, 4).unwrap()
+            } else {
+                bus.read(&mut ctx, addr, 4)
+            }
         }
 
         /// Runs `cycles`, stopping at the DMA's events as the machine does.
@@ -644,6 +707,7 @@ mod tests {
                 let to = self.next_event().filter(|&t| t > now).map_or(end, |t| t.min(end));
                 self.clock.advance(to - now);
                 let (mut ctx, bus, dma) = self.ctx();
+                bus.update(&mut ctx);
                 pump(dma, bus, &mut ctx);
                 if to == end {
                     break;
@@ -683,6 +747,33 @@ mod tests {
         r.write(0x5000_040C, 1);
         assert!(!r.nvic.irq_level(DMA_IRQ_0), "cleared through INTS0");
         assert_eq!(r.next_event(), None);
+    }
+
+    #[test]
+    fn pwm_wraps_pace_a_channel() {
+        const PWM: u32 = 0x4005_0000;
+        let mut r = Rig::new();
+        let pwm = crate::pwm::Pwm::new(crate::pins::SharedPins::default(), Notices::default());
+        let dreq = r.dma.borrow().pwm_dreq();
+        r.bus.attach(PWM, BLOCK_WINDOW, Box::new(Aliased(pwm.with_dreq(dreq))));
+        for i in 0..4 {
+            r.write(RAM + 4 * i, 10 * (i + 1));
+        }
+        r.write(PWM + 0x10, 99); // TOP: a wrap every 100 cycles
+        r.write(PWM, 1); // EN
+        r.run(150); // a wrap before the channel starts is no request
+        // CC of slice 0, one value per wrap
+        r.write(CH, RAM);
+        r.write(CH + 4, PWM + 0xC);
+        r.write(CH + 8, 4);
+        r.write(CH + 0xC, 1 | WORD | CTRL_INCR_READ | u32::from(TREQ_PWM_WRAP0) << 15);
+        assert_eq!(r.read(PWM + 0xC), 0, "waits for the wrap");
+        r.run(100); // the wrap at 200
+        assert_eq!((r.read(PWM + 0xC), r.read(CH + 8)), (10, 3));
+        r.run(250); // 300, 400, 500
+        assert_eq!(r.read(PWM + 0xC), 40);
+        assert_eq!(r.read(CH + 0xC) & CTRL_BUSY, 0);
+        assert_eq!(r.dma.borrow().pwm_dreq().get().wanted, 0, "no more DREQs wanted");
     }
 
     #[test]
