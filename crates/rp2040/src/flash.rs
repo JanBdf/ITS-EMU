@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use emu_core::{Clock, DeviceCtx};
 
-use crate::regs::{Block, Op};
+use crate::regs::{Block, Notices, Op};
 
 /// Unique ID of the emulated flash chip (the SDK makes the USB serial number from it).
 pub const FLASH_UNIQUE_ID: [u8; 8] = [0xE6, 0x60, 0x58, 0x38, 0x83, 0x2C, 0x41, 0x2B];
@@ -19,6 +19,8 @@ struct FlashChip {
     cmd: Vec<u8>,
     /// Chip select forced low through IO_QSPI.
     cs_forced_low: bool,
+    /// Where the first program or erase command is noted as not emulated.
+    unemulated_writes: Option<Notices>,
 }
 
 impl FlashChip {
@@ -31,6 +33,15 @@ impl FlashChip {
         self.cmd.push(mosi);
         let i = self.cmd.len() - 1;
         if i == 0 {
+            // page program, sector/block/chip erase
+            if matches!(mosi, 0x02 | 0x20 | 0x52 | 0xD8 | 0x60 | 0xC7)
+                && let Some(notices) = self.unemulated_writes.take()
+            {
+                notices.note(format!(
+                    "The firmware programs or erases its flash (command {mosi:#04x}), which is not emulated: \
+                     the flash keeps its contents"
+                ));
+            }
             return 0xFF;
         }
         match self.cmd[0] {
@@ -158,8 +169,8 @@ impl Block for IoQspi {
 }
 
 /// The SSI and IO_QSPI sharing one flash chip.
-pub fn flash_interface() -> (Ssi, IoQspi) {
-    let chip = SharedChip::default();
+pub fn flash_interface(notices: Notices) -> (Ssi, IoQspi) {
+    let chip = Rc::new(RefCell::new(FlashChip { unemulated_writes: Some(notices), ..FlashChip::default() }));
     (Ssi::new(chip.clone()), IoQspi::new(chip))
 }
 
@@ -170,7 +181,7 @@ mod tests {
 
     #[test]
     fn unique_id_with_forced_chip_select() {
-        let (mut ssi, mut io) = flash_interface();
+        let (mut ssi, mut io) = flash_interface(Notices::default());
         let mut clock = Clock::new(125_000_000);
         let mut nvic = Nvic::new();
         let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };

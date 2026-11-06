@@ -1314,10 +1314,16 @@ impl Machine {
         self.read_mem(addr, &mut b).then(|| u32::from_le_bytes(b))
     }
 
-    fn flash_mut(&mut self) -> &mut [u8] {
-        // SAFETY: the cores sharing the buffer run one at a time, and none
-        // holds a reference into it across calls
-        unsafe { &mut *self.flash.get() }
+    /// Copies `data` into the flash backing store at offset `off`.
+    fn write_flash(&mut self, off: usize, data: &[u8]) {
+        // SAFETY: the cores sharing the buffer run one at a time, so nothing
+        // reads or writes it meanwhile; the copy goes through a raw pointer,
+        // as the other core's Unicorn also points into the buffer.
+        unsafe {
+            let flash: *mut [u8] = &raw mut **self.flash.get();
+            assert!(off + data.len() <= flash.len(), "flash write past the end");
+            std::ptr::copy_nonoverlapping(data.as_ptr(), flash.cast::<u8>().add(off), data.len());
+        }
     }
 
     /// Writes to memory, including flash (as a debugger/programmer would).
@@ -1326,25 +1332,19 @@ impl Machine {
         let fb = mem.flash_base;
         let in_flash =
             |a: u32| a >= fb && u64::from(a) + data.len() as u64 <= u64::from(fb) + u64::from(mem.flash_size);
-        let alias = mem.flash_alias_at_zero;
-        let ok = if in_flash(addr) {
-            let off = (addr - fb) as usize;
-            self.flash_mut()[off..off + data.len()].copy_from_slice(data);
+        if in_flash(addr) {
+            let off = addr - fb;
+            self.write_flash(off as usize, data);
             self.flash_writes += 1;
-            if alias {
-                // The same code may also have been translated at its alias at 0.
-                self.invalidate_code(off as u32, data.len() as u32);
-            }
-            true
-        } else {
-            self.uc.mem_write(u64::from(addr), data).is_ok()
-        };
-        if ok {
+            self.invalidate_flash(off, data.len() as u32);
+        } else if self.uc.mem_write(u64::from(addr), data).is_ok() {
             self.invalidate_code(addr, data.len() as u32);
+        } else {
+            return false;
         }
         // RAM written past the write tracking of idle detection
         self.uc.get_data_mut().idle.dirty();
-        ok
+        true
     }
 
     /// Drops stale translations (and timing data) of code at `addr..addr + len`.
@@ -1363,17 +1363,24 @@ impl Machine {
         }
     }
 
-    /// Flash bytes changed by the flash controller: drop their translations
-    /// (at the flash address and its alias).
+    /// Drops the translations of flash bytes `off..off + len` at every
+    /// address the flash is seen at (its base, the alias at 0, XIP aliases).
+    /// Only this core's: a core sharing the flash keeps its own.
+    fn invalidate_flash(&mut self, off: u32, len: u32) {
+        let mem = &self.uc.get_data().config.memory;
+        let alias_at_zero = mem.flash_alias_at_zero.then_some(0);
+        let bases: Vec<u32> =
+            std::iter::once(mem.flash_base).chain(alias_at_zero).chain(mem.flash_aliases.iter().copied()).collect();
+        for base in bases {
+            self.invalidate_code(base + off, len);
+        }
+    }
+
+    /// Flash bytes changed by the flash controller: drop their translations.
     fn take_flash_dirty(&mut self) {
         let Some(r) = self.uc.get_data_mut().flash_dirty.take() else { return };
-        let mem = &self.uc.get_data().config.memory;
-        let (fb, alias) = (mem.flash_base, mem.flash_alias_at_zero);
         self.flash_writes += 1;
-        self.invalidate_code(fb + r.start, r.end - r.start);
-        if alias {
-            self.invalidate_code(r.start, r.end - r.start);
-        }
+        self.invalidate_flash(r.start, r.end - r.start);
     }
 
     /// Identification of the vendor parts of the debug system (ROM table, DBGMCU).
@@ -1530,7 +1537,7 @@ impl Machine {
                 return Err(fault);
             }
             let bytes = value.to_le_bytes();
-            self.flash_mut()[off as usize..(off + size) as usize].copy_from_slice(&bytes[..size as usize]);
+            self.write_flash(off as usize, &bytes[..size as usize]);
             self.take_flash_dirty();
             return Ok(());
         }

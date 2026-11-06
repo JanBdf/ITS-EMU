@@ -170,7 +170,10 @@ impl DevicesPanel {
                         });
                         show_wiring(ui, spec);
                     }
-                    (DeviceSpec::Pico(spec), DeviceState::Running { port }) => {
+                    (DeviceSpec::Pico(spec), DeviceState::Running { port, notices }) => {
+                        for notice in notices {
+                            ui.label(RichText::new(format!("⚠ {notice}")).color(ui.visuals().warn_fg_color));
+                        }
                         show_wiring(ui, spec);
                         self.show_pico(ui, d.id, port.as_deref(), settings, emu);
                     }
