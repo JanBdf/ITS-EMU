@@ -19,7 +19,8 @@
 //! forced levels, as measured on the board (HwCheck `timout`): a mode change
 //! takes effect at the next of them; PWM compares CNT < CCR counting up and
 //! CNT ≤ CCR counting down (HwCheck `timdir`). TIM1/TIM8 drive the
-//! complementary outputs with dead time. Slave modes with ETR are not
+//! complementary outputs with dead time, have the break input (BKIN, BG)
+//! and the COM event (CCPC/CCUS: COMG or TRGI). Slave modes with ETR are not
 //! modelled (a warning is logged when used).
 //! DMA requests: update, capture/compare and trigger events (UDE, CCxDE,
 //! TDE), one transfer each, and bursts through DMAR (DCR.DBA/DBL).
@@ -136,6 +137,8 @@ pub struct ChannelPins {
     pub af: u32,
     pub pins: [&'static [(char, u32)]; 4],
     pub npins: [&'static [(char, u32)]; 3],
+    /// The break input BKIN (TIM1/TIM8).
+    pub bkin: &'static [(char, u32)],
 }
 
 /// Duty cycle (0.0–1.0) of each output channel in PWM mode, `None` otherwise.
@@ -150,7 +153,15 @@ const CR1_OPM: u32 = 1 << 3;
 const CR1_DIR: u32 = 1 << 4;
 const CR1_ARPE: u32 = 1 << 7;
 const SR_UIF: u32 = 1 << 0;
+const SR_COMIF: u32 = 1 << 5;
 const SR_TIF: u32 = 1 << 6;
+const SR_BIF: u32 = 1 << 7;
+const CR2_CCPC: u32 = 1 << 0;
+const CR2_CCUS: u32 = 1 << 2;
+/// With CCPC: the CCER and CCMR bits a COM event transfers (CCxE, CCxNE
+/// and OCxM of channels 1..3).
+const PRELOAD_CCER: u32 = 0x555;
+const PRELOAD_CCMR: [u32; 2] = [0x7070, 0x0070];
 const DIER_UIE: u32 = 1 << 0;
 const DIER_UDE: u32 = 1 << 8;
 /// DMA requests: update, CC1..CC4, trigger (their SR flags, DIER enables
@@ -158,6 +169,8 @@ const DIER_UDE: u32 = 1 << 8;
 const DMA_EVENTS: [u32; 6] = [SR_UIF, 1 << 1, 1 << 2, 1 << 3, 1 << 4, SR_TIF];
 const BDTR_OSSI: u32 = 1 << 10;
 const BDTR_OSSR: u32 = 1 << 11;
+const BDTR_BKE: u32 = 1 << 12;
+const BDTR_BKP: u32 = 1 << 13;
 const BDTR_AOE: u32 = 1 << 14;
 const BDTR_MOE: u32 = 1 << 15;
 /// Timer clocks from an output edge until its own channel input captures it
@@ -228,6 +241,10 @@ pub struct GpTimer {
     /// OCxREF (position in the period, level) `oc_span` found for it.
     ref_level: bool,
     ref_changes: Vec<(u128, bool)>,
+    /// TIM1/TIM8: the break input is active; with CCPC the CCER and CCMR
+    /// written but not yet transferred by a COM event.
+    brk_active: bool,
+    com_pre: Option<(u32, [u32; 2])>,
     /// DMA request lines of the events in `DMA_EVENTS` (empty: none), the
     /// next register of a DMAR burst and the request that started it.
     dma: Option<(SharedDma, [DmaLine; 6])>,
@@ -305,6 +322,8 @@ impl GpTimer {
             itr_kick: false,
             ref_level: false,
             ref_changes: Vec::new(),
+            brk_active: false,
+            com_pre: None,
             dma: None,
             dma_index: 0,
             burst_req: 0,
@@ -518,6 +537,7 @@ impl GpTimer {
         self.oc_ref = [false; 4];
         (self.dt_main, self.dt_n, self.dt_ref, self.dt_rise) = ([false; 3], [true; 3], [false; 3], [None; 3]);
         (self.enable_level, self.itr_kick, self.gate, self.ref_level) = (false, false, false, false);
+        (self.brk_active, self.com_pre) = (false, None);
         if let Some(l) = &self.itr {
             l.borrow_mut().lines[usize::from(self.number)].level = false;
         }
@@ -553,7 +573,7 @@ impl GpTimer {
     /// another timer's TRGO as trigger input (TS = ITR0..ITR3): that timer.
     fn itr_slave(&self) -> Option<(u32, u8)> {
         let (sms, ts) = (self.smcr & 7, (self.smcr >> 4) & 7);
-        if self.channels < 2 || sms < 4 || ts > 3 || self.itr.is_none() {
+        if self.channels < 2 || (sms < 4 && !self.com_on_trgi()) || ts > 3 || self.itr.is_none() {
             return None;
         }
         // TIM2 ITR1: TIM8 TRGO unless OR.ITR1_RMP selects Ethernet PTP or USB SOF
@@ -565,7 +585,62 @@ impl GpTimer {
 
     /// Slave mode (SMS = 4..7) with a modelled trigger input.
     fn slave_mode(&self) -> Option<u32> {
-        self.ti_slave().map(|(sms, _)| sms).or(self.itr_slave().map(|(sms, _)| sms))
+        self.ti_slave().map(|(sms, _)| sms).or(self.itr_slave().map(|(sms, _)| sms)).filter(|&sms| sms >= 4)
+    }
+
+    /// TIM1/TIM8 with CCPC and CCUS: a rising edge of TRGI is a COM event.
+    fn com_on_trgi(&self) -> bool {
+        self.cc_irq.is_some() && self.cr2 & (CR2_CCPC | CR2_CCUS) == CR2_CCPC | CR2_CCUS
+    }
+
+    /// TIM1/TIM8 with CCPC: CCxE, CCxNE and OCxM wait for a COM event.
+    fn com_preload(&self) -> bool {
+        self.cc_irq.is_some() && self.cr2 & CR2_CCPC != 0
+    }
+
+    /// A commutation event: COMIF, and the preloaded control bits take effect.
+    fn com_event(&mut self) {
+        self.event(SR_COMIF);
+        if let Some((ccer, ccmr)) = self.com_pre.take() {
+            (self.ccer, self.ccmr) = (ccer, ccmr);
+            self.forced_levels(0..self.channels);
+            self.update_watch();
+        }
+    }
+
+    /// Forced active/inactive (OCxM = 100/101) set OCxREF at once.
+    fn forced_levels(&mut self, channels: impl Iterator<Item = usize>) {
+        for ch in channels {
+            match self.oc_mode(ch) {
+                4 if self.compares(ch) => self.oc_ref[ch] = false,
+                5 if self.compares(ch) => self.oc_ref[ch] = true,
+                _ => {}
+            }
+        }
+    }
+
+    /// TIM1/TIM8: the break input BKIN (a routed pin at the level BKP
+    /// selects) clears MOE and sets BIF as long as it is active.
+    fn check_break(&mut self) {
+        if self.cc_irq.is_none() {
+            return;
+        }
+        let mut active = false;
+        if self.bdtr & BDTR_BKE != 0
+            && let Some((pins, gpio)) = &self.inputs
+        {
+            let g = gpio.borrow();
+            let want = self.bdtr & BDTR_BKP != 0;
+            active = pins.bkin.iter().any(|&(p, pin)| {
+                let ps = &g.ports[port(p)];
+                ps.mode(pin) == PinMode::Alternate && ps.af(pin) == pins.af && ps.level(pin) == want
+            });
+        }
+        self.brk_active = active;
+        if active {
+            self.bdtr &= !BDTR_MOE;
+            self.event(SR_BIF);
+        }
     }
 
     /// The counter counts input edges instead of the internal clock
@@ -627,6 +702,9 @@ impl GpTimer {
     /// An edge of the trigger input TRGI at `t` in slave mode `sms`:
     /// `rising` (a trigger), `level` the input's level after it.
     fn on_trigger(&mut self, ctx: &mut DeviceCtx, sms: u32, t: u64, rising: bool, level: bool) {
+        if rising && self.com_on_trgi() {
+            self.com_event();
+        }
         match sms {
             7 => {
                 if rising {
@@ -1350,7 +1428,7 @@ impl GpTimer {
         self.ccr_active = self.ccr;
         self.update_pwm(); // preloaded values take effect
         self.rep_left = self.rcr;
-        if self.bdtr & BDTR_AOE != 0 {
+        if self.bdtr & BDTR_AOE != 0 && !self.brk_active {
             self.bdtr |= BDTR_MOE; // automatic output enable
         }
         if set_flag {
@@ -1436,6 +1514,7 @@ impl GpTimer {
         let now_ps = ctx.clock.time_ps();
         self.take_input_edges(ctx, now_ps);
         self.take_itr_events(ctx, now_ps);
+        self.check_break();
         self.advance_to(ctx, now_ps);
     }
 
@@ -1629,6 +1708,9 @@ impl GpTimer {
             Some(cc) => {
                 ctx.set_irq_source(self.irq, self.irq_src, active & SR_UIF != 0);
                 ctx.set_irq(cc, active & 0x1E != 0);
+                // BRK (shared with TIM9/TIM12) and TRG_COM (with TIM11/TIM14)
+                ctx.set_irq_source(cc - 3, 0, active & SR_BIF != 0);
+                ctx.set_irq_source(cc - 1, 0, active & (SR_TIF | SR_COMIF) != 0);
             }
             None => ctx.set_irq_source(self.irq, self.irq_src, active & 0x5F != 0),
         }
@@ -1643,9 +1725,9 @@ impl GpTimer {
             0x08 => self.smcr,
             0x0C => self.dier,
             0x10 => self.sr,
-            0x18 => self.ccmr[0],
-            0x1C => self.ccmr[1],
-            0x20 => self.ccer,
+            0x18 => self.com_pre.map_or(self.ccmr[0], |(_, m)| m[0]),
+            0x1C => self.com_pre.map_or(self.ccmr[1], |(_, m)| m[1]),
+            0x20 => self.com_pre.map_or(self.ccer, |(c, _)| c),
             0x24 => self.cnt(now_ps),
             0x28 => self.psc,
             0x2C => self.arr,
@@ -1757,6 +1839,15 @@ impl Peripheral for GpTimer {
             0x04 => {
                 let before = self.mms();
                 self.cr2 = v;
+                if !self.com_preload()
+                    && let Some((ccer, ccmr)) = self.com_pre.take()
+                {
+                    // without preload the values written take effect
+                    (self.ccer, self.ccmr) = (ccer, ccmr);
+                    self.forced_levels(0..self.channels);
+                    self.update_watch();
+                }
+                self.update_itr_listen();
                 if self.mms() != before {
                     // TRGO takes the level of its new source
                     let level = match self.mms() {
@@ -1799,6 +1890,12 @@ impl Peripheral for GpTimer {
                 // CCxG, COMG, TG, BG: set their flags
                 let channels = (0x1Eu32 >> (4 - self.channels)) & 0x1E;
                 self.event(v & (channels | 0xE0));
+                if self.cc_irq.is_some() && v & SR_COMIF != 0 {
+                    self.com_event();
+                }
+                if self.cc_irq.is_some() && v & SR_BIF != 0 {
+                    self.bdtr &= !BDTR_MOE; // BG: a break
+                }
                 if v & 2 != 0 && self.trgo_compare() {
                     self.itr_event(ctx.now(), TrgoEvent::Pulse);
                 }
@@ -1812,18 +1909,26 @@ impl Peripheral for GpTimer {
                         keep |= 3 << (8 * half);
                     }
                 }
-                self.ccmr[i] = (v & !keep) | (self.ccmr[i] & keep);
-                for ch in [2 * i, 2 * i + 1] {
-                    match self.oc_mode(ch) {
-                        4 if self.compares(ch) => self.oc_ref[ch] = false,
-                        5 if self.compares(ch) => self.oc_ref[ch] = true,
-                        _ => {}
-                    }
+                let new = (v & !keep) | (self.ccmr[i] & keep);
+                if self.com_preload() {
+                    let (ccer, mut ccmr) = self.com_pre.unwrap_or((self.ccer, self.ccmr));
+                    ccmr[i] = new;
+                    self.com_pre = Some((ccer, ccmr));
+                    self.ccmr[i] = (new & !PRELOAD_CCMR[i]) | (self.ccmr[i] & PRELOAD_CCMR[i]);
+                } else {
+                    self.ccmr[i] = new;
                 }
+                self.forced_levels([2 * i, 2 * i + 1].into_iter());
                 self.update_watch();
             }
             0x20 => {
-                self.ccer = v;
+                if self.com_preload() {
+                    let (_, ccmr) = self.com_pre.unwrap_or((self.ccer, self.ccmr));
+                    self.com_pre = Some((v, ccmr));
+                    self.ccer = (v & !PRELOAD_CCER) | (self.ccer & PRELOAD_CCER);
+                } else {
+                    self.ccer = v;
+                }
                 self.update_watch();
             }
             0x24 => {
@@ -1869,6 +1974,7 @@ impl Peripheral for GpTimer {
             }
             _ => {}
         }
+        self.check_break();
         self.sync_enable_trgo(ctx.now());
         self.sync_ref_trgo(ctx.now());
         self.push_outputs(ctx.clock, [now_ps; 4], now_ps);
@@ -1883,6 +1989,7 @@ impl Peripheral for GpTimer {
             || !self.watched.is_empty()
             || !self.enc_watched.is_empty()
             || self.itr_pending()
+            || (self.cc_irq.is_some() && self.bdtr & BDTR_BKE != 0)
         {
             self.advance(ctx);
             self.sync_irq(ctx);
@@ -2175,7 +2282,8 @@ mod tests {
 
     #[test]
     fn input_capture_of_a_button_edge() {
-        static PINS: ChannelPins = ChannelPins { af: 3, pins: [&[('F', 6)], &[], &[], &[]], npins: [&[]; 3] };
+        static PINS: ChannelPins =
+            ChannelPins { af: 3, pins: [&[('F', 6)], &[], &[], &[]], npins: [&[]; 3], bkin: &[] };
         let clocks = SharedClocks::default();
         clocks.set(Clocks { apb2_timer: 180_000_000, apb2enr: 1 << 17, hclk: 180_000_000, ..Clocks::default() });
         let gpio = SharedGpio::default();
@@ -2216,8 +2324,12 @@ mod tests {
 
     /// TIM1 at 180 MHz with CH1 on PA8 and CH1N on PB13 (AF1).
     fn tim1_complementary() -> (GpTimer, SharedGpio) {
-        static PINS: ChannelPins =
-            ChannelPins { af: 1, pins: [&[('A', 8)], &[], &[], &[]], npins: [&[('B', 13)], &[], &[]] };
+        static PINS: ChannelPins = ChannelPins {
+            af: 1,
+            pins: [&[('A', 8)], &[], &[], &[]],
+            npins: [&[('B', 13)], &[], &[]],
+            bkin: &[('B', 12)],
+        };
         let clocks = SharedClocks::default();
         clocks.set(Clocks { apb2_timer: 180_000_000, apb2enr: 1, hclk: 180_000_000, ..Clocks::default() });
         let gpio = SharedGpio::default();
@@ -2227,8 +2339,8 @@ mod tests {
             a.moder = 2 << 16; // PA8: AF
             a.afr[1] = 1; // AF1
             let b = &mut g.ports[port('B')];
-            b.moder = 2 << 26; // PB13: AF
-            b.afr[1] = 1 << 20; // AF1
+            b.moder = 2 << 26 | 2 << 24; // PB13, PB12 (BKIN): AF
+            b.afr[1] = 1 << 20 | 1 << 16; // AF1
         }
         let t = GpTimer::new("TIM1", 25, false, ApbBus::Apb2, 0, clocks).advanced(27).with_inputs(&PINS, gpio.clone());
         (t, gpio)
@@ -2289,6 +2401,93 @@ mod tests {
         t.write(&mut ctx, 0x34, 4, 30);
         let got = levels_at(&mut t, &gpio, &mut clock, &mut nvic, &[2010, 2040, 2070, 2900]);
         assert_eq!(got, [(false, false), (false, false), (false, false), (false, true)]);
+    }
+
+    #[test]
+    fn break_input_and_break_generation_clear_moe() {
+        let (mut t, gpio) = tim1_complementary();
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        let pb12 = |on: bool| gpio.borrow_mut().drive(port('B'), 12, Some(on));
+        pb12(true);
+        t.write(&mut ctx, 0x18, 4, 5 << 4); // OC1M = force active
+        t.write(&mut ctx, 0x20, 4, 1); // CC1E
+        t.write(&mut ctx, 0x0C, 4, 1 << 7); // BIE
+        t.write(&mut ctx, 0x44, 4, BDTR_MOE | BDTR_BKE | BDTR_OSSI); // break when BKIN is low
+        assert_eq!(t.oc_out[0], Some(true));
+        pb12(false);
+        ctx.clock.advance(10);
+        t.update(&mut ctx);
+        assert_eq!(t.read(&mut ctx, 0x44, 4) & BDTR_MOE, 0, "the break clears MOE");
+        assert_eq!(t.oc_out[0], Some(false), "idle level OIS1 = 0");
+        assert!(ctx.nvic.is_pending(16 + 24), "TIM1_BRK_TIM9");
+        // no MOE while the break is active, and BIF stays
+        t.write(&mut ctx, 0x10, 4, !SR_BIF);
+        t.write(&mut ctx, 0x44, 4, BDTR_MOE | BDTR_BKE | BDTR_OSSI);
+        assert_eq!(t.read(&mut ctx, 0x44, 4) & BDTR_MOE, 0);
+        assert_ne!(t.read(&mut ctx, 0x10, 4) & SR_BIF, 0);
+        pb12(true);
+        ctx.clock.advance(10);
+        t.update(&mut ctx);
+        t.write(&mut ctx, 0x10, 4, !SR_BIF);
+        t.write(&mut ctx, 0x44, 4, BDTR_MOE | BDTR_BKE | BDTR_OSSI);
+        assert_eq!(t.oc_out[0], Some(true), "MOE again");
+        assert_eq!(t.read(&mut ctx, 0x10, 4) & SR_BIF, 0);
+        t.write(&mut ctx, 0x14, 4, SR_BIF); // BG
+        assert_eq!(t.read(&mut ctx, 0x44, 4) & BDTR_MOE, 0, "BG is a break too");
+        assert_ne!(t.read(&mut ctx, 0x10, 4) & SR_BIF, 0);
+    }
+
+    #[test]
+    fn com_event_transfers_the_preloaded_control_bits() {
+        let (mut t, _gpio) = tim1_complementary();
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        t.write(&mut ctx, 0x44, 4, BDTR_MOE);
+        t.write(&mut ctx, 0x04, 4, CR2_CCPC);
+        t.write(&mut ctx, 0x0C, 4, 1 << 5); // COMIE
+        t.write(&mut ctx, 0x18, 4, 5 << 4); // OC1M = force active, preloaded
+        t.write(&mut ctx, 0x20, 4, 0b0100); // CC1NE, preloaded
+        assert_eq!(t.read(&mut ctx, 0x20, 4), 0b0100, "reads what was written");
+        assert_eq!((t.oc_out[0], t.ocn_out[0]), (None, None), "not yet");
+        t.write(&mut ctx, 0x14, 4, SR_COMIF); // COMG
+        assert_eq!((t.oc_out[0], t.ocn_out[0]), (None, Some(true)));
+        assert!(ctx.nvic.is_pending(16 + 26), "TIM1_TRG_COM_TIM11");
+        // the next step waits again
+        t.write(&mut ctx, 0x18, 4, 4 << 4); // force inactive
+        assert_eq!(t.ocn_out[0], Some(true));
+        t.write(&mut ctx, 0x14, 4, SR_COMIF);
+        assert_eq!(t.ocn_out[0], Some(false));
+    }
+
+    #[test]
+    fn com_event_on_the_trigger_input() {
+        let (t1, _gpio) = tim1_complementary();
+        let lines = SharedTrgo::default();
+        let mut t1 = t1.with_itr(lines.clone());
+        let mut t2 = tim2().with_itr(lines);
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        {
+            let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+            // as HAL_TIMEx_ConfigCommutEvent(TIM_TS_ITR1, TIM_COMMUTATION_TRGI): SMS stays 0
+            t1.write(&mut ctx, 0x08, 4, 1 << 4); // TS = ITR1 (TIM2)
+            t1.write(&mut ctx, 0x04, 4, CR2_CCPC | CR2_CCUS);
+            t1.write(&mut ctx, 0x44, 4, BDTR_MOE);
+            t1.write(&mut ctx, 0x18, 4, 5 << 4);
+            t1.write(&mut ctx, 0x20, 4, 1);
+            t2.write(&mut ctx, 0x04, 4, 2 << 4); // MMS = update
+            t2.write(&mut ctx, 0x2C, 4, 899);
+            t2.write(&mut ctx, 0x00, 4, 1);
+        }
+        assert_eq!(t1.oc_out[0], None);
+        sweep_to([&mut t1, &mut t2], &mut clock, &mut nvic, 2000);
+        assert_eq!(t1.oc_out[0], Some(true), "TIM2's update was the COM event");
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        assert_ne!(t1.read(&mut ctx, 0x10, 4) & SR_COMIF, 0);
+        assert_eq!(t1.read(&mut ctx, 0x10, 4) & SR_TIF, 0, "no TIF without a slave mode");
     }
 
     #[test]
