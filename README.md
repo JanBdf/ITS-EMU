@@ -152,7 +152,9 @@ wrap interrupts; not the B-pin input modes); its ADC converts the
 temperature sensor (27 °C) and GPIO 26–29 (the level on the pin: 0 or 3.3 V).
 Its DMA copies memory and feeds the PIOs, the ADC and the UARTs (paced by
 their FIFOs, the pacing timers or unpaced; chaining, rings, control blocks).
-Not emulated on the Pico: SPI, I²C and the RTC (their
+Its RTC counts date and time from clk_rtc (alarm interrupt with the SDK's
+`rtc_set_alarm`; the date starts where the firmware sets it).
+Not emulated on the Pico: SPI and I²C (their
 registers only store values), and programming or erasing its flash (the
 contents stay). Firmware that uses them does not work as on the real Pico;
 the first use of each shows a warning in the Devices panel and in the log.
