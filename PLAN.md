@@ -45,8 +45,9 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   the TIM10/11/13/14 OC1 inputs of TIM9/TIM12 are missing. On the board, UG while
   the counter is stopped does not change CNT until it runs again (the
   emulator clears it at once)
-- DMA requests of I2C (the controllers and the ADC, U(S)ART, SPI, DAC and
-  timer requests exist), DMA FIFO/bursts; then Ethernet (`Programs/Stack`).
+- DMA FIFO/bursts; then Ethernet (`Programs/Stack`). I2C with DMA keeps
+  the CPU's byte timing: BTF is set after each byte although the DMA keeps
+  DR filled on the board (the HAL ignores BTF while DMAEN is set).
   Timer DMA is not compared with the board yet: record HwCheck `timdma`
   (whether a request made while the stream is off is transferred when it is
   enabled: the emulator keeps it, line `T off`)

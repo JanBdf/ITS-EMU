@@ -1,4 +1,5 @@
-//! I2C controllers in master mode (7-bit addresses), polled or with interrupts.
+//! I2C controllers in master mode (7-bit addresses), polled, with interrupts
+//! or DMA (requests on TXE/RXNE; LAST: NACK after the DMA's EOT_1).
 //!
 //! Devices on the bus implement [`I2cDevice`]; an address nobody answers is
 //! not acknowledged (AF), like the empty I2C header of the ITS-Board. Bus
@@ -13,6 +14,7 @@ use std::rc::Rc;
 use emu_core::bus::{extract_read, merge_write};
 use emu_core::{Clock, DeviceCtx, Peripheral};
 
+use crate::dma::{DmaLine, SharedDma};
 use crate::gpio::{PinMode, SharedGpio, port};
 use crate::rcc::SharedClocks;
 
@@ -37,6 +39,8 @@ const CR1_SWRST: u32 = 1 << 15;
 const CR2_ITERREN: u32 = 1 << 8;
 const CR2_ITEVTEN: u32 = 1 << 9;
 const CR2_ITBUFEN: u32 = 1 << 10;
+const CR2_DMAEN: u32 = 1 << 11;
+const CR2_LAST: u32 = 1 << 12;
 const SR1_SB: u32 = 1 << 0;
 const SR1_ADDR: u32 = 1 << 1;
 const SR1_BTF: u32 = 1 << 2;
@@ -88,6 +92,9 @@ pub struct I2c {
     addr_phase: bool,
     /// Event in progress and the cycle it completes.
     pending: Option<(Pending, u64)>,
+    /// DMA request lines (reception, transmission) and their levels.
+    dma: Option<(SharedDma, DmaLine, DmaLine)>,
+    dma_req: std::cell::Cell<(bool, bool)>,
 }
 
 impl I2c {
@@ -126,9 +133,24 @@ impl I2c {
             addressed: false,
             addr_phase: false,
             pending: None,
+            dma: None,
+            dma_req: Default::default(),
         };
         i.reset_regs();
         i
+    }
+
+    pub fn with_dma(mut self, dma: SharedDma, rx: DmaLine, tx: DmaLine) -> Self {
+        self.dma = Some((dma, rx, tx));
+        self
+    }
+
+    /// LAST with DMA reception: the DMA has signalled EOT_1 (one byte left).
+    fn dma_last(&self) -> bool {
+        match &self.dma {
+            Some((dma, rx, _)) if self.cr2 & (CR2_DMAEN | CR2_LAST) == CR2_DMAEN | CR2_LAST => rx.take_one_left(dma),
+            _ => false,
+        }
     }
 
     fn reset_regs(&mut self) {
@@ -216,7 +238,7 @@ impl I2c {
                 }
             }
             Pending::Receive => {
-                let ack = self.cr1 & CR1_ACK != 0;
+                let ack = self.cr1 & CR1_ACK != 0 && !self.dma_last();
                 let byte = self.devices.borrow_mut().iter_mut().map(|d| d.read(ack)).next().unwrap_or(0xFF);
                 if self.sr1 & SR1_RXNE != 0 {
                     self.sr1 |= SR1_BTF; // waits with the byte in the shift register
@@ -261,6 +283,14 @@ impl I2c {
         let er = self.cr2 & CR2_ITERREN != 0 && self.sr1 & 0xDF00 != 0;
         ctx.set_irq(self.ev_irq, ev);
         ctx.set_irq(self.er_irq, er);
+        if let Some((dma, rx, tx)) = &self.dma {
+            let on = self.cr2 & CR2_DMAEN != 0 && self.cr1 & CR1_PE != 0;
+            let req = (on && self.sr1 & SR1_RXNE != 0, on && self.sr1 & SR1_TXE != 0);
+            if req != self.dma_req.replace(req) {
+                rx.set(dma, req.0);
+                tx.set(dma, req.1);
+            }
+        }
     }
 
     fn reg(&self, off: u32) -> u32 {
@@ -304,6 +334,9 @@ impl Peripheral for I2c {
                 if self.sr2 & SR2_TRA != 0 {
                     self.sr1 |= SR1_TXE;
                 } else {
+                    if let Some((dma, rx, _)) = &self.dma {
+                        rx.take_one_left(dma);
+                    }
                     self.schedule(Pending::Receive, ctx);
                 }
             }
@@ -331,6 +364,7 @@ impl Peripheral for I2c {
                 if v & CR1_SWRST != 0 {
                     self.reset_regs();
                     self.cr1 = CR1_SWRST;
+                    self.sync_irq(ctx);
                     return;
                 }
                 let was_on = self.cr1 & CR1_PE != 0;
@@ -340,6 +374,7 @@ impl Peripheral for I2c {
                     self.sr1 = 0;
                     self.sr2 &= SR2_BUSY;
                     self.pending = None;
+                    self.sync_irq(ctx);
                     return;
                 }
                 if !was_on && self.lines_connected() {
@@ -388,6 +423,11 @@ impl Peripheral for I2c {
 
     fn reset(&mut self) {
         self.reset_regs();
+        if let Some((dma, rx, tx)) = &self.dma {
+            rx.set(dma, false);
+            tx.set(dma, false);
+        }
+        self.dma_req.set((false, false));
     }
 }
 

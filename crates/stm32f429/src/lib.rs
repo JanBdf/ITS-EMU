@@ -347,12 +347,15 @@ pub fn build() -> (Bus, Stm32f429) {
         ),
         ("I2C3", 0x4000_5C00, 72, 23, &[('A', 8), ('H', 7)], &[('C', 9), ('H', 8)], Default::default()),
     ];
-    for (name, base, irq, en_bit, scl, sda, devices) in i2c {
-        bus.attach(
-            base,
-            0x400,
-            Box::new(i2c::I2c::new(name, irq, en_bit, clocks.clone(), gpio.clone(), scl, sda, devices)),
-        );
+    // DMA request lines (controller, stream, channel) for reception / transmission
+    let i2c_dma: [(&'static [_], &'static [_]); 3] = [
+        (&[(0, 0, 1), (0, 5, 1)], &[(0, 6, 1), (0, 7, 1)]),
+        (&[(0, 2, 7), (0, 3, 7)], &[(0, 7, 7)]),
+        (&[(0, 2, 3)], &[(0, 4, 3)]),
+    ];
+    for ((name, base, irq, en_bit, scl, sda, devices), (rx, tx)) in i2c.into_iter().zip(i2c_dma) {
+        let i = i2c::I2c::new(name, irq, en_bit, clocks.clone(), gpio.clone(), scl, sda, devices);
+        bus.attach(base, 0x400, Box::new(i.with_dma(dma.clone(), DmaLine(rx), DmaLine(tx))));
     }
     let analog = adc::SharedAnalog::default();
     bus.attach(
