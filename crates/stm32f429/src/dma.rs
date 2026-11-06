@@ -74,8 +74,10 @@ pub struct Dma {
     requests: Cell<[[u8; 8]; 2]>,
     /// Single requests (timer events), taken by one transfer of the stream.
     pulses: Cell<[[u8; 8]; 2]>,
-    /// Streams that finished a (non-circular) transfer for channel n.
+    /// Streams that finished a (non-circular) transfer for channel n, and
+    /// that have one item left (EOT_1, for the I2C's LAST).
     ended: Cell<[[u8; 8]; 2]>,
+    one_left: Cell<[[u8; 8]; 2]>,
     /// Some stream is enabled (checked after every peripheral access).
     active: Cell<bool>,
 }
@@ -132,13 +134,23 @@ impl DmaLine {
     /// Whether a stream serving this line finished its transfer since the
     /// last call (the end-of-transfer signal to the peripheral).
     pub fn take_end(&self, dma: &Dma) -> bool {
-        let mut e = dma.ended.get();
+        self.take(&dma.ended)
+    }
+
+    /// Whether a stream serving this line got down to one item left since
+    /// the last call (EOT_1).
+    pub fn take_one_left(&self, dma: &Dma) -> bool {
+        self.take(&dma.one_left)
+    }
+
+    fn take(&self, signal: &Cell<[[u8; 8]; 2]>) -> bool {
+        let mut e = signal.get();
         let mut any = false;
         for &(c, s, ch) in self.0 {
             any |= e[c][s] & (1 << ch) != 0;
             e[c][s] &= !(1 << ch);
         }
-        dma.ended.set(e);
+        signal.set(e);
         any
     }
 }
@@ -171,6 +183,7 @@ impl DmaState {
         bus: &mut Bus,
         ram: &mut Ram,
         ended: &Cell<[[u8; 8]; 2]>,
+        one_left: &Cell<[[u8; 8]; 2]>,
     ) -> bool {
         let st = self.streams[c][s];
         let psize = Stream::size((st.cr >> 11) & 3);
@@ -209,6 +222,11 @@ impl DmaState {
             st.m = st.m.wrapping_add(msize);
         }
         st.ndtr -= 1;
+        if st.ndtr == 1 {
+            let mut e = one_left.get();
+            e[c][s] |= 1 << st.channel();
+            one_left.set(e);
+        }
         if st.ndtr == st.total / 2 {
             st.flags |= HTIF;
         }
@@ -251,12 +269,12 @@ impl BusMaster for DmaMaster {
                 }
                 // memory to memory runs to the end at once; a request gets one item
                 if d.streams[c][s].dir() == 2 {
-                    while d.transfer(c, s, ctx, bus, ram, &self.0.ended) {}
+                    while d.transfer(c, s, ctx, bus, ram, &self.0.ended, &self.0.one_left) {}
                 } else {
                     let mut p = self.0.pulses.get();
                     p[c][s] &= !(1 << d.streams[c][s].channel());
                     self.0.pulses.set(p);
-                    d.transfer(c, s, ctx, bus, ram, &self.0.ended);
+                    d.transfer(c, s, ctx, bus, ram, &self.0.ended, &self.0.one_left);
                 }
             }
         }
