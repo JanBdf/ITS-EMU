@@ -43,6 +43,9 @@ crates.io (GPL-2.0, see `unicorn-engine-sys/COPYING`), used through
   registers a callback for the first store to each RAM page (QEMU's
   "not dirty" slow path, which Unicorn takes once per TLB entry anyway), and
   `uc_its_rearm_writes` re-arms it for the TLB of the current MMU index.
+- WFE and YIELD (QEMU's EXCP_YIELD) stop emulation as an invalid
+  instruction, like an undefined one (EXCP_UDEF); `uc_its_stop_exception`
+  tells which of the two it was.
 - `cpu_get_tb_cpu_state` is inline (`target/arm/cpu.h`): every lookup of the
   next translation block after an indirect branch (function returns) calls it.
 - Only the Arm guest: the other targets' sources are removed (`uc.c` still

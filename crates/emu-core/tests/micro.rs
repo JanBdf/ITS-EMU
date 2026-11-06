@@ -253,6 +253,25 @@ fn fetch_from_peripheral_space_faults() {
 }
 
 #[test]
+fn yield_continues_and_undefined_after_a_wfe_halfword_faults() {
+    let mut m = boot_thumb(&[0xBF10, 0xBE01], &[]); // yield; bkpt #1
+    assert_eq!(m.run(10_000), StopReason::Breakpoint { pc: 0x0800_0042 }, "YIELD is a hint");
+
+    let mut m = boot_thumb(
+        &[
+            0xF8D0, 0xBF20, // ldr.w r11, [r0, #0xF20]  (second halfword looks like WFE)
+            0xDE00, // udf #0
+            0xBE01, // bkpt #1
+        ],
+        &[],
+    );
+    let stop = m.run(10_000);
+    assert_eq!(stop, StopReason::Breakpoint { pc: 0x0800_0060 }, "fault handler");
+    let scs = &m.system().scs;
+    assert_ne!(scs.cfsr & (1 << 16), 0, "CFSR.UNDEFINSTR {:#x}", scs.cfsr);
+}
+
+#[test]
 fn single_step_into_code_in_ram() {
     let mut m = boot_thumb(
         &[

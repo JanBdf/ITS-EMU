@@ -20,7 +20,7 @@
          "cargo:rerun-if-changed={}",
 --- a/include/uc_priv.h
 +++ b/include/uc_priv.h
-@@ -394,6 +394,19 @@
+@@ -394,6 +394,22 @@
      int thumb; // thumb mode for ARM
      MemoryRegion **mapped_blocks;
      uint32_t mapped_block_count;
@@ -30,6 +30,9 @@
 +    void (*its_first_write)(void *opaque, uint64_t paddr);
 +    void *its_first_write_opaque;
 +    void (*its_rearm_writes)(struct uc_struct *uc);
++    // ITS-EMU: the CPU exception that stopped emulation as an invalid
++    // instruction (uc_its_stop_exception)
++    int its_stop_excp;
 +    // ITS-EMU: find_memory_mapping results per 1 KiB page, valid while
 +    // address_space_memory.generation is unchanged.
 +    struct uc_mapping_cache_entry {
@@ -711,7 +714,16 @@
  }
  
  static uc_err read_cp_reg(CPUARMState *env, uc_arm_cp_reg *cp)
-@@ -770,6 +776,8 @@
+@@ -578,6 +584,8 @@
+         return false;
+     case EXCP_UDEF:
+     case EXCP_YIELD:
++        // ITS-EMU: both stop as UC_ERR_INSN_INVALID; keep which one it was
++        uc->its_stop_excp = intno;
+         return true;
+     case EXCP_INVSTATE:
+         uc->invalid_error = UC_ERR_EXCEPTION;
+@@ -770,6 +778,8 @@
      return UC_ERR_OK;
  }
  
@@ -720,7 +732,7 @@
  DEFAULT_VISIBILITY
  void uc_init(struct uc_struct *uc)
  {
-@@ -788,4 +796,5 @@
+@@ -788,4 +798,5 @@
      uc->context_save = uc_arm_context_save;
      uc->context_restore = uc_arm_context_restore;
      uc_common_init(uc);
@@ -831,10 +843,12 @@
          return NULL;
 --- a/uc.c
 +++ b/uc.c
-@@ -683,6 +683,26 @@
-     return UC_ERR_OK;
- }
+@@ -681,6 +681,35 @@
  
+     restore_jit_state(uc);
+     return UC_ERR_OK;
++}
++
 +// ITS-EMU: write tracking for the emulator's idle detection. `cb` is called
 +// with the address of the first store to each RAM page after
 +// uc_its_rearm_writes, before the store (and for every store to pages that
@@ -855,6 +869,21 @@
 +    }
 +}
 +
++// ITS-EMU: the QEMU exception number behind the last UC_ERR_INSN_INVALID of
++// an ARM CPU: EXCP_UDEF (1) for an undefined instruction, EXCP_YIELD
++// (0x10004) for WFE and YIELD; 0 when uc_emu_start stopped otherwise.
++UNICORN_EXPORT
++int uc_its_stop_exception(uc_engine *uc)
++{
++    return uc->its_stop_excp;
+ }
+ 
  UNICORN_EXPORT
- uc_err uc_reg_read(uc_engine *uc, int regid, void *value)
- {
+@@ -1081,6 +1110,7 @@
+     // reset the counter
+     uc->emu_counter = 0;
+     uc->invalid_error = UC_ERR_OK;
++    uc->its_stop_excp = 0;
+     uc->emulation_done = false;
+     uc->size_recur_mem = 0;
+     uc->timed_out = false;

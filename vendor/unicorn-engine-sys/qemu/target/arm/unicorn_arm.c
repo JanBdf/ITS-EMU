@@ -584,6 +584,8 @@ static bool arm_stop_interrupt(struct uc_struct *uc, int intno)
         return false;
     case EXCP_UDEF:
     case EXCP_YIELD:
+        // ITS-EMU: both stop as UC_ERR_INSN_INVALID; keep which one it was
+        uc->its_stop_excp = intno;
         return true;
     case EXCP_INVSTATE:
         uc->invalid_error = UC_ERR_EXCEPTION;

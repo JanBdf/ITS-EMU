@@ -703,6 +703,15 @@ void uc_its_rearm_writes(uc_engine *uc)
     }
 }
 
+// ITS-EMU: the QEMU exception number behind the last UC_ERR_INSN_INVALID of
+// an ARM CPU: EXCP_UDEF (1) for an undefined instruction, EXCP_YIELD
+// (0x10004) for WFE and YIELD; 0 when uc_emu_start stopped otherwise.
+UNICORN_EXPORT
+int uc_its_stop_exception(uc_engine *uc)
+{
+    return uc->its_stop_excp;
+}
+
 UNICORN_EXPORT
 uc_err uc_reg_read(uc_engine *uc, int regid, void *value)
 {
@@ -1101,6 +1110,7 @@ uc_err uc_emu_start(uc_engine *uc, uint64_t begin, uint64_t until,
     // reset the counter
     uc->emu_counter = 0;
     uc->invalid_error = UC_ERR_OK;
+    uc->its_stop_excp = 0;
     uc->emulation_done = false;
     uc->size_recur_mem = 0;
     uc->timed_out = false;
