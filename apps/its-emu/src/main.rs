@@ -60,7 +60,7 @@ struct Args {
     /// port (`\n` = newline, no commas), a pin such as `PC3` takes a voltage
     /// or `open` (analog input), `ENC` (`ENC1`, ...) turns a rotary encoder
     /// of `--device` by that many detents (negative: counter-clockwise),
-    /// `TEMP` (`TEMP1`, ...) sets the temperature of a DS18B20 in °C,
+    /// `TEMP` (`TEMP1`, ...) sets the temperature of a DS18B20 or LM75 in °C,
     /// `PICO` (`PICO1`, ...) takes text for the serial port of a Pico.
     /// Example: `2.5:S7=1,2.6:S7=0,3:SERIAL=hi\n,4:PC3=1.65,5:ENC=-3,6:TEMP=30.5`
     #[arg(long, value_parser = parse_inputs)]
@@ -69,7 +69,8 @@ struct Args {
     /// External device on header pins (repeatable): `encoder@PC6,PC7` is a
     /// rotary encoder with contacts A, B to GND and pull-ups (clockwise, A
     /// falls first; turn it with the `ENC` input), `ds18b20@PG2` a 1-Wire
-    /// temperature sensor (21 °C; change it with the `TEMP` input),
+    /// temperature sensor (21 °C; change it with the `TEMP` input), `lm75@0x48`
+    /// an I2C temperature sensor on the I2C header (I2C1: PB8, PB9; `TEMP` too),
     /// `pico=FIRMWARE.uf2@GP0=PF0,GP5=PF1` a Raspberry Pi Pico running the
     /// firmware with its GPIOs wired to the pins (default wiring GP0=PF0,
     /// GP5=PF1); its USB serial port is a pseudo terminal (path printed)
@@ -198,7 +199,7 @@ fn apply_input(board: &itsboard::ItsBoard, picos: &[PicoPlugin], input: &Input) 
         },
         Input::Temperature(n, celsius) => {
             if let Err(e) = board.set_temperature(*n, *celsius) {
-                log::warn!("input TEMP: {e} (add one with --device ds18b20@PIN)");
+                log::warn!("input TEMP: {e} (add one with --device ds18b20@PIN or lm75@0x48)");
             }
         }
         Input::Encoder(n, detents) => {
@@ -249,6 +250,9 @@ fn main() -> Result<()> {
             }
             DeviceSpec::Ds18b20(pin) => {
                 board.add_ds18b20(pin);
+            }
+            DeviceSpec::Lm75(addr) => {
+                board.add_lm75(addr);
             }
         }
     }

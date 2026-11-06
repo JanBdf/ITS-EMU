@@ -351,7 +351,7 @@ impl Device {
         }
         match &self.spec {
             DeviceSpec::Encoder(..) => DeviceState::Connected,
-            DeviceSpec::Ds18b20(_) => DeviceState::Sensor {
+            DeviceSpec::Ds18b20(_) | DeviceSpec::Lm75(_) => DeviceState::Sensor {
                 celsius: self.celsius,
                 rom: board.zip(self.board_index).and_then(|(b, n)| b.ds18b20_rom(n)),
             },
@@ -587,6 +587,11 @@ impl Worker {
                 (DeviceSpec::Encoder(a, b), _) => Some(board.add_encoder(*a, *b)),
                 (DeviceSpec::Ds18b20(pin), _) => {
                     let n = board.add_ds18b20(*pin);
+                    let _ = board.set_temperature(n, d.celsius);
+                    Some(n)
+                }
+                (DeviceSpec::Lm75(addr), _) => {
+                    let n = board.add_lm75(*addr);
                     let _ = board.set_temperature(n, d.celsius);
                     Some(n)
                 }
