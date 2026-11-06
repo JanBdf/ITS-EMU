@@ -19,6 +19,8 @@
 //! takes effect at the next of them; PWM compares CNT < CCR counting up and
 //! CNT ≤ CCR counting down (HwCheck `timdir`). The other slave modes and the
 //! complementary outputs are not modelled (a warning is logged when used).
+//! DMA requests: update, capture/compare and trigger events (UDE, CCxDE,
+//! TDE), one transfer each, and bursts through DMAR (DCR.DBA/DBL).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -26,6 +28,7 @@ use std::rc::Rc;
 use emu_core::bus::{extract_read, merge_write};
 use emu_core::{Clock, DeviceCtx, Peripheral};
 
+use crate::dma::{DmaLine, SharedDma};
 use crate::gpio::{PinMode, SharedGpio, port};
 use crate::rcc::SharedClocks;
 
@@ -142,6 +145,10 @@ const CR1_ARPE: u32 = 1 << 7;
 const SR_UIF: u32 = 1 << 0;
 const SR_TIF: u32 = 1 << 6;
 const DIER_UIE: u32 = 1 << 0;
+const DIER_UDE: u32 = 1 << 8;
+/// DMA requests: update, CC1..CC4, trigger (their SR flags, DIER enables
+/// eight bits above).
+const DMA_EVENTS: [u32; 6] = [SR_UIF, 1 << 1, 1 << 2, 1 << 3, 1 << 4, SR_TIF];
 const BDTR_MOE: u32 = 1 << 15;
 /// Timer clocks from an output edge until its own channel input captures it
 /// (measured: toggle on CCR1 = 500, CH2 captures 512).
@@ -198,6 +205,11 @@ pub struct GpTimer {
     itr_level: bool,
     enable_level: bool,
     itr_kick: bool,
+    /// DMA request lines of the events in `DMA_EVENTS` (empty: none), the
+    /// next register of a DMAR burst and the request that started it.
+    dma: Option<(SharedDma, [DmaLine; 6])>,
+    dma_index: u32,
+    burst_req: usize,
 
     cr1: u32,
     cr2: u32,
@@ -263,6 +275,9 @@ impl GpTimer {
             itr_level: false,
             enable_level: false,
             itr_kick: false,
+            dma: None,
+            dma_index: 0,
+            burst_req: 0,
             cr1: 0,
             cr2: 0,
             smcr: 0,
@@ -315,6 +330,24 @@ impl GpTimer {
     pub fn with_trgo(mut self, triggers: SharedTriggers, index: usize) -> Self {
         self.trgo = Some((triggers, index));
         self
+    }
+
+    /// DMA request lines of the update, CC1..CC4 and trigger events.
+    pub fn with_dma(mut self, dma: SharedDma, lines: [&'static [(usize, usize, u32)]; 6]) -> Self {
+        self.dma = Some((dma, lines.map(DmaLine)));
+        self
+    }
+
+    /// Sets SR flags for events; the enabled ones request a DMA transfer.
+    fn event(&mut self, flags: u32) {
+        self.sr |= flags;
+        let Some((dma, lines)) = &self.dma else { return };
+        for (i, (&f, line)) in DMA_EVENTS.iter().zip(lines).enumerate() {
+            if flags & f != 0 && self.dier & (f << 8) != 0 {
+                line.pulse(dma);
+                self.burst_req = i;
+            }
+        }
     }
 
     /// Trigger output to and internal trigger inputs from the other timers.
@@ -399,6 +432,10 @@ impl GpTimer {
         (self.rcr, self.rep_left, self.bdtr, self.dcr, self.or) = (0, 0, 0, 0, 0);
         (self.cnt_base, self.base_ps, self.checked, self.next_event, self.warned) = (0, 0, 0, None, false);
         self.warned_clock = false;
+        self.dma_index = 0;
+        if let Some((dma, lines)) = &self.dma {
+            lines.iter().for_each(|l| l.cancel(dma));
+        }
         self.ic_events = [0; 4];
         self.oc_ref = [false; 4];
         (self.enable_level, self.itr_kick, self.gate) = (false, false, false);
@@ -517,21 +554,21 @@ impl GpTimer {
         match sms {
             7 => {
                 if rising {
-                    self.sr |= SR_TIF;
+                    self.event(SR_TIF);
                     if self.running() {
                         self.count_edge(true, ctx.clock.cycle_at_ps(t));
                     }
                 }
             }
             4 if rising => {
-                self.sr |= SR_TIF;
+                self.event(SR_TIF);
                 self.advance_to(ctx, t);
                 let flag = self.cr1 & CR1_URS == 0;
                 self.reinit(ctx, t, flag);
             }
             5 => {
                 // gated: counts while TRGI is high; TIF on both edges
-                self.sr |= SR_TIF;
+                self.event(SR_TIF);
                 self.advance_to(ctx, t);
                 let phase = self.phase_now(t).min(u128::from(u32::MAX)) as u32;
                 self.gate = level;
@@ -539,7 +576,7 @@ impl GpTimer {
                 self.sync_enable_trgo(ctx.clock.cycle_at_ps(t));
             }
             6 if rising => {
-                self.sr |= SR_TIF;
+                self.event(SR_TIF);
                 self.advance_to(ctx, t);
                 if !self.running() {
                     self.cr1 |= CR1_CEN;
@@ -767,7 +804,7 @@ impl GpTimer {
             if self.sr & (2 << ch) != 0 {
                 self.sr |= 0x200 << ch; // CCxOF: overcapture
             }
-            self.sr |= 2 << ch;
+            self.event(2 << ch);
             self.ccr[ch] = cnt;
         }
     }
@@ -1116,7 +1153,7 @@ impl GpTimer {
         self.update_pwm(); // preloaded values take effect
         self.rep_left = self.rcr;
         if set_flag {
-            self.sr |= SR_UIF;
+            self.event(SR_UIF);
         }
         if self.cr1 & CR1_OPM != 0 {
             self.cr1 &= !CR1_CEN;
@@ -1188,7 +1225,7 @@ impl GpTimer {
     fn flag_matches(&mut self, from: u128, to: u128) {
         for ch in 0..4 {
             if self.match_phases(ch, false).into_iter().flatten().any(|m| from < m && m <= to) {
-                self.sr |= 2 << ch;
+                self.event(2 << ch);
             }
         }
     }
@@ -1303,7 +1340,7 @@ impl GpTimer {
         (0..4)
             .filter(|&ch| self.compares(ch))
             .flat_map(|ch| {
-                let flags = (self.dier & (2 << ch) != 0).then(|| self.match_phases(ch, false));
+                let flags = (self.dier & (0x202 << ch) != 0).then(|| self.match_phases(ch, false));
                 let out = self.oc_level(ch).is_some().then(|| self.match_phases(ch, true));
                 flags.into_iter().chain(out).flatten().flatten()
             })
@@ -1325,7 +1362,7 @@ impl GpTimer {
         }
         let driving = (0..self.channels).any(|ch| self.oc_level(ch).is_some() && matches!(self.oc_mode(ch), 6 | 7));
         let opm_stop = self.mms() == 1 && self.cr1 & CR1_OPM != 0 && self.itr_listened();
-        let wake = self.dier & DIER_UIE != 0 || self.trgo_on_update() || driving || opm_stop;
+        let wake = self.dier & (DIER_UIE | DIER_UDE) != 0 || self.trgo_on_update() || driving || opm_stop;
         let overflow = wake.then(|| self.period() - self.base_phase());
         let top = self.top_phase().filter(|_| wake).map(|q| self.ticks_to_phase(q));
         let Some(ticks) = [overflow, top, self.next_match_ticks()].into_iter().flatten().min() else { return };
@@ -1398,6 +1435,21 @@ impl GpTimer {
         }
     }
 
+    /// The register a DMAR access reaches (DBA + the burst index); requests
+    /// the next transfer of the burst until DBL + 1 are done.
+    fn burst_step(&mut self) -> u32 {
+        let (dba, dbl) = (self.dcr & 0x1F, (self.dcr >> 8) & 0x1F);
+        let reg = 4 * (dba + self.dma_index);
+        self.dma_index = if self.dma_index >= dbl { 0 } else { self.dma_index + 1 };
+        if self.dma_index != 0
+            && let Some((dma, lines)) = &self.dma
+        {
+            lines[self.burst_req].pulse(dma);
+        }
+        // DMAR itself: no register (reads as 0)
+        if reg == 0x4C { 0x3FC } else { reg }
+    }
+
     fn warn_unsupported(&mut self, what: &str) {
         if !self.warned {
             self.warned = true;
@@ -1430,6 +1482,10 @@ impl Peripheral for GpTimer {
         if !self.clock_enabled() {
             return 0;
         }
+        if off & !3 == 0x4C {
+            let reg = self.burst_step();
+            return self.read(ctx, reg, 4);
+        }
         self.advance(ctx);
         let v = self.reg(off & !3, ctx.clock.time_ps());
         if let 0x34..=0x40 = off & !3 {
@@ -1450,6 +1506,10 @@ impl Peripheral for GpTimer {
                 log::warn!("{}: write while its clock is disabled (ignored)", self.name);
             }
             return;
+        }
+        if off & !3 == 0x4C {
+            let reg = self.burst_step();
+            return self.write(ctx, reg, 4, value);
         }
         self.advance(ctx);
         let now_ps = ctx.clock.time_ps();
@@ -1484,7 +1544,17 @@ impl Peripheral for GpTimer {
                 }
                 self.update_watch();
             }
-            0x0C => self.dier = v & self.dier_mask,
+            0x0C => {
+                let off = self.dier & !v;
+                self.dier = v & self.dier_mask;
+                if let Some((dma, lines)) = &self.dma {
+                    for (&f, line) in DMA_EVENTS.iter().zip(lines) {
+                        if off & (f << 8) != 0 {
+                            line.cancel(dma);
+                        }
+                    }
+                }
+            }
             0x10 => self.sr &= v, // rc_w0
             0x14 => {
                 if v & 1 != 0 {
@@ -1494,7 +1564,7 @@ impl Peripheral for GpTimer {
                 }
                 // CCxG, COMG, TG, BG: set their flags
                 let channels = (0x1Eu32 >> (4 - self.channels)) & 0x1E;
-                self.sr |= v & (channels | 0xE0);
+                self.event(v & (channels | 0xE0));
             }
             0x18 | 0x1C => {
                 // CCxS can only be changed while the channel is off (CCxE = 0)
@@ -1552,7 +1622,10 @@ impl Peripheral for GpTimer {
             }
             0x30 if self.cc_irq.is_some() => self.rcr = v & 0xFF,
             0x44 if self.cc_irq.is_some() => self.bdtr = v,
-            0x48 => self.dcr = v & 0x1F1F,
+            0x48 => {
+                self.dcr = v & 0x1F1F;
+                self.dma_index = 0;
+            }
             0x50 => {
                 self.or = v;
                 self.update_itr_listen();

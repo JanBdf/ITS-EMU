@@ -464,3 +464,22 @@ fn exti_matches_the_board() {
         }
     }
 }
+
+#[test]
+fn timer_dma_requests_match_the_board() {
+    // TIM2 update/CC1 requests on DMA1, DMAR bursts, a request while the stream is off
+    let Some(out) = run("timdma", 500) else { return };
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("T ")).collect();
+    for line in [
+        "T up ndtr 3 buf 0 0 0 0 0",
+        "T cc1 ndtr 2 buf 300 300 sr 1f",
+        "T m2p ccr1 200 then 400 ndtr 0 lisr 00000c00",
+        "T burst 11 22 then 33 44 ndtr 0",
+        "T off_ude_cleared ndtr 1 buf 0 0",
+    ] {
+        assert!(emu.contains(&line), "{line} in {emu:?}");
+    }
+    // not recorded yet: tools/hw/cmd.py timdma | grep '^T ' > tests/hardware/HwCheck-timdma.txt
+    let Ok(board) = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timdma.txt")) else { return };
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}

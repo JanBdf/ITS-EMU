@@ -45,8 +45,11 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   the TIM10/11/13/14 OC1 inputs of TIM9/TIM12 are missing. On the board, UG while
   the counter is stopped does not change CNT until it runs again (the
   emulator clears it at once)
-- DMA requests of I2C and timers (the controllers and the ADC, U(S)ART, SPI
-  and DAC requests exist), DMA FIFO/bursts; then Ethernet (`Programs/Stack`)
+- DMA requests of I2C (the controllers and the ADC, U(S)ART, SPI, DAC and
+  timer requests exist), DMA FIFO/bursts; then Ethernet (`Programs/Stack`).
+  Timer DMA is not compared with the board yet: record HwCheck `timdma`
+  (whether a request made while the stream is off is transferred when it is
+  enabled: the emulator keeps it, line `T off`)
 - External devices: an I2C sensor via `I2cDevice`; the devices in the GUI
   (rotary encoder and DS18B20 exist on the command line, `itsboard::devices`;
   which header pins the course uses for them is still open)

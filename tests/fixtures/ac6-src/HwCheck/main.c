@@ -40,6 +40,7 @@
  *   timdir          TIM3 counting directions: PWM levels, flags
  *   timslave        TIM3 slave modes with TI1/TI2 on PC6/PC7 (pull switching)
  *   timchain        TIM3 slave modes with TIM2's TRGO (ITR1): timer chaining
+ *   timdma          TIM2 DMA requests (update, CC1, DMAR burst) on DMA1
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -2110,6 +2111,112 @@ static void cmd_timchain(void) {
     TIM2->CR2 = 0;
 }
 
+/* ---- TIM2 (1 MHz, 1 ms period) DMA requests on DMA1: update (stream 1,
+ * channel 3) and CC1 (stream 5, channel 3), single transfers and bursts
+ * through DMAR, and a request made while the stream is off. */
+static uint32_t timdma_buf[8];
+
+static void timdma_setup(uint32_t dier) {
+    TIM2->CR1 = 0;
+    TIM2->DIER = 0;
+    TIM2->PSC = 89;
+    TIM2->ARR = 999;
+    TIM2->CCR1 = 300;
+    TIM2->CCR2 = 0;
+    TIM2->CCMR1 = 0;
+    TIM2->DCR = 0;
+    TIM2->EGR = TIM_EGR_UG;
+    TIM2->CNT = 0;
+    TIM2->SR = 0;
+    TIM2->DIER = dier;
+    memset(timdma_buf, 0, sizeof timdma_buf);
+}
+
+static void timdma_stream(DMA_Stream_TypeDef *s, uint32_t cr, volatile uint32_t *par, uint32_t n) {
+    s->CR = 0;
+    DMA1->LIFCR = 0x0F7D0F7D;
+    DMA1->HIFCR = 0x0F7D0F7D;
+    s->PAR = (uint32_t)par;
+    s->M0AR = (uint32_t)timdma_buf;
+    s->NDTR = n;
+    s->FCR = 0;
+    s->CR = (3u << 25) | DMA_SxCR_MINC | DMA_SxCR_PSIZE_1 | DMA_SxCR_MSIZE_1 | cr;
+    s->CR |= DMA_SxCR_EN;
+}
+
+static void cmd_timdma(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
+    RCC->AHB1ENR |= RCC_AHB1ENR_DMA1EN;
+    __DSB();
+    DMA_Stream_TypeDef *up = DMA1_Stream1, *cc1 = DMA1_Stream5;
+    // update: CNT into memory at every update event, 5.5 ms
+    timdma_setup(TIM_DIER_UDE);
+    timdma_stream(up, 0, &TIM2->CNT, 8);
+    TIM2->CR1 = TIM_CR1_CEN;
+    slave_wait_us(5500);
+    TIM2->CR1 = 0;
+    printf("T up ndtr %lu buf %lu %lu %lu %lu %lu\n", (unsigned long)up->NDTR, (unsigned long)timdma_buf[0],
+           (unsigned long)timdma_buf[1], (unsigned long)timdma_buf[2], (unsigned long)timdma_buf[3],
+           (unsigned long)timdma_buf[4]);
+    // CC1 (CCR1 = 300): CNT at each compare match
+    timdma_setup(TIM_DIER_CC1DE);
+    timdma_stream(cc1, 0, &TIM2->CNT, 8);
+    TIM2->CR1 = TIM_CR1_CEN;
+    slave_wait_us(5500);
+    TIM2->CR1 = 0;
+    printf("T cc1 ndtr %lu buf %lu %lu sr %02lx\n", (unsigned long)cc1->NDTR, (unsigned long)timdma_buf[0],
+           (unsigned long)timdma_buf[1], (unsigned long)(TIM2->SR & 0x1F));
+    // memory to CCR1 at each update event, until the table ends
+    timdma_setup(TIM_DIER_UDE);
+    for (int i = 0; i < 4; i++) {
+        timdma_buf[i] = 100 * (i + 1);
+    }
+    timdma_stream(up, DMA_SxCR_DIR_0, &TIM2->CCR1, 4);
+    TIM2->CR1 = TIM_CR1_CEN;
+    slave_wait_us(2500);
+    uint32_t mid = TIM2->CCR1;
+    slave_wait_us(3000);
+    TIM2->CR1 = 0;
+    printf("T m2p ccr1 %lu then %lu ndtr %lu lisr %08lx\n", (unsigned long)mid, (unsigned long)TIM2->CCR1,
+           (unsigned long)up->NDTR, (unsigned long)(DMA1->LISR & 0xF40));
+    // burst: CCR1, CCR2 through DMAR at each update event
+    timdma_setup(TIM_DIER_UDE);
+    TIM2->DCR = (1u << 8) | 13u; // DBL = 2 transfers, DBA = CCR1
+    for (int i = 0; i < 4; i++) {
+        timdma_buf[i] = 11 * (i + 1);
+    }
+    timdma_stream(up, DMA_SxCR_DIR_0, &TIM2->DMAR, 4);
+    TIM2->CR1 = TIM_CR1_CEN;
+    slave_wait_us(1500);
+    uint32_t c1 = TIM2->CCR1, c2 = TIM2->CCR2;
+    slave_wait_us(2000);
+    TIM2->CR1 = 0;
+    printf("T burst %lu %lu then %lu %lu ndtr %lu\n", (unsigned long)c1, (unsigned long)c2,
+           (unsigned long)TIM2->CCR1, (unsigned long)TIM2->CCR2, (unsigned long)up->NDTR);
+    // an update while the stream is off, then the stream enabled at CNT ~500;
+    // again with UDE cleared and set in between
+    for (int clear = 0; clear < 2; clear++) {
+        timdma_setup(TIM_DIER_UDE);
+        up->CR = 0;
+        TIM2->CR1 = TIM_CR1_CEN;
+        slave_wait_us(1500);
+        if (clear) {
+            TIM2->DIER = 0;
+            TIM2->DIER = TIM_DIER_UDE;
+        }
+        timdma_stream(up, 0, &TIM2->CNT, 2);
+        slave_wait_us(1000);
+        TIM2->CR1 = 0;
+        printf("T off%s ndtr %lu buf %lu %lu\n", clear ? "_ude_cleared" : "", (unsigned long)up->NDTR,
+               (unsigned long)(timdma_buf[0] / 100 * 100), (unsigned long)timdma_buf[1]);
+    }
+    up->CR = 0;
+    TIM2->DIER = 0;
+    TIM2->DCR = 0;
+}
+
 /* ---- Counting directions of TIM3 (PWM1, CCR1 = 300, ARR = 999, 1 MHz) on
  * PC6: where the output is high per direction, update and CC1 flags. */
 static void timdir_run(const char *name, uint32_t cr1) {
@@ -2371,6 +2478,8 @@ static void execute(char *line) {
         cmd_timslave();
     } else if (!strcmp(line, "timchain")) {
         cmd_timchain();
+    } else if (!strcmp(line, "timdma")) {
+        cmd_timdma();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {
