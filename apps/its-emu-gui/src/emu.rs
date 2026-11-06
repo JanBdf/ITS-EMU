@@ -76,6 +76,8 @@ pub struct DeviceView {
 pub enum DeviceState {
     /// An encoder.
     Connected,
+    /// The network: the computer's addresses forwarded to the board's ports.
+    Network(Vec<(String, u16)>),
     /// A DS18B20: its temperature and ROM code.
     Sensor {
         celsius: f32,
@@ -342,6 +344,8 @@ struct Device {
     /// A Pico being started (on a thread of its own: the boot ROM may be downloaded).
     starting: Option<Receiver<Result<PicoPlugin, String>>>,
     error: Option<String>,
+    /// The network's forwards and the addresses they listen on.
+    net_bound: Vec<(itsboard::net::Forward, std::net::SocketAddr)>,
 }
 
 impl Device {
@@ -351,6 +355,12 @@ impl Device {
         }
         match &self.spec {
             DeviceSpec::Encoder(..) => DeviceState::Connected,
+            DeviceSpec::Network(_) => DeviceState::Network(
+                self.net_bound
+                    .iter()
+                    .map(|(f, addr)| (format!("{:?} {addr}", f.proto).to_lowercase(), f.board_port))
+                    .collect(),
+            ),
             DeviceSpec::Ds18b20(_) | DeviceSpec::Lm75(_) => DeviceState::Sensor {
                 celsius: self.celsius,
                 rom: board.zip(self.board_index).and_then(|(b, n)| b.ds18b20_rom(n)),
@@ -542,8 +552,16 @@ impl Worker {
     fn add_device(&mut self, spec: DeviceSpec) {
         let id = self.next_device_id;
         self.next_device_id += 1;
-        let mut device =
-            Device { id, spec, board_index: None, celsius: DEFAULT_CELSIUS, pico: None, starting: None, error: None };
+        let mut device = Device {
+            id,
+            spec,
+            board_index: None,
+            celsius: DEFAULT_CELSIUS,
+            pico: None,
+            starting: None,
+            error: None,
+            net_bound: Vec::new(),
+        };
         self.start_pico(&mut device);
         self.devices.push(device);
         self.wire_devices();
@@ -600,6 +618,17 @@ impl Worker {
                     None
                 }
                 (DeviceSpec::Pico(_), None) => None,
+                (DeviceSpec::Network(forwards), _) => {
+                    let config = itsboard::net::NetConfig { forwards: forwards.clone(), ..Default::default() };
+                    match board.add_network(config) {
+                        Ok(bound) => {
+                            d.net_bound = bound;
+                            d.error = None;
+                        }
+                        Err(e) => d.error = Some(format!("cannot forward the ports: {e}")),
+                    }
+                    None
+                }
             };
         }
     }

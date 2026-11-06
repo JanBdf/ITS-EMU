@@ -43,15 +43,15 @@ as workflow artifacts for 14 days.
 |---|---|
 | CPU | Cortex-M4F (Thumb-2, FPU) via [Unicorn](https://www.unicorn-engine.org/); NVIC, SysTick, exceptions, faults in Rust |
 | Clock | RCC clock tree, virtual time in CPU cycles (16 MHz HSI → 180 MHz PLL); cycle model of the Cortex-M4 (loads, branches, divisions, exceptions, APB wait states) measured on the board |
-| Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (up/down/center-aligned counting, output compare and PWM on the pins, input capture, encoder mode, slave modes reset/gated/trigger/external clock with TI1/TI2 or another timer's TRGO (timer chaining), TIM1/8 repetition counter), ADC1–3 (regular and injected groups started by a timer's TRGO), DAC (timer triggers, noise/triangle waves), I²C1–3 (master; an LM75 sensor can be connected, other addresses answer with NACK), SPI1–6, USART1–6 + UART4/5/7/8 (only USART3 connected), IWDG (watchdog reset, reset flags in RCC_CSR), CRC, RNG, DMA1/2 (direct mode; requests from the ADCs, U(S)ARTs, SPIs, the DAC, the timers and the I²Cs, timer DMA bursts), PWR, flash interface (programming and sector/mass erase with the datasheet's timing), bit-banding |
-| Board | LEDs OUT0–15, buttons S0–S7, INT0–5, Analog header (voltages on the ADC pins, DAC1), Nucleo LEDs and USER button; external devices on any pins: rotary encoder, DS18B20 1-Wire temperature sensors, a Raspberry Pi Pico running its own firmware |
+| Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (up/down/center-aligned counting, output compare and PWM on the pins, input capture, encoder mode, slave modes reset/gated/trigger/external clock with TI1/TI2 or another timer's TRGO (timer chaining), TIM1/8 repetition counter), ADC1–3 (regular and injected groups started by a timer's TRGO), DAC (timer triggers, noise/triangle waves), I²C1–3 (master; an LM75 sensor can be connected, other addresses answer with NACK), SPI1–6, USART1–6 + UART4/5/7/8 (only USART3 connected), IWDG (watchdog reset, reset flags in RCC_CSR), CRC, RNG, DMA1/2 (direct mode; requests from the ADCs, U(S)ARTs, SPIs, the DAC, the timers and the I²Cs, timer DMA bursts), Ethernet MAC with DMA descriptors and the LAN8742A PHY, PWR, flash interface (programming and sector/mass erase with the datasheet's timing), bit-banding |
+| Board | LEDs OUT0–15, buttons S0–S7, INT0–5, Analog header (voltages on the ADC pins, DAC1), Nucleo LEDs and USER button; external devices on any pins: rotary encoder, DS18B20 1-Wire temperature sensors, a Raspberry Pi Pico running its own firmware; a network on the Ethernet jack (gateway, DHCP, ports of the computer forwarded to the board) |
 | Pico | RP2040 with both Cortex-M0+ cores and the real boot ROM, the firmware from a UF2 file; clocks, resets, timer, SIO (FIFOs, divider, spinlocks), PIO0/1, XIP flash, and the USB controller with a built-in host that makes the USB serial port (CDC) a pseudo terminal of the computer. Runs on its own thread |
 | Display | ILI9486 480×320 TFT with SPI timing, XPT2046 touch, backlight PWM, tone response of the real panel (GUI; `--ideal-colors` to switch off) |
 | Serial | Virtual COM port (USART3, `printf` / `stdin_getchar`) |
 | Debugging | GDB remote server: breakpoints, single step, watchpoints, registers incl. FPU, memory, `monitor reset halt` |
 | USB (Linux) | The Nucleo's ST-LINK/V2-1 over USB/IP: debug probe for pyOCD (the course's *STLink@pyOCD* configurations, *CMSIS Load*) and OpenOCD, and the virtual COM port (`/dev/ttyACM*`). Behind it the debug port: halting debug (DHCSR, DCRSR/DCRDR, DEMCR, vector catch), FPB breakpoints, DWT watchpoints, ROM table and CoreSight IDs |
 
-Not yet: Ethernet, I²C devices other than the LM75, timer slave modes with ETR, the ADC trigger sources CCx and EXTI.
+Not yet: I²C devices other than the LM75, timer slave modes with ETR, the ADC trigger sources CCx and EXTI.
 
 ## Usage
 
@@ -99,6 +99,21 @@ pull-ups; the TIM8_1/TIM8_2 header pins suit TIM8's encoder mode) and
 `--device lm75@0x48` connects an LM75 temperature sensor to the I²C header
 (I2C1: SCL PB8, SDA PB9; address 0x48..0x4F, `TEMP` sets it too; sensors
 are numbered in the order given: `TEMP1` is the second).
+
+### Network
+
+`--net` plugs a virtual network into the Ethernet jack: a gateway
+192.168.33.1 that answers ARP and ping, and a DHCP server that gives the
+board 192.168.33.99 (the addresses of the course's Stack demo, which also
+works with its fixed address). `--forward tcp:8080=80` (repeatable, `udp:`
+too) makes connections to localhost:8080 reach port 80 of the board, e.g. a
+web server built with lwIP; it implies `--net` and real time. In the GUI the
+network is a device (*Network* in the Devices panel, or `--device
+net@tcp:8080=80,udp:5000`). The board cannot reach other hosts (no NAT).
+
+```sh
+its-emu NetEcho.axf --forward tcp:7007=7   # then: nc localhost 7007
+```
 
 ### Raspberry Pi Pico
 

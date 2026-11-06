@@ -28,7 +28,7 @@ struct Args {
     no_fonts: bool,
 
     /// Stop after this many seconds of virtual time (0 = no limit).
-    /// Default: 10, no limit with --gdb
+    /// Default: 10, no limit with --gdb, --usb or --forward
     #[arg(long)]
     seconds: Option<f64>,
 
@@ -73,7 +73,8 @@ struct Args {
     /// an I2C temperature sensor on the I2C header (I2C1: PB8, PB9; `TEMP` too),
     /// `pico=FIRMWARE.uf2@GP0=PF0,GP5=PF1` a Raspberry Pi Pico running the
     /// firmware with its GPIOs wired to the pins (default wiring GP0=PF0,
-    /// GP5=PF1); its USB serial port is a pseudo terminal (path printed)
+    /// GP5=PF1); its USB serial port is a pseudo terminal (path printed),
+    /// `net@tcp:8080=80` the network of --net with ports forwarded
     #[arg(long = "device", value_name = "DEVICE@PINS", value_parser = DeviceSpec::parse)]
     devices: Vec<DeviceSpec>,
 
@@ -82,6 +83,18 @@ struct Args {
     /// GitHub release and kept in the cache directory
     #[arg(long, value_name = "FILE")]
     pico_bootrom: Option<PathBuf>,
+
+    /// Plug a network into the Ethernet jack: a gateway 192.168.33.1 that
+    /// answers ARP and ping, and a DHCP server that gives the board
+    /// 192.168.33.99 (the course's Stack demo's addresses)
+    #[arg(long)]
+    net: bool,
+
+    /// With the network (implies --net and --realtime, repeatable): a port
+    /// of this computer forwarded to the board, `tcp:8080=80` (connections
+    /// to localhost:8080 reach port 80 of the board), `udp:5000`
+    #[arg(long, value_name = "PROTO:PORT[=BOARDPORT]", value_parser = itsboard::net::Forward::parse)]
+    forward: Vec<itsboard::net::Forward>,
 
     /// Forward the terminal's standard input to the virtual COM port
     #[arg(long)]
@@ -234,8 +247,13 @@ fn main() -> Result<()> {
         None => itsboard::Simulator::blank(fonts.as_deref())?,
     };
     let itsboard::Simulator { mut machine, board, mut image } = sim;
+    let mut devices = args.devices.clone();
+    if args.net || !args.forward.is_empty() {
+        devices.push(DeviceSpec::Network(args.forward.clone()));
+    }
+    let serving_net = devices.iter().any(|d| matches!(d, DeviceSpec::Network(f) if !f.is_empty()));
     let mut picos = Vec::new();
-    for device in &args.devices {
+    for device in &devices {
         match *device {
             DeviceSpec::Pico(ref spec) => {
                 let pico = spec.start(args.pico_bootrom.as_deref())?;
@@ -253,6 +271,13 @@ fn main() -> Result<()> {
             }
             DeviceSpec::Lm75(addr) => {
                 board.add_lm75(addr);
+            }
+            DeviceSpec::Network(ref forwards) => {
+                let config = itsboard::net::NetConfig { forwards: forwards.clone(), ..Default::default() };
+                println!("{}", itsboard::net::describe(&config));
+                for (f, addr) in board.add_network(config).context("forwarding ports to the board")? {
+                    println!("forward {addr} -> board port {} ({f})", f.board_port);
+                }
             }
         }
     }
@@ -290,9 +315,10 @@ fn main() -> Result<()> {
     };
     // Like the board on the desk: in real time while plugged in, and a BKPT
     // without a debugger is a HardFault (the probe may leave the core on one).
-    let realtime = args.realtime || usb.is_some();
+    let realtime = args.realtime || usb.is_some() || serving_net;
     machine.system_mut().bkpt_stops = usb.is_none();
-    let seconds = args.seconds.unwrap_or(if gdb.is_some() || usb.is_some() { 0.0 } else { 10.0 });
+    let serving = gdb.is_some() || usb.is_some() || serving_net;
+    let seconds = args.seconds.unwrap_or(if serving { 0.0 } else { 10.0 });
     let limit_ns = if seconds > 0.0 { (seconds * 1e9) as u64 } else { u64::MAX };
     let mut waiting_for_debugger = gdb.is_some();
     let stdin_rx = args.stdin.then(spawn_stdin_reader);

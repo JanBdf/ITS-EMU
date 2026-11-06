@@ -27,6 +27,7 @@ enum Kind {
     Ds18b20,
     Lm75,
     Pico,
+    Network,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,6 +73,7 @@ pub struct DevicesPanel {
     encoder_pins: String,
     sensor_pin: String,
     lm75_addr: String,
+    net_forwards: String,
     pico_firmware: String,
     pico_wiring: String,
     add_error: Option<String>,
@@ -89,6 +91,7 @@ impl DevicesPanel {
             encoder_pins: "PC6,PC7".to_owned(),
             sensor_pin: "PG2".to_owned(),
             lm75_addr: "0x48".to_owned(),
+            net_forwards: "tcp:8080=80".to_owned(),
             pico_firmware: String::new(),
             pico_wiring: wiring_text(&itsboard::pico::DEFAULT_WIRING),
             add_error: None,
@@ -155,6 +158,7 @@ impl DevicesPanel {
             DeviceSpec::Ds18b20(pin) => format!("DS18B20  {}", pin_name(*pin)),
             DeviceSpec::Lm75(addr) => format!("LM75  I2C1 0x{addr:02X}"),
             DeviceSpec::Pico(spec) => format!("Pico  {}", file_name(&spec.firmware)),
+            DeviceSpec::Network(_) => "Network  192.168.33.99".to_owned(),
         };
         egui::CollapsingHeader::new(RichText::new(title).strong()).id_salt(("device", d.id)).default_open(true).show(
             ui,
@@ -164,6 +168,14 @@ impl DevicesPanel {
                         ui.label(RichText::new(e).color(ERR_RED));
                     }
                     (DeviceSpec::Encoder(..), _) => show_encoder(ui, d.id, emu),
+                    (DeviceSpec::Network(_), DeviceState::Network(bound)) => {
+                        if bound.is_empty() {
+                            ui.label("no ports forwarded");
+                        }
+                        for (from, port) in bound {
+                            ui.label(format!("{from} → board port {port}"));
+                        }
+                    }
                     (DeviceSpec::Ds18b20(_) | DeviceSpec::Lm75(_), DeviceState::Sensor { celsius, rom }) => {
                         show_sensor(ui, d.id, *celsius, rom.as_ref(), emu);
                     }
@@ -355,6 +367,7 @@ impl DevicesPanel {
                 (Kind::Encoder, "Rotary encoder"),
                 (Kind::Ds18b20, "DS18B20"),
                 (Kind::Lm75, "LM75"),
+                (Kind::Network, "Network"),
             ] {
                 if ui.selectable_label(self.kind == kind, label).clicked() {
                     self.kind = kind;
@@ -389,6 +402,19 @@ impl DevicesPanel {
                 .response
                 .on_hover_text("I2C address 0x48..0x4F (A2..A0) on the I2C header: I2C1, SCL PB8, SDA PB9");
                 format!("lm75@{}", self.lm75_addr)
+            }
+            Kind::Network => {
+                ui.label("Ethernet: gateway 192.168.33.1, DHCP gives the board 192.168.33.99");
+                ui.horizontal(|ui| {
+                    ui.label("Forwarded ports:");
+                    ui.text_edit_singleline(&mut self.net_forwards);
+                })
+                .response
+                .on_hover_text(
+                    "Ports of this computer (localhost) and the board's ports they reach: \
+                     tcp:8080=80,udp:5000 (empty: none)",
+                );
+                format!("net@{}", self.net_forwards)
             }
             Kind::Pico => {
                 ui.horizontal(|ui| {
@@ -538,6 +564,9 @@ fn check_pins(spec: &DeviceSpec, devices: &[DeviceView]) -> Result<(), String> {
         && devices.iter().any(|d| d.spec == *spec)
     {
         return Err(format!("address 0x{addr:02X} is in use"));
+    }
+    if matches!(spec, DeviceSpec::Network(_)) && devices.iter().any(|d| matches!(d.spec, DeviceSpec::Network(_))) {
+        return Err("the board has one Ethernet jack (remove the network first)".to_owned());
     }
     for pin in spec.board_pins() {
         let shared_line =

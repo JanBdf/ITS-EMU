@@ -38,6 +38,10 @@ impl Default for EthLink {
 
 pub type SharedEthLink = Rc<RefCell<EthLink>>;
 
+/// Frames kept in [`EthLink::sent`] while nothing takes them (no network:
+/// the oldest are dropped).
+pub const SENT_KEPT: usize = 256;
+
 const MACCR_RE: u32 = 1 << 2;
 const MACCR_TE: u32 = 1 << 3;
 const MACFFR_PM: u32 = 1 << 0;
@@ -242,9 +246,10 @@ impl EthState {
             }
             // buffers in RAM, or anywhere the DMA reads (flash)
             let mut take = |addr: u32, len: u32| {
-                let bytes = ram.writable_bytes(addr, len).map(<[u8]>::to_vec).or_else(|| {
-                    (0..len).map(|i| ram.read(addr + i, 1).map(|b| b as u8)).collect::<Option<Vec<u8>>>()
-                });
+                let bytes = ram
+                    .writable_bytes(addr, len)
+                    .map(<[u8]>::to_vec)
+                    .or_else(|| (0..len).map(|i| ram.read(addr + i, 1).map(|b| b as u8)).collect::<Option<Vec<u8>>>());
                 if let Some(bytes) = bytes {
                     frame.extend_from_slice(&bytes);
                 }
@@ -260,7 +265,11 @@ impl EthState {
             if last {
                 insert_checksums(&mut frame, (first_tdes0 >> 22) & 3);
                 if self.maccr() & MACCR_TE != 0 && link.borrow().link_up {
-                    link.borrow_mut().sent.push_back(std::mem::take(&mut frame));
+                    let mut link = link.borrow_mut();
+                    if link.sent.len() == SENT_KEPT {
+                        link.sent.pop_front();
+                    }
+                    link.sent.push_back(std::mem::take(&mut frame));
                 }
                 if tdes0 & (1 << 30) != 0 {
                     self.sr |= DMASR_TS;
