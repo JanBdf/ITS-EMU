@@ -7,14 +7,15 @@
 //! A_INV/B_INV). TOP and CC are double-buffered: taken at the wrap, or at
 //! once while the slice is off. Wraps set INTR (PWM_IRQ_WRAP). Output
 //! changes are put on the pins at their time when the PWM is brought up to
-//! date (on an access, and when the Pico's peripherals are updated). The
-//! DIVMODE inputs on the B pins, PH_ADV/PH_RET and the DMA requests are not
-//! modelled (noted when used).
+//! date (on an access, and when the Pico's peripherals are updated). A wrap
+//! raises the slice's DREQ for a DMA channel paced by it. The DIVMODE inputs
+//! on the B pins and PH_ADV/PH_RET are not modelled (noted when used).
 
 use std::rc::Rc;
 
 use emu_core::{Clock, DeviceCtx};
 
+use crate::dma::SharedPwmDreq;
 use crate::pins::SharedPins;
 use crate::regs::{Block, Notices, Op};
 
@@ -163,11 +164,19 @@ pub struct Pwm {
     pins: SharedPins,
     notices: Notices,
     noted: bool,
+    /// The wrap DREQs to the DMA.
+    dreq: Option<SharedPwmDreq>,
 }
 
 impl Pwm {
     pub fn new(pins: SharedPins, notices: Notices) -> Self {
-        Self { slices: [Slice::default(); 8], intr: 0, inte: 0, intf: 0, pins, notices, noted: false }
+        Self { slices: [Slice::default(); 8], intr: 0, inte: 0, intf: 0, pins, notices, noted: false, dreq: None }
+    }
+
+    /// Wraps raise DREQs for the DMA.
+    pub fn with_dreq(mut self, dreq: SharedPwmDreq) -> Self {
+        self.dreq = Some(dreq);
+        self
     }
 
     fn note(&mut self, what: &str) {
@@ -182,10 +191,17 @@ impl Pwm {
         let now = ctx.now();
         let pins = Rc::clone(&self.pins);
         let mut wrapped = 0u8;
+        let mut dreq = self.dreq.as_ref().map(|d| d.get()).filter(|d| d.wanted != 0);
         for (n, s) in self.slices.iter_mut().enumerate() {
             s.advance(now, |at, out, wrap| {
                 if wrap {
                     wrapped |= 1 << n;
+                    if let Some(d) = dreq.as_mut()
+                        && d.wanted & (1 << n) != 0
+                        && at >= d.since[n]
+                    {
+                        d.pending |= 1 << n;
+                    }
                 }
                 let mut p = pins.borrow_mut();
                 let old = p.pwm_out;
@@ -194,6 +210,9 @@ impl Pwm {
                     p.refresh(ctx.clock.ps_at_cycle(at));
                 }
             });
+        }
+        if let (Some(d), Some(shared)) = (dreq, &self.dreq) {
+            shared.set(d);
         }
         if wrapped != 0 {
             self.intr |= wrapped;
@@ -313,8 +332,9 @@ impl Block for Pwm {
     }
 
     fn next_event(&self) -> Option<u64> {
-        // only a wrap that raises the interrupt needs the PWM on time
-        let waiting = self.inte & !self.intr;
+        // only a wrap that raises the interrupt or a DREQ needs the PWM on time
+        let dreq = self.dreq.as_ref().map(|d| d.get()).map_or(0, |d| d.wanted & !d.pending);
+        let waiting = (self.inte & !self.intr) | dreq;
         (0..8).filter(|&n| waiting & (1 << n) != 0).filter_map(|n| self.slices[n].next_wrap()).min()
     }
 
@@ -329,8 +349,9 @@ impl Block for Pwm {
     }
 
     fn reset(&mut self) {
-        let (pins, notices) = (self.pins.clone(), self.notices.clone());
+        let (pins, notices, dreq) = (self.pins.clone(), self.notices.clone(), self.dreq.take());
         *self = Self::new(pins, notices);
+        self.dreq = dreq;
         self.pins.borrow_mut().pwm_out = 0;
     }
 }
