@@ -580,7 +580,12 @@ unsafe extern "C" {
         opaque: *mut std::ffi::c_void,
     );
     fn uc_its_rearm_writes(uc: *mut std::ffi::c_void);
+    // the QEMU exception behind the last INSN_INVALID (EXCP_YIELD: WFE, YIELD)
+    fn uc_its_stop_exception(uc: *mut std::ffi::c_void) -> std::ffi::c_int;
 }
+
+/// QEMU's EXCP_YIELD: the core stopped at WFE or YIELD.
+const EXCP_YIELD: std::ffi::c_int = 0x10004;
 
 /// Unicorn's first store to a RAM page since `uc_its_rearm_writes`.
 unsafe extern "C" fn first_write(opaque: *mut std::ffi::c_void, paddr: u64) {
@@ -2077,10 +2082,10 @@ impl Machine {
         }
     }
 
-    /// The instruction before `pc` is WFE or YIELD.
-    fn after_hint(&mut self, pc: u32) -> bool {
-        let mut prev = [0u8; 2];
-        self.read_mem(pc.wrapping_sub(2), &mut prev) && matches!(u16::from_le_bytes(prev), 0xBF20 | 0xBF10)
+    /// Unicorn stopped at WFE or YIELD, not at an undefined instruction.
+    fn stopped_at_hint(&mut self) -> bool {
+        // SAFETY: the handle is this machine's open Unicorn instance.
+        unsafe { uc_its_stop_exception(self.uc.get_handle().cast()) == EXCP_YIELD }
     }
 
     fn sync_devices(&mut self) {
@@ -2278,8 +2283,9 @@ impl Machine {
         }
         match (err, invalid) {
             // QEMU leaves WFE / YIELD with EXCP_YIELD, which Unicorn reports
-            // as an invalid instruction (with the PC after it).
-            (uc_error::INSN_INVALID, _) if self.after_hint(pc) => self.on_idle_return(),
+            // as an invalid instruction (with the PC after it); the vendored
+            // Unicorn keeps the exception number to tell them apart.
+            (uc_error::INSN_INVALID, _) if self.stopped_at_hint() => self.on_idle_return(),
             (uc_error::INSN_INVALID, _) => {
                 self.uc.get_data_mut().scs.cfsr |= scs::CFSR_UNDEFINSTR;
                 Self::raise_fault(&mut self.uc, nvic::USAGE_FAULT, pc);

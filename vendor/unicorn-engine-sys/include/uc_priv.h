@@ -400,6 +400,9 @@ struct uc_struct {
     void (*its_first_write)(void *opaque, uint64_t paddr);
     void *its_first_write_opaque;
     void (*its_rearm_writes)(struct uc_struct *uc);
+    // ITS-EMU: the CPU exception that stopped emulation as an invalid
+    // instruction (uc_its_stop_exception)
+    int its_stop_excp;
     // ITS-EMU: find_memory_mapping results per 1 KiB page, valid while
     // address_space_memory.generation is unchanged.
     struct uc_mapping_cache_entry {
