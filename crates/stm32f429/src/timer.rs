@@ -115,8 +115,9 @@ impl TrgoLines {
 }
 
 /// Internal trigger inputs ITR0..ITR3 of timer `n`: the timers whose TRGO
-/// they are (RM0090, TIMx internal trigger connection tables). The inputs
-/// from TIM10/11/13/14 OC1 (TIM9, TIM12) and from Ethernet/USB are missing.
+/// they are (RM0090, TIMx internal trigger connection tables; for TIM9 and
+/// TIM12 ITR2/ITR3 are OC1REF of TIM10/11 and TIM13/14). The inputs from
+/// Ethernet/USB are missing.
 fn itr_sources(n: u8) -> [Option<u8>; 4] {
     match n {
         1 => [Some(5), Some(2), Some(3), Some(4)],
@@ -125,8 +126,8 @@ fn itr_sources(n: u8) -> [Option<u8>; 4] {
         4 => [Some(1), Some(2), Some(3), Some(8)],
         5 => [Some(2), Some(3), Some(4), Some(8)],
         8 => [Some(1), Some(2), Some(4), Some(5)],
-        9 => [Some(2), Some(3), None, None],
-        12 => [Some(4), Some(5), None, None],
+        9 => [Some(2), Some(3), Some(10), Some(11)],
+        12 => [Some(4), Some(5), Some(13), Some(14)],
         _ => [None; 4],
     }
 }
@@ -450,9 +451,18 @@ impl GpTimer {
         }
     }
 
-    /// The channel whose OCxREF is TRGO (MMS = 1xx) for a listening slave.
+    /// The channel whose OCxREF is on the trigger line: MMS = 1xx, or OC1
+    /// of TIM10/11/13/14 (the ITR2/ITR3 inputs of TIM9/TIM12).
+    fn ref_source(&self) -> Option<usize> {
+        match self.number {
+            10 | 11 | 13 | 14 => Some(0),
+            _ => (self.mms() >= 4).then(|| self.mms() as usize - 4),
+        }
+    }
+
+    /// The channel whose OCxREF is on the trigger line, for a listening slave.
     fn trgo_ref_ch(&self) -> Option<usize> {
-        (self.mms() >= 4 && self.itr_listened()).then(|| self.mms() as usize - 4)
+        self.ref_source().filter(|_| self.itr_listened())
     }
 
     /// TRGO pulses at the CC1 events (MMS = 011) for a listening slave.
@@ -473,8 +483,8 @@ impl GpTimer {
     /// TRGO follows OCxREF (MMS = 1xx) at `cycle`, for changes outside the
     /// counter's matches and wraps (forced levels, CCR/CNT writes).
     fn sync_ref_trgo(&mut self, cycle: u64) {
-        if self.mms() >= 4 {
-            let r = self.oc_ref[self.mms() as usize - 4];
+        if let Some(ch) = self.ref_source() {
+            let r = self.oc_ref[ch];
             if r != self.ref_level {
                 self.ref_level = r;
                 self.itr_event(cycle, TrgoEvent::Level(r));
@@ -2179,6 +2189,30 @@ mod tests {
         t2.update(&mut ctx);
         t3.update(&mut ctx);
         assert_eq!(t3.read(&mut ctx, 0x24, 4), 26, "a rising edge every other period");
+    }
+
+    #[test]
+    fn tim9_counts_the_oc1ref_edges_of_tim10() {
+        let clocks = SharedClocks::default();
+        clocks.set(Clocks { apb2_timer: 180_000_000, apb2enr: 3 << 16, hclk: 180_000_000, ..Clocks::default() });
+        let lines = SharedTrgo::default();
+        let mut t9 =
+            GpTimer::new("TIM9", 24, false, ApbBus::Apb2, 16, clocks.clone()).with_channels(2).with_itr(lines.clone());
+        let mut t10 = GpTimer::new("TIM10", 25, false, ApbBus::Apb2, 17, clocks).with_channels(1).with_itr(lines);
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        {
+            let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+            t9.write(&mut ctx, 0x08, 4, 7 | (2 << 4)); // SMS = external clock 1, TS = ITR2 (TIM10 OC1)
+            t9.write(&mut ctx, 0x00, 4, 1);
+            t10.write(&mut ctx, 0x18, 4, 3 << 4); // OC1 toggles on match
+            t10.write(&mut ctx, 0x34, 4, 10);
+            t10.write(&mut ctx, 0x2C, 4, 99);
+            t10.write(&mut ctx, 0x00, 4, 1);
+        }
+        sweep_to([&mut t9, &mut t10], &mut clock, &mut nvic, 100 * 20 + 50);
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        assert_eq!(t9.read(&mut ctx, 0x24, 4), 11, "21 toggles, every other one rises");
     }
 
     #[test]

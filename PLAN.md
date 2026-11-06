@@ -46,7 +46,7 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   of a TRGO to the slave, gated count, see `timer_chaining_matches_the_board`).
   TRGO from the CC1 compare pulse and OC1REF..OC4REF (MMS >= 3) triggers
   slave timers (TRGO times rounded like an overflow's, unmeasured), but not
-  the ADCs/DAC; the TIM10/11/13/14 OC1 inputs of TIM9/TIM12 are missing. On the board, UG while
+  the ADCs/DAC (TIM9/TIM12 also count OC1REF of TIM10/11/13/14). On the board, UG while
   the counter is stopped does not change CNT until it runs again (the
   emulator clears it at once)
 - DMA: bursts and the FIFO threshold (the FIFO packs, but memory is written
