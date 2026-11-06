@@ -128,6 +128,16 @@ into the cache directory (*Choose…* in the Devices panel or `--pico-bootrom
 FILE` take a local copy instead).
 The emulated Pico runs at about 0.7–0.8× real time while its firmware
 busy-waits; a board with a Pico runs at that speed too.
+Not emulated on the Pico: DMA, PWM, ADC, SPI, I²C and the RTC (their
+registers only store values), and programming or erasing its flash (the
+contents stay). Firmware that uses them does not work as on the real Pico;
+the first use of each shows a warning in the Devices panel and in the log.
+On Windows the Pico has no serial port on the computer (no pseudo
+terminals); the panel's terminal and `--input PICO=...` still work.
+
+`cargo test -p rp2040 --test blink` and the first test of `--test pico` (in
+`crates/itsboard`) run a Pico without any third-party files: a stand-in boot
+ROM and a small blink firmware (`rp2040::testfw`).
 
 `tests/fixtures/ac6-src/PicoQuadrature` is a test program for the board that
 decodes the generator's signals on PF0/PF1 with EXTI interrupts and shows

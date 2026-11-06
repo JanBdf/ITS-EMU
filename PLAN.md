@@ -50,6 +50,19 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
 - ADC injected-group triggers, the CCx/EXTI11 (ADC) and EXTI9 (DAC) trigger
   sources; TRGO other than the update event (the ADC regular group starts on
   TIM2/TIM3/TIM8 TRGO, the DAC on TIM2/4/5/6/7/8 TRGO)
+- WFE/YIELD: Unicorn reports QEMU's EXCP_YIELD like EXCP_UDEF, as an
+  invalid instruction (`arm_stop_interrupt` in `qemu/target/arm/unicorn_arm.c`).
+  `Machine::after_hint` tells them apart by the halfword before the PC
+  (0xBF20/0xBF10), so a real undefined instruction right after one of these
+  halfwords (also the second half of a 32-bit instruction) is taken for a
+  WFE instead of a UsageFault. Exact: a vendored patch that reports
+  EXCP_YIELD with an error code of its own. Checking for a 32-bit
+  instruction before it does not work: a BL's second halfword looks like
+  the first half of one (`bl f; wfe`)
+- Pico: DMA, PWM, ADC, SPI, I2C and RTC only store their registers, flash
+  program/erase commands are ignored (both noted to the user once). A core
+  writing flash or RAM drops only its own translations: code one core
+  writes and the other one has already run stays stale there
 - Time within a block: DWT->CYCCNT reads are placed at their instruction, but
   peripheral accesses see the end of their translated block, and interrupts
   pended by a write are taken only at the end of the block (`irqlat` without
