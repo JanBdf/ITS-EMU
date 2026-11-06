@@ -95,6 +95,12 @@ impl Pico {
         &self.mcu.serial
     }
 
+    /// What the firmware used that is not emulated, since the last call
+    /// (each thing once per Pico).
+    pub fn take_notices(&mut self) -> Vec<String> {
+        self.mcu.notices.take()
+    }
+
     /// The RUN pin: restarts the chip (flash keeps the firmware).
     pub fn reset(&mut self) {
         for core in &mut self.cores {
