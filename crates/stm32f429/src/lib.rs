@@ -245,7 +245,10 @@ pub fn build() -> (Bus, Stm32f429) {
     // TIM9..14 share their interrupt lines with TIM1/TIM8 (source 1), TIM6 with the DAC
     let g = || gpio.clone();
     let more = [
-        (0x4001_0000, timer("TIM1", 25, Apb2, 0).advanced(27).with_inputs(&TIM1_PINS, g())),
+        (
+            0x4001_0000,
+            timer("TIM1", 25, Apb2, 0).advanced(27).with_inputs(&TIM1_PINS, g()).with_trgo(triggers.clone(), timer::TRGO_TIM1),
+        ),
         (
             0x4001_0400,
             timer("TIM8", 44, Apb2, 1)

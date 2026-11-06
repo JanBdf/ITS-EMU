@@ -29,9 +29,9 @@ use emu_core::{Clock, DeviceCtx, Peripheral};
 use crate::gpio::{PinMode, SharedGpio, port};
 use crate::rcc::SharedClocks;
 
-/// Cycle of the last trigger output (TRGO) of TIM2..TIM8 (index
-/// `TRGO_TIM2` ...), for the external triggers of the ADCs and the DAC.
-pub type SharedTriggers = Rc<Cell<[u64; 7]>>;
+/// Cycle of the last trigger (TRGO pulse or rising edge) of TIM1..TIM8
+/// (index `TRGO_TIM2` ...), for the external triggers of the ADCs and the DAC.
+pub type SharedTriggers = Rc<Cell<[u64; 8]>>;
 pub const TRGO_TIM2: usize = 0;
 pub const TRGO_TIM3: usize = 1;
 pub const TRGO_TIM4: usize = 2;
@@ -39,6 +39,7 @@ pub const TRGO_TIM5: usize = 3;
 pub const TRGO_TIM6: usize = 4;
 pub const TRGO_TIM7: usize = 5;
 pub const TRGO_TIM8: usize = 6;
+pub const TRGO_TIM1: usize = 7;
 
 /// An event on a timer's trigger output, as another timer's internal
 /// trigger input (ITRx) sees it.
@@ -339,12 +340,19 @@ impl GpTimer {
 
     /// An update event on TRGO at `cycle` (MMS = 010).
     fn emit_trgo(&mut self, cycle: u64) {
+        self.adc_trigger(cycle);
+        self.itr_event(cycle, TrgoEvent::Pulse);
+    }
+
+    /// A trigger for the ADCs and the DAC: update events and the rising
+    /// counter enable. Not UG with MMS = 000: the DAC ignores it on the board
+    /// (HwCheck `dacwave`).
+    fn adc_trigger(&self, cycle: u64) {
         if let Some((t, i)) = &self.trgo {
             let mut v = t.get();
             v[*i] = cycle;
             t.set(v);
         }
-        self.itr_event(cycle, TrgoEvent::Pulse);
     }
 
     /// Puts an event on TRGO for the slave timers.
@@ -363,6 +371,9 @@ impl GpTimer {
         if on != self.enable_level {
             self.enable_level = on;
             if self.mms() == 1 {
+                if on {
+                    self.adc_trigger(cycle);
+                }
                 self.itr_event(cycle, TrgoEvent::Level(on));
             }
         }
@@ -1701,6 +1712,25 @@ mod tests {
         let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
         assert_eq!(t3.read(&mut ctx, 0x24, 4), 225);
         assert_ne!(t3.read(&mut ctx, 0x10, 4) & SR_UIF, 0, "reset is an update event");
+    }
+
+    #[test]
+    fn trgo_for_the_adc_with_mms_enable_but_not_reset() {
+        let triggers = SharedTriggers::default();
+        let mut t = tim2().with_trgo(triggers.clone(), TRGO_TIM2);
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        clock.advance(100);
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        t.write(&mut ctx, 0x14, 4, 1); // UG with MMS = reset
+        assert_eq!(triggers.get()[TRGO_TIM2], 0, "no trigger, as on the board");
+        ctx.clock.advance(100);
+        t.write(&mut ctx, 0x04, 4, 1 << 4); // MMS = enable
+        t.write(&mut ctx, 0x00, 4, 1);
+        assert_eq!(triggers.get()[TRGO_TIM2], 200, "CEN rises");
+        ctx.clock.advance(100);
+        t.write(&mut ctx, 0x00, 4, 0);
+        assert_eq!(triggers.get()[TRGO_TIM2], 200, "a falling edge is no trigger");
     }
 
     #[test]
