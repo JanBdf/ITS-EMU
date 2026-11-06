@@ -53,8 +53,9 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   (whether a request made while the stream is off is transferred when it is
   enabled: the emulator keeps it, line `T off`)
 - External devices: more I2C devices (EEPROM, IMU, ...) via `I2cDevice`
-  (the LM75 exists, `itsboard::lm75`); which header pins the course uses
-  for the rotary encoder and the DS18B20 is still open
+  (the LM75 exists, `itsboard::lm75`). The course wires the encoder to
+  IN0/IN1 (PF0 = A, PF1 = B, GS task 2; the GUI's default); which pin it
+  uses for the DS18B20 is still open
 - ADC/DAC triggers from the CCx events and EXTI11/EXTI15 (ADC) and EXTI9
   (DAC), and TRGO from compare pulses/OCxREF (MMS >= 3): which signal the
   ADC sees (OCxREF edges or compare pulses; the EXTI line before or after

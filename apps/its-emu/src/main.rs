@@ -66,7 +66,7 @@ struct Args {
     #[arg(long, value_parser = parse_inputs)]
     input: Option<InputScript>,
 
-    /// External device on header pins (repeatable): `encoder@PC6,PC7` is a
+    /// External device on header pins (repeatable): `encoder@PF0,PF1` is a
     /// rotary encoder with contacts A, B to GND and pull-ups (clockwise, A
     /// falls first; turn it with the `ENC` input), `ds18b20@PG2` a 1-Wire
     /// temperature sensor (21 °C; change it with the `TEMP` input), `lm75@0x48`

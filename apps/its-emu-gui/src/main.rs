@@ -49,7 +49,7 @@ struct Args {
     no_usb_attach: bool,
 
     /// External device on header pins (repeatable), instead of the ones
-    /// added in the Devices panel last time: `encoder@PC6,PC7`,
+    /// added in the Devices panel last time: `encoder@PF0,PF1`,
     /// `ds18b20@PG2`, `pico=FIRMWARE.uf2@GP0=PF0,GP5=PF1` (a Raspberry Pi Pico
     /// running the firmware, its GPIOs wired to the pins)
     #[arg(long = "device", value_name = "DEVICE@PINS", value_parser = itsboard::spec::DeviceSpec::parse)]
