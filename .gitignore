@@ -16,6 +16,7 @@
 # own test programs (sources in tests/fixtures/ac6-src)
 !/tests/fixtures/ac6/SerialEcho.axf
 !/tests/fixtures/ac6/HwCheck.axf
+!/tests/fixtures/ac6/DelayLoops.axf
 
 /tools/vscode-nodebug/*.vsix
 

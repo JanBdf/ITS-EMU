@@ -271,6 +271,116 @@ fn yield_continues_and_undefined_after_a_wfe_halfword_faults() {
     assert_ne!(scs.cfsr & (1 << 16), 0, "CFSR.UNDEFINSTR {:#x}", scs.cfsr);
 }
 
+/// `Driver_Delay_us` of the display library at -O0 (counter on the stack),
+/// with `n` iterations, then `bkpt #1`.
+fn boot_delay_loop(n: u32, skipping: bool) -> Machine {
+    let mut m = boot_thumb(
+        &[
+            0x4805, // ldr r0, =n
+            0xB082, // sub sp, #8
+            0x9000, // str r0, [sp]
+            0x9800, // head: ldr r0, [sp]
+            0xB128, // cbz r0, out
+            0xE7FF, // b .+2
+            0xE7FF, // b .+2
+            0x9800, // ldr r0, [sp]
+            0x3801, // subs r0, #1
+            0x9000, // str r0, [sp]
+            0xE7F7, // b head
+            0xBE01, // out: bkpt #1
+        ],
+        &[n],
+    );
+    m.system_mut().idle_skipping = skipping;
+    m
+}
+
+#[test]
+fn delay_loop_skipping_gives_the_same_state_and_cycles() {
+    for n in [0, 1, 5, 1_000, 1_000_000, 3_000_000] {
+        let mut runs = [true, false].map(|skipping| {
+            let mut m = boot_delay_loop(n, skipping);
+            let stop = m.run(200_000_000);
+            assert_eq!(stop, StopReason::Breakpoint { pc: 0x0800_0056 }, "n = {n}");
+            m
+        });
+        let [skip, plain] = &mut runs;
+        assert_eq!(skip.clock().cycles(), plain.clock().cycles(), "cycles, n = {n}");
+        for r in (0..13).map(CoreReg::R).chain([CoreReg::Sp, CoreReg::Lr, CoreReg::Xpsr]) {
+            assert_eq!(skip.reg(r), plain.reg(r), "{r:?}, n = {n}");
+        }
+        assert_eq!(skip.read_u32(0x2000_0FF8), Some(0));
+        if n >= 1_000 {
+            let skipped = skip.system().idle_skipped_cycles();
+            assert!(skipped > skip.clock().cycles() / 2, "skipped {skipped} of {}, n = {n}", skip.clock().cycles());
+        }
+    }
+}
+
+#[test]
+fn delay_loop_skipping_around_systick_interrupts() {
+    // SysTick every 1000 cycles counts ticks at 0x2000_0800 while the delay
+    // loop of `boot_delay_loop` runs
+    let run = |n: u32, skipping: bool| {
+        let code: [u16; 24] = [
+            0x4B0B, // ldr r3, =0xE000E010
+            0x490C, // ldr r1, =999
+            0x6059, // str r1, [r3, #4]   LOAD
+            0x2100, // movs r1, #0
+            0x6099, // str r1, [r3, #8]   VAL
+            0x2107, // movs r1, #7
+            0x6019, // str r1, [r3]       CTRL: enable, interrupt, core clock
+            0x4A0A, // ldr r2, =0x20000800
+            0x480A, // ldr r0, =n
+            0xB082, // sub sp, #8
+            0x9000, // str r0, [sp]
+            0x9800, // head: ldr r0, [sp]
+            0xB128, // cbz r0, out
+            0xE7FF, // b .+2
+            0xE7FF, // b .+2
+            0x9800, // ldr r0, [sp]
+            0x3801, // subs r0, #1
+            0x9000, // str r0, [sp]
+            0xE7F7, // b head
+            0xBE01, // out: bkpt #1
+            0x6811, // SysTick: ldr r1, [r2]
+            0x3101, // adds r1, #1
+            0x6011, // str r1, [r2]
+            0x4770, // bx lr
+        ];
+        let mut flash = vec![0u8; 0x84];
+        let mut vectors = [0x0800_0081u32; 16];
+        (vectors[0], vectors[1], vectors[15]) = (0x2000_1000, 0x0800_0041, 0x0800_0069);
+        for (i, v) in vectors.iter().enumerate() {
+            flash[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        for (i, h) in code.iter().enumerate() {
+            flash[0x40 + 2 * i..0x42 + 2 * i].copy_from_slice(&h.to_le_bytes());
+        }
+        for (i, w) in [0xE000_E010u32, 999, 0x2000_0800, n].iter().enumerate() {
+            flash[0x70 + 4 * i..0x74 + 4 * i].copy_from_slice(&w.to_le_bytes());
+        }
+        flash[0x80..0x82].copy_from_slice(&0xBE02u16.to_le_bytes());
+        let mut m = Machine::new(stm32f4_config(), Bus::new()).unwrap();
+        m.load_bin(0x0800_0000, &flash).unwrap();
+        m.reset();
+        m.system_mut().idle_skipping = skipping;
+        assert_eq!(m.run(200_000_000), StopReason::Breakpoint { pc: 0x0800_0066 }, "n = {n}");
+        m
+    };
+    for n in [10, 2_000, 777_777] {
+        let (skip, plain) = (run(n, true), run(n, false));
+        assert_eq!(skip.clock().cycles(), plain.clock().cycles(), "cycles, n = {n}");
+        assert_eq!(skip.read_u32(0x2000_0800), plain.read_u32(0x2000_0800), "ticks, n = {n}");
+        for r in (0..13).map(CoreReg::R).chain([CoreReg::Sp, CoreReg::Lr, CoreReg::Xpsr]) {
+            assert_eq!(skip.reg(r), plain.reg(r), "{r:?}, n = {n}");
+        }
+        if n > 100_000 {
+            assert!(skip.system().idle_skipped_cycles() > skip.clock().cycles() / 2);
+        }
+    }
+}
+
 #[test]
 fn single_step_into_code_in_ram() {
     let mut m = boot_thumb(

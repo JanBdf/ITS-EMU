@@ -20,6 +20,8 @@ use crate::nvic::{self, Nvic};
 use crate::scs::{self, PPB_BASE, PPB_SIZE, Scs, ScsAction};
 use crate::timing::{self, BlockTiming, DivSite};
 
+mod delay;
+
 /// Address space layout of the emulated MCU.
 #[derive(Debug, Clone)]
 pub struct MemoryMap {
@@ -192,6 +194,9 @@ pub struct System {
     idle: IdleDetector,
     /// Fast-forward idle loops to the next event (disable for debugging).
     pub idle_skipping: bool,
+    /// Counting delay loops may be skipped in this run (idle skipping on, no
+    /// breakpoints or watchpoints that a skipped iteration could hit).
+    delay_skipping: bool,
     /// Another core shares the memory and peripherals: WFI/WFE sleep at most
     /// until the end of the run slice (the other core may wake this one).
     multicore: bool,
@@ -361,7 +366,7 @@ impl System {
 
     /// Cycles skipped by idle-loop fast-forwarding since reset.
     pub fn idle_skipped_cycles(&self) -> u64 {
-        self.idle.skipped_cycles
+        self.idle.skipped_cycles + self.idle.delay.skipped_cycles
     }
 
     fn ctx(&mut self) -> (DeviceCtx<'_>, &mut Bus) {
@@ -521,6 +526,27 @@ impl BlockCache {
     }
 }
 
+/// Memory for the delay loop interpreter: RAM and flash, stores only to RAM
+/// that holds no code.
+struct SysMemory<'a> {
+    ram: &'a Ram,
+    regions: &'a [(u32, u32)],
+    exec: &'a [bool],
+}
+
+impl delay::Memory for SysMemory<'_> {
+    fn load(&self, addr: u32) -> Option<u32> {
+        self.ram.read(addr, 4)
+    }
+
+    fn storable(&self, addr: u32) -> bool {
+        self.regions
+            .iter()
+            .zip(self.exec)
+            .any(|(&(base, size), &exec)| !exec && addr >= base && addr - base <= size.saturating_sub(4))
+    }
+}
+
 /// Detects loops that cannot make progress until a timed event happens.
 ///
 /// The machine is deterministic. If, at the head of a loop, registers and RAM
@@ -558,6 +584,7 @@ struct IdleDetector {
     backoff: u32,
     /// Total cycles skipped (statistics).
     skipped_cycles: u64,
+    delay: delay::DelayDetector,
 }
 
 struct Snapshot {
@@ -624,11 +651,13 @@ impl IdleDetector {
     /// Something outside registers/RAM happened (MMIO, exception, ...).
     fn dirty(&mut self) {
         self.clean = false;
+        self.delay.clean = false;
     }
 
     /// A peripheral read at `now` returned a value that stays the same for
     /// reads before cycle `until`.
     fn note_read(&mut self, until: u64, now: u64) {
+        self.delay.clean = false; // delay loops do not read peripherals
         if until <= now {
             self.dirty();
         } else {
@@ -754,10 +783,60 @@ impl IdleDetector {
     fn note_block(&mut self, stores: bool, side_effects: bool) {
         if side_effects {
             self.clean = false;
+            self.delay.clean = false;
         }
         if stores {
             self.stored = true;
         }
+    }
+
+    /// A visit of the head of a counting delay loop (see `delay`): skips the
+    /// iterations before the one that leaves it, up to the next event.
+    /// Returns whether the interpreter follows this loop.
+    fn delay_loop(uc: &mut Unicorn<System>) -> bool {
+        let all = Self::read_regs(uc);
+        let mut regs = [0u32; 15];
+        regs.copy_from_slice(&all[..15]);
+        let xpsr = all[15];
+        let sys = uc.get_data_mut();
+        let (head, now) = (sys.idle.head, sys.clock.cycles());
+        let mem = SysMemory { ram: &sys.ram, regions: &sys.config.memory.ram, exec: &sys.ram_exec };
+        let det = &mut sys.idle.delay;
+        if !det.visit(&mem, head, now, &regs, xpsr) {
+            return det.following(head);
+        }
+        let period = det.period();
+        // land on the head of an iteration before the slice ends (the block
+        // hook would stop there for the next event)
+        let limit = sys.slice_end.saturating_sub(1).saturating_sub(now) / period.max(1);
+        if period == 0 || limit < 3 {
+            return true;
+        }
+        let jump = match delay::plan(&mem, head as u32, &regs, xpsr, limit) {
+            Ok(jump) => jump,
+            Err(delay::NoJump::NotNow) => return true,
+            Err(delay::NoJump::Never) => {
+                sys.idle.delay.reject();
+                return false;
+            }
+        };
+        for &(addr, v) in &jump.words {
+            sys.ram.write(addr, 4, v);
+        }
+        let cycles = jump.iterations * period;
+        sys.clock.advance(cycles);
+        sys.idle.delay.skipped_cycles += cycles;
+        sys.idle.delay.forget();
+        for (n, (&new, &old)) in jump.regs.iter().zip(&regs).enumerate() {
+            if new != old {
+                let _ = uc.reg_write(core_reg(n as u8), u64::from(new));
+            }
+        }
+        if jump.nzcv != xpsr & 0xF000_0000 {
+            // (this register writes IPSR, EPSR and the IT bits, too)
+            let _ = uc.reg_write(RegisterARM::XPSR_NZCVQ, u64::from((xpsr & 0x0FFF_FFFF) | jump.nzcv));
+        }
+        true
     }
 
     /// [`Self::on_block`] at the head of the loop.
@@ -767,6 +846,14 @@ impl IdleDetector {
             Nothing,
             Snapshot { with_ram: bool },
             Compare,
+        }
+        if uc.get_data().delay_skipping && Self::delay_loop(uc) {
+            // a counting loop the interpreter runs: not idle, keep watching it
+            let d = &mut uc.get_data_mut().idle;
+            d.blocks_since_head = 0;
+            d.restart();
+            d.note_block(stores, side_effects);
+            return None;
         }
         let action = {
             let d = &mut uc.get_data_mut().idle;
@@ -958,6 +1045,7 @@ impl Machine {
             reset_requested: None,
             idle: IdleDetector::default(),
             idle_skipping: true,
+            delay_skipping: false,
             multicore: false,
             bkpt_stops: true,
             stepping: false,
@@ -2028,9 +2116,12 @@ impl Machine {
             if sys.nvic.any_pending() {
                 slice_limit = slice_limit.min(now + sys.config.masked_quantum);
             }
+            let points =
+                !self.breakpoints.is_empty() || !self.hw_breakpoints.is_empty() || !self.watchpoints.is_empty();
             let sys = self.uc.get_data_mut();
             sys.slice_limit = slice_limit;
             sys.slice_end = sys.next_slice_end();
+            sys.delay_skipping = sys.idle_skipping && !points && !sys.debug.enabled();
 
             let pc = self.pc();
             if std::mem::take(&mut first) && resume_pc == Some(pc) {
