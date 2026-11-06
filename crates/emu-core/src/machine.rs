@@ -582,6 +582,8 @@ unsafe extern "C" {
     fn uc_its_rearm_writes(uc: *mut std::ffi::c_void);
     // the QEMU exception behind the last INSN_INVALID (EXCP_YIELD: WFE, YIELD)
     fn uc_its_stop_exception(uc: *mut std::ffi::c_void) -> std::ffi::c_int;
+    // R0..R15 and xPSR into `out` (17 words)
+    fn uc_its_core_regs(uc: *mut std::ffi::c_void, out: *mut u32);
 }
 
 /// QEMU's EXCP_YIELD: the core stopped at WFE or YIELD.
@@ -644,14 +646,15 @@ impl IdleDetector {
     }
 
     fn read_regs(uc: &Unicorn<System>) -> [u32; IDLE_REGS.len()] {
-        // one call instead of one per register
-        let mut ids = IDLE_REGS;
+        // straight from the CPU state, in one call (`uc_reg_read_batch`
+        // dispatches per register and costs as much as a few loop iterations)
+        let mut all = [0u32; 17];
+        // SAFETY: the engine of this machine; `all` holds R0..R15 and xPSR.
+        unsafe { uc_its_core_regs(uc.get_handle().cast(), all.as_mut_ptr()) };
         let mut r = [0u32; IDLE_REGS.len()];
-        if let Ok(values) = uc.reg_read_batch(&mut ids, IDLE_REGS.len() as i32) {
-            for (v, value) in r.iter_mut().zip(values) {
-                *v = value as u32;
-            }
-        }
+        // R0..R14 (the PC is the loop head) and xPSR, as in `IDLE_REGS`
+        r[..15].copy_from_slice(&all[..15]);
+        r[15] = all[16];
         r
     }
 
@@ -822,6 +825,10 @@ impl IdleDetector {
                     let now = sys.clock.cycles();
                     let period = now - snap.at;
                     if period == 0 || until <= now {
+                        // A polled value may change from now on (the slice
+                        // does not end before `now`): observe the next period
+                        // afresh, `stable_until` would stay in the past.
+                        uc.get_data_mut().idle.restamp(now);
                         None
                     } else {
                         // The next period starts here; its reads are noted afresh.
