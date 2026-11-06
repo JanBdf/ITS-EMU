@@ -125,10 +125,12 @@ fn itr_sources(n: u8) -> [Option<u8>; 4] {
     }
 }
 
-/// Pins of the four channels of a timer, and their alternate function.
+/// Pins of the four channels of a timer, of the complementary outputs
+/// CH1N–CH3N (TIM1/TIM8), and their alternate function.
 pub struct ChannelPins {
     pub af: u32,
     pub pins: [&'static [(char, u32)]; 4],
+    pub npins: [&'static [(char, u32)]; 3],
 }
 
 /// Duty cycle (0.0–1.0) of each output channel in PWM mode, `None` otherwise.
@@ -149,6 +151,9 @@ const DIER_UDE: u32 = 1 << 8;
 /// DMA requests: update, CC1..CC4, trigger (their SR flags, DIER enables
 /// eight bits above).
 const DMA_EVENTS: [u32; 6] = [SR_UIF, 1 << 1, 1 << 2, 1 << 3, 1 << 4, SR_TIF];
+const BDTR_OSSI: u32 = 1 << 10;
+const BDTR_OSSR: u32 = 1 << 11;
+const BDTR_AOE: u32 = 1 << 14;
 const BDTR_MOE: u32 = 1 << 15;
 /// Timer clocks from an output edge until its own channel input captures it
 /// (measured: toggle on CCR1 = 500, CH2 captures 512).
@@ -190,6 +195,15 @@ pub struct GpTimer {
     /// Output compare reference (OCxREF) and the level driven on the pins.
     oc_ref: [bool; 4],
     oc_out: [Option<bool>; 4],
+    /// Complementary outputs (TIM1/TIM8 CH1N–CH3N): OCx and OCxN before
+    /// the polarity as the dead-time generator makes them, OCxREF as it
+    /// last saw it, the time (ps) a rise waits for after the dead time,
+    /// and the levels driven on the CHxN pins.
+    dt_main: [bool; 3],
+    dt_n: [bool; 3],
+    dt_ref: [bool; 3],
+    dt_rise: [Option<u64>; 3],
+    ocn_out: [Option<bool>; 3],
     /// Encoder mode: pins of TI1/TI2 whose edges are logged, and the inputs'
     /// levels (after the polarity CCxP).
     enc_watched: Vec<(usize, u32)>,
@@ -266,6 +280,11 @@ impl GpTimer {
             trgo: None,
             oc_ref: [false; 4],
             oc_out: [None; 4],
+            dt_main: [false; 3],
+            dt_n: [true; 3],
+            dt_ref: [false; 3],
+            dt_rise: [None; 3],
+            ocn_out: [None; 3],
             enc_watched: Vec::new(),
             enc_level: [false; 2],
             gate: false,
@@ -438,6 +457,7 @@ impl GpTimer {
         }
         self.ic_events = [0; 4];
         self.oc_ref = [false; 4];
+        (self.dt_main, self.dt_n, self.dt_ref, self.dt_rise) = ([false; 3], [true; 3], [false; 3], [None; 3]);
         (self.enable_level, self.itr_kick, self.gate) = (false, false, false);
         if let Some(l) = &self.itr {
             l.borrow_mut().lines[usize::from(self.number)].mms = 0;
@@ -814,13 +834,98 @@ impl GpTimer {
         (self.ccmr[ch / 2] >> (8 * (ch % 2) + 4)) & 7
     }
 
-    /// Level the channel drives on its pins: an enabled output compare
-    /// channel (with MOE on TIM1/TIM8), OCxREF with the polarity CCxP.
-    fn oc_level(&self, ch: usize) -> Option<bool> {
-        let enabled = self.compares(ch)
-            && self.ccer & (1 << (4 * ch)) != 0
-            && (self.cc_irq.is_none() || self.bdtr & BDTR_MOE != 0);
-        enabled.then(|| self.oc_ref[ch] ^ (self.ccer & (2 << (4 * ch)) != 0))
+    /// Whether channel `ch` has a complementary output (TIM1/TIM8 CH1–CH3).
+    fn has_n(&self, ch: usize) -> bool {
+        self.cc_irq.is_some() && ch < 3
+    }
+
+    /// Levels channel `ch` drives on its pins and on those of its
+    /// complementary output (`None`: not driven), after RM0090's table of
+    /// the output control bits: OCxREF with the polarity, through the
+    /// dead-time generator when both outputs are on; with MOE = 0 the idle
+    /// levels (OSSI = 1) or nothing; an output that is off while the other
+    /// is on drives its inactive level with OSSR = 1.
+    fn out_levels(&self, ch: usize) -> (Option<bool>, Option<bool>) {
+        if !self.compares(ch) {
+            return (None, None);
+        }
+        let bit = |b: u32| self.ccer & (b << (4 * ch)) != 0;
+        let (e, p) = (bit(1), bit(2));
+        let (ne, np) = if self.has_n(ch) { (bit(4), bit(8)) } else { (false, false) };
+        if !e && !ne {
+            return (None, None);
+        }
+        if self.cc_irq.is_some() && self.bdtr & BDTR_MOE == 0 {
+            if self.bdtr & BDTR_OSSI == 0 {
+                return (None, None);
+            }
+            let ois = |b: u32| self.cr2 & (b << (8 + 2 * ch)) != 0;
+            return (e.then(|| ois(1)), ne.then(|| ois(2)));
+        }
+        let ossr = self.bdtr & BDTR_OSSR != 0;
+        let r = self.oc_ref[ch];
+        match (e, ne) {
+            (true, false) => (Some(r ^ p), ossr.then_some(np)),
+            (false, true) => (ossr.then_some(p), Some(r ^ np)),
+            _ => (Some(self.dt_main[ch] ^ p), Some(self.dt_n[ch] ^ np)),
+        }
+    }
+
+    /// Whether the channel drives a pin (its own or the complementary one).
+    fn drives(&self, ch: usize) -> bool {
+        let (main, n) = self.out_levels(ch);
+        main.is_some() || n.is_some()
+    }
+
+    /// Both outputs of channel `ch` on: they go through the dead-time generator.
+    fn dead_time_on(&self, ch: usize) -> bool {
+        self.has_n(ch) && self.compares(ch) && self.ccer & (5 << (4 * ch)) == 5 << (4 * ch) && self.bdtr & BDTR_MOE != 0
+    }
+
+    /// The dead time (BDTR.DTG in steps of tDTS, CR1.CKD) in ps.
+    fn dead_time_ps(&self) -> u64 {
+        let dtg = u64::from(self.bdtr & 0xFF);
+        let steps = match dtg >> 5 {
+            0..=3 => dtg,
+            4 | 5 => (64 + (dtg & 0x3F)) * 2,
+            6 => (32 + (dtg & 0x1F)) * 8,
+            _ => (32 + (dtg & 0x1F)) * 16,
+        };
+        let tdts = 1 << ((self.cr1 >> 8) & 3).min(2);
+        (u128::from(steps * tdts) * PS_PER_S / u128::from(self.kernel_hz().max(1))) as u64
+    }
+
+    /// A rise the dead time held back that is due by `until` (ps).
+    fn dead_time_rise(&mut self, ch: usize, until: u64, clock: &Clock) {
+        if let Some(t) = self.dt_rise[ch].filter(|&t| t <= until) {
+            self.dt_rise[ch] = None;
+            if self.dt_ref[ch] {
+                self.dt_main[ch] = true;
+            } else {
+                self.dt_n[ch] = true;
+            }
+            self.drive(ch, clock, t);
+        }
+    }
+
+    /// Drives the pins of channel `ch` whose level changed, at `t` (ps).
+    fn drive(&mut self, ch: usize, clock: &Clock, t: u64) {
+        let Some((pins, gpio)) = &self.inputs else { return };
+        let (main, n) = self.out_levels(ch);
+        let t = t.max(1);
+        let mut g = gpio.borrow_mut();
+        if main != self.oc_out[ch] {
+            self.oc_out[ch] = main;
+            for &(p, pin) in pins.pins[ch] {
+                g.drive_af(port(p), pin, pins.af, main, clock.cycle_at_ps(t), t);
+            }
+        }
+        if ch < 3 && n != self.ocn_out[ch] {
+            self.ocn_out[ch] = n;
+            for &(p, pin) in pins.npins[ch] {
+                g.drive_af(port(p), pin, pins.af, n, clock.cycle_at_ps(t), t);
+            }
+        }
     }
 
     /// PWM mode 1 is active while CNT < CCR counting up, CNT ≤ CCR counting down.
@@ -918,21 +1023,43 @@ impl GpTimer {
     }
 
     /// Drives the pins of the channels whose level changed; `edge_ps` is
-    /// the time of the change.
-    fn push_outputs(&mut self, clock: &Clock, edge_ps: [u64; 4]) {
-        let Some((pins, gpio)) = &self.inputs else { return };
+    /// the time of the change. With both outputs of a channel on, the one
+    /// that goes inactive does so at once and the other one rises after
+    /// the dead time (not at all if OCxREF turns back before).
+    fn push_outputs(&mut self, clock: &Clock, edge_ps: [u64; 4], now_ps: u64) {
+        if self.inputs.is_none() {
+            return;
+        }
         for (ch, &edge) in edge_ps.iter().enumerate().take(self.channels) {
-            let level = self.oc_level(ch);
-            if level == self.oc_out[ch] {
+            if !self.dead_time_on(ch) {
+                if ch < 3 {
+                    let r = self.oc_ref[ch];
+                    (self.dt_ref[ch], self.dt_main[ch], self.dt_n[ch], self.dt_rise[ch]) = (r, r, !r, None);
+                }
+                self.drive(ch, clock, edge);
                 continue;
             }
-            self.oc_out[ch] = level;
-            let t = edge.max(1);
-            let mut g = gpio.borrow_mut();
-            for &(p, pin) in pins.pins[ch] {
-                g.drive_af(port(p), pin, pins.af, level, clock.cycle_at_ps(t), t);
+            let r = self.oc_ref[ch];
+            if r != self.dt_ref[ch] {
+                self.dead_time_rise(ch, edge, clock);
+                self.dt_ref[ch] = r;
+                if r {
+                    self.dt_n[ch] = false;
+                } else {
+                    self.dt_main[ch] = false;
+                }
+                self.dt_rise[ch] = Some(edge + self.dead_time_ps());
             }
+            // (also an output just switched on or off)
+            self.drive(ch, clock, edge);
+            self.dead_time_rise(ch, now_ps, clock);
         }
+    }
+
+    /// The cycle of the next rise the dead time holds back.
+    fn dead_time_event(&self, ctx: &DeviceCtx) -> Option<u64> {
+        let ps = self.dt_rise.iter().flatten().min()?;
+        Some(ctx.clock.cycle_at_ps(*ps).max(ctx.now() + 1))
     }
 
     /// Time (ps) of position `pos` of the counter, relative to `base`.
@@ -1152,6 +1279,9 @@ impl GpTimer {
         self.ccr_active = self.ccr;
         self.update_pwm(); // preloaded values take effect
         self.rep_left = self.rcr;
+        if self.bdtr & BDTR_AOE != 0 {
+            self.bdtr |= BDTR_MOE; // automatic output enable
+        }
         if set_flag {
             self.event(SR_UIF);
         }
@@ -1242,8 +1372,8 @@ impl GpTimer {
     fn advance_to(&mut self, ctx: &mut DeviceCtx, now_ps: u64) {
         self.take_captures(now_ps);
         if !self.running() || self.arr_active == 0 {
-            self.next_event = None;
-            self.push_outputs(ctx.clock, [now_ps; 4]);
+            self.push_outputs(ctx.clock, [now_ps; 4], now_ps);
+            self.next_event = self.dead_time_event(ctx);
             self.take_captures(now_ps);
             return;
         }
@@ -1317,7 +1447,7 @@ impl GpTimer {
                 self.checked = ticks;
             }
         }
-        self.push_outputs(ctx.clock, edges);
+        self.push_outputs(ctx.clock, edges, now_ps);
         self.take_captures(now_ps);
         self.schedule(ctx);
     }
@@ -1341,7 +1471,7 @@ impl GpTimer {
             .filter(|&ch| self.compares(ch))
             .flat_map(|ch| {
                 let flags = (self.dier & (0x202 << ch) != 0).then(|| self.match_phases(ch, false));
-                let out = self.oc_level(ch).is_some().then(|| self.match_phases(ch, true));
+                let out = self.drives(ch).then(|| self.match_phases(ch, true));
                 flags.into_iter().chain(out).flatten().flatten()
             })
             .map(|m| self.ticks_to_phase(m))
@@ -1353,14 +1483,15 @@ impl GpTimer {
         // a slave takes a new TRGO event at the next sweep
         let kick = std::mem::take(&mut self.itr_kick).then(|| ctx.now() + 1);
         self.schedule_counter(ctx);
-        self.next_event = [self.next_event, kick].into_iter().flatten().min();
+        let rise = self.dead_time_event(ctx);
+        self.next_event = [self.next_event, kick, rise].into_iter().flatten().min();
     }
 
     fn schedule_counter(&mut self, ctx: &mut DeviceCtx) {
         if !self.running() || self.arr_active == 0 {
             return;
         }
-        let driving = (0..self.channels).any(|ch| self.oc_level(ch).is_some() && matches!(self.oc_mode(ch), 6 | 7));
+        let driving = (0..self.channels).any(|ch| self.drives(ch) && matches!(self.oc_mode(ch), 6 | 7));
         let opm_stop = self.mms() == 1 && self.cr1 & CR1_OPM != 0 && self.itr_listened();
         let wake = self.dier & (DIER_UIE | DIER_UDE) != 0 || self.trgo_on_update() || driving || opm_stop;
         let overflow = wake.then(|| self.period() - self.base_phase());
@@ -1633,7 +1764,7 @@ impl Peripheral for GpTimer {
             _ => {}
         }
         self.sync_enable_trgo(ctx.now());
-        self.push_outputs(ctx.clock, [now_ps; 4]);
+        self.push_outputs(ctx.clock, [now_ps; 4], now_ps);
         self.take_captures(now_ps);
         self.schedule(ctx);
         self.sync_irq(ctx);
@@ -1660,12 +1791,11 @@ impl Peripheral for GpTimer {
         self.update_pwm();
         if let Some((pins, gpio)) = &self.inputs {
             let mut g = gpio.borrow_mut();
-            for (ch, list) in pins.pins.iter().enumerate() {
-                for &(p, pin) in *list {
-                    g.drive_af(port(p), pin, pins.af, None, 0, 0);
-                }
-                self.oc_out[ch] = None;
+            for &(p, pin) in pins.pins.iter().chain(&pins.npins).flat_map(|l| l.iter()) {
+                g.drive_af(port(p), pin, pins.af, None, 0, 0);
             }
+            self.oc_out = [None; 4];
+            self.ocn_out = [None; 3];
         }
     }
 }
@@ -1867,7 +1997,7 @@ mod tests {
 
     #[test]
     fn input_capture_of_a_button_edge() {
-        static PINS: ChannelPins = ChannelPins { af: 3, pins: [&[('F', 6)], &[], &[], &[]] };
+        static PINS: ChannelPins = ChannelPins { af: 3, pins: [&[('F', 6)], &[], &[], &[]], npins: [&[]; 3] };
         let clocks = SharedClocks::default();
         clocks.set(Clocks { apb2_timer: 180_000_000, apb2enr: 1 << 17, hclk: 180_000_000, ..Clocks::default() });
         let gpio = SharedGpio::default();
@@ -1904,6 +2034,106 @@ mod tests {
         assert_eq!(t.read(&mut ctx, 0x10, 4), 0x200, "reading CCR1 clears CC1IF");
         t.write(&mut ctx, 0x34, 4, 7); // read-only while capturing
         assert_eq!(t.read(&mut ctx, 0x34, 4), 350);
+    }
+
+    /// TIM1 at 180 MHz with CH1 on PA8 and CH1N on PB13 (AF1).
+    fn tim1_complementary() -> (GpTimer, SharedGpio) {
+        static PINS: ChannelPins =
+            ChannelPins { af: 1, pins: [&[('A', 8)], &[], &[], &[]], npins: [&[('B', 13)], &[], &[]] };
+        let clocks = SharedClocks::default();
+        clocks.set(Clocks { apb2_timer: 180_000_000, apb2enr: 1, hclk: 180_000_000, ..Clocks::default() });
+        let gpio = SharedGpio::default();
+        {
+            let mut g = gpio.borrow_mut();
+            let a = &mut g.ports[port('A')];
+            a.moder = 2 << 16; // PA8: AF
+            a.afr[1] = 1; // AF1
+            let b = &mut g.ports[port('B')];
+            b.moder = 2 << 26; // PB13: AF
+            b.afr[1] = 1 << 20; // AF1
+        }
+        let t = GpTimer::new("TIM1", 25, false, ApbBus::Apb2, 0, clocks).advanced(27).with_inputs(&PINS, gpio.clone());
+        (t, gpio)
+    }
+
+    /// The levels of CH1 (PA8) and CH1N (PB13) at the cycles in `at`,
+    /// sweeping at the timer's events.
+    fn levels_at(
+        t: &mut GpTimer,
+        gpio: &SharedGpio,
+        clock: &mut Clock,
+        nvic: &mut Nvic,
+        at: &[u64],
+    ) -> Vec<(bool, bool)> {
+        let mut out = Vec::new();
+        for &until in at {
+            while clock.cycles() < until {
+                let step = t.next_event().filter(|&c| c > clock.cycles()).map_or(until, |c| c.min(until));
+                clock.advance(step - clock.cycles());
+                t.update(&mut DeviceCtx { clock: &mut *clock, nvic: &mut *nvic });
+            }
+            let g = gpio.borrow();
+            out.push((g.level(port('A'), 8), g.level(port('B'), 13)));
+        }
+        out
+    }
+
+    #[test]
+    fn complementary_outputs_with_dead_time() {
+        let (mut t, gpio) = tim1_complementary();
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        {
+            let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+            t.write(&mut ctx, 0x2C, 4, 999); // 1000 ticks a period
+            t.write(&mut ctx, 0x18, 4, 6 << 4); // OC1M = PWM mode 1
+            t.write(&mut ctx, 0x34, 4, 500); // high for ticks 0..500
+            t.write(&mut ctx, 0x20, 4, 0b0101); // CC1E, CC1NE
+            t.write(&mut ctx, 0x44, 4, BDTR_MOE | 50); // dead time 50 ticks
+            t.write(&mut ctx, 0x00, 4, 1);
+        }
+        let got = levels_at(&mut t, &gpio, &mut clock, &mut nvic, &[100, 520, 560, 1020, 1060, 1520, 1560]);
+        assert_eq!(
+            got,
+            [
+                (true, false),
+                (false, false),
+                (false, true),
+                (false, false),
+                (true, false),
+                (false, false),
+                (false, true)
+            ],
+            "CH1 rises 50 ticks after OC1REF, CH1N 50 ticks after it falls"
+        );
+        // a pulse shorter than the dead time does not come out
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        t.write(&mut ctx, 0x34, 4, 30);
+        let got = levels_at(&mut t, &gpio, &mut clock, &mut nvic, &[2010, 2040, 2070, 2900]);
+        assert_eq!(got, [(false, false), (false, false), (false, false), (false, true)]);
+    }
+
+    #[test]
+    fn complementary_output_alone_and_the_off_states() {
+        let (mut t, gpio) = tim1_complementary();
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        t.write(&mut ctx, 0x18, 4, 5 << 4); // OC1M = force active
+        t.write(&mut ctx, 0x20, 4, 0b0100); // CC1NE only: CH1N follows OC1REF
+        assert_eq!(t.ocn_out[0], None, "MOE = 0, OSSI = 0: not driven");
+        t.write(&mut ctx, 0x44, 4, BDTR_MOE);
+        assert_eq!((t.oc_out[0], t.ocn_out[0]), (None, Some(true)));
+        t.write(&mut ctx, 0x44, 4, BDTR_MOE | BDTR_OSSR);
+        assert_eq!(t.oc_out[0], Some(false), "OSSR: CH1 at its inactive level");
+        t.write(&mut ctx, 0x04, 4, 1 << 9); // OIS1N = 1
+        t.write(&mut ctx, 0x44, 4, BDTR_OSSI);
+        assert_eq!((t.oc_out[0], t.ocn_out[0]), (None, Some(true)), "MOE = 0, OSSI: idle levels");
+        t.write(&mut ctx, 0x44, 4, BDTR_AOE);
+        assert_eq!(t.ocn_out[0], None);
+        t.write(&mut ctx, 0x14, 4, 1); // UG: AOE sets MOE
+        assert_ne!(t.read(&mut ctx, 0x44, 4) & BDTR_MOE, 0);
+        assert!(gpio.borrow().level(port('B'), 13), "PB13 at OIS1N, then CH1N on");
     }
 
     #[test]
