@@ -227,6 +227,40 @@ pub fn build() -> (Bus, Stm32f429) {
     let spi1 = SpiSlot::default();
     let usart3 = SharedSerial::default();
     let mut tim_pwm: Vec<SharedPwm> = Vec::new();
+    // DMA request lines (controller, stream, channel) of the update, CC1..CC4
+    // and trigger events
+    type TimDma = [&'static [(usize, usize, u32)]; 6];
+    const TIM_DMA: [TimDma; 4] = [
+        [&[(0, 1, 3), (0, 7, 3)], &[(0, 5, 3)], &[(0, 6, 3)], &[(0, 1, 3)], &[(0, 6, 3), (0, 7, 3)], &[]],
+        [&[(0, 2, 5)], &[(0, 4, 5)], &[(0, 5, 5)], &[(0, 7, 5)], &[(0, 2, 5)], &[(0, 4, 5)]],
+        [&[(0, 6, 2)], &[(0, 0, 2)], &[(0, 3, 2)], &[(0, 7, 2)], &[], &[]],
+        [
+            &[(0, 0, 6), (0, 6, 6)],
+            &[(0, 2, 6)],
+            &[(0, 4, 6)],
+            &[(0, 0, 6)],
+            &[(0, 1, 6), (0, 3, 6)],
+            &[(0, 1, 6), (0, 3, 6)],
+        ],
+    ];
+    const TIM1_DMA: TimDma = [
+        &[(1, 5, 6)],
+        &[(1, 1, 6), (1, 3, 6), (1, 6, 0)],
+        &[(1, 2, 6), (1, 6, 0)],
+        &[(1, 6, 6), (1, 6, 0)],
+        &[(1, 4, 6)],
+        &[(1, 0, 6), (1, 4, 6)],
+    ];
+    const TIM8_DMA: TimDma = [
+        &[(1, 1, 7)],
+        &[(1, 2, 7), (1, 2, 0)],
+        &[(1, 3, 7), (1, 2, 0)],
+        &[(1, 4, 7), (1, 2, 0)],
+        &[(1, 7, 7)],
+        &[(1, 7, 7)],
+    ];
+    const TIM6_DMA: TimDma = [&[(0, 1, 7)], &[], &[], &[], &[], &[]];
+    const TIM7_DMA: TimDma = [&[(0, 2, 1), (0, 4, 1)], &[], &[], &[], &[], &[]];
     let timers = [
         ("TIM2", 0x4000_0000, 28, true, 0, &TIM2_PINS),
         ("TIM3", 0x4000_0400, 29, false, 1, &TIM3_PINS),
@@ -237,6 +271,7 @@ pub fn build() -> (Bus, Stm32f429) {
         let t = GpTimer::new(name, irq, wide, ApbBus::Apb1, en_bit, clocks.clone()).with_inputs(pins, gpio.clone());
         let index = [timer::TRGO_TIM2, timer::TRGO_TIM3, timer::TRGO_TIM4, timer::TRGO_TIM5][en_bit as usize];
         let t = t.with_trgo(triggers.clone(), index).with_itr(trgo.clone());
+        let t = t.with_dma(dma.clone(), TIM_DMA[en_bit as usize]);
         tim_pwm.push(t.pwm());
         bus.attach(base, 0x400, Box::new(t));
     }
@@ -251,17 +286,31 @@ pub fn build() -> (Bus, Stm32f429) {
             timer("TIM1", 25, Apb2, 0)
                 .advanced(27)
                 .with_inputs(&TIM1_PINS, g())
-                .with_trgo(triggers.clone(), timer::TRGO_TIM1),
+                .with_trgo(triggers.clone(), timer::TRGO_TIM1)
+                .with_dma(dma.clone(), TIM1_DMA),
         ),
         (
             0x4001_0400,
             timer("TIM8", 44, Apb2, 1)
                 .advanced(46)
                 .with_inputs(&TIM8_PINS, g())
-                .with_trgo(triggers.clone(), timer::TRGO_TIM8),
+                .with_trgo(triggers.clone(), timer::TRGO_TIM8)
+                .with_dma(dma.clone(), TIM8_DMA),
         ),
-        (0x4000_1000, timer("TIM6", 54, Apb1, 4).with_channels(0).with_trgo(triggers.clone(), timer::TRGO_TIM6)),
-        (0x4000_1400, timer("TIM7", 55, Apb1, 5).with_channels(0).with_trgo(triggers.clone(), timer::TRGO_TIM7)),
+        (
+            0x4000_1000,
+            timer("TIM6", 54, Apb1, 4)
+                .with_channels(0)
+                .with_trgo(triggers.clone(), timer::TRGO_TIM6)
+                .with_dma(dma.clone(), TIM6_DMA),
+        ),
+        (
+            0x4000_1400,
+            timer("TIM7", 55, Apb1, 5)
+                .with_channels(0)
+                .with_trgo(triggers.clone(), timer::TRGO_TIM7)
+                .with_dma(dma.clone(), TIM7_DMA),
+        ),
         (0x4001_4000, timer("TIM9", 24, Apb2, 16).with_channels(2).shared_irq(1).with_inputs(&TIM9_PINS, g())),
         (0x4001_4400, timer("TIM10", 25, Apb2, 17).with_channels(1).shared_irq(1).with_inputs(&TIM10_PINS, g())),
         (0x4001_4800, timer("TIM11", 26, Apb2, 18).with_channels(1).shared_irq(1).with_inputs(&TIM11_PINS, g())),

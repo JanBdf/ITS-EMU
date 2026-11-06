@@ -72,6 +72,8 @@ pub struct Dma {
     state: RefCell<DmaState>,
     /// Requests per controller and stream: bit n = channel n requests.
     requests: Cell<[[u8; 8]; 2]>,
+    /// Single requests (timer events), taken by one transfer of the stream.
+    pulses: Cell<[[u8; 8]; 2]>,
     /// Streams that finished a (non-circular) transfer for channel n.
     ended: Cell<[[u8; 8]; 2]>,
     /// Some stream is enabled (checked after every peripheral access).
@@ -79,6 +81,15 @@ pub struct Dma {
 }
 
 impl Dma {
+    /// Level and single requests.
+    fn pending(&self) -> [[u8; 8]; 2] {
+        let (mut r, p) = (self.requests.get(), self.pulses.get());
+        for (r, p) in r.iter_mut().flatten().zip(p.iter().flatten()) {
+            *r |= p;
+        }
+        r
+    }
+
     fn update_active(&self, d: &DmaState) {
         self.active.set(d.streams.iter().flatten().any(|st| st.cr & CR_EN != 0));
     }
@@ -93,7 +104,21 @@ pub struct DmaLine(pub &'static [(usize, usize, u32)]);
 
 impl DmaLine {
     pub fn set(&self, dma: &Dma, on: bool) {
-        let mut r = dma.requests.get();
+        dma.requests.set(self.with(dma.requests.get(), on));
+    }
+
+    /// A single request (an event): the next transfer of a stream serving
+    /// the line takes it; it stays pending while the stream is off.
+    pub fn pulse(&self, dma: &Dma) {
+        dma.pulses.set(self.with(dma.pulses.get(), true));
+    }
+
+    /// Withdraws pending single requests (the peripheral disabled them).
+    pub fn cancel(&self, dma: &Dma) {
+        dma.pulses.set(self.with(dma.pulses.get(), false));
+    }
+
+    fn with(&self, mut r: [[u8; 8]; 2], on: bool) -> [[u8; 8]; 2] {
         for &(c, s, ch) in self.0 {
             if on {
                 r[c][s] |= 1 << ch;
@@ -101,7 +126,7 @@ impl DmaLine {
                 r[c][s] &= !(1 << ch);
             }
         }
-        dma.requests.set(r);
+        r
     }
 
     /// Whether a stream serving this line finished its transfer since the
@@ -213,7 +238,7 @@ impl BusMaster for DmaMaster {
             return false;
         }
         let d = self.0.state.borrow();
-        let r = self.0.requests.get();
+        let r = self.0.pending();
         (0..2).any(|c| d.enables[c] && (0..8).any(|s| d.due(c, s, &r)))
     }
 
@@ -221,13 +246,16 @@ impl BusMaster for DmaMaster {
         let mut d = self.0.state.borrow_mut();
         for c in 0..2 {
             for s in 0..8 {
-                if !d.due(c, s, &self.0.requests.get()) {
+                if !d.due(c, s, &self.0.pending()) {
                     continue;
                 }
                 // memory to memory runs to the end at once; a request gets one item
                 if d.streams[c][s].dir() == 2 {
                     while d.transfer(c, s, ctx, bus, ram, &self.0.ended) {}
                 } else {
+                    let mut p = self.0.pulses.get();
+                    p[c][s] &= !(1 << d.streams[c][s].channel());
+                    self.0.pulses.set(p);
                     d.transfer(c, s, ctx, bus, ram, &self.0.ended);
                 }
             }
@@ -299,7 +327,7 @@ impl Peripheral for DmaRegs {
             return;
         }
         let reg = off & !3;
-        let requests = self.state.requests.get()[self.index];
+        let requests = self.state.pending()[self.index];
         let mut d = self.state.state.borrow_mut();
         d.enables[self.index] = true;
         match reg {
