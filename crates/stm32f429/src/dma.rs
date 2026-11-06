@@ -1,10 +1,12 @@
-//! DMA1 and DMA2: eight streams each, in direct mode (no FIFO).
+//! DMA1 and DMA2: eight streams each.
 //!
 //! Peripheral-to-memory, memory-to-peripheral (single transfers on the
 //! requests of peripherals) and memory-to-memory (DMA2), with increments,
-//! data sizes, circular mode, transfer complete/half/error flags and their
-//! interrupts. Transfers take no time. The FIFO, bursts and double buffer
-//! mode are not modelled.
+//! data sizes, circular and double buffer mode, transfer complete/half/error
+//! flags and their interrupts. Transfers take no time. In FIFO mode (DMDIS)
+//! with different peripheral and memory sizes the FIFO packs and unpacks
+//! the items (memory is accessed as soon as a whole item is there, not at
+//! the threshold); bursts are single transfers.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -19,6 +21,9 @@ const CR_TEIE: u32 = 1 << 2;
 const CR_HTIE: u32 = 1 << 3;
 const CR_TCIE: u32 = 1 << 4;
 const CR_CIRC: u32 = 1 << 8;
+const CR_DBM: u32 = 1 << 18;
+const CR_CT: u32 = 1 << 19;
+const FCR_DMDIS: u32 = 1 << 2;
 const CR_PINC: u32 = 1 << 9;
 const CR_MINC: u32 = 1 << 10;
 const TEIF: u32 = 1 << 3;
@@ -40,6 +45,10 @@ struct Stream {
     /// Interrupt flags (TCIF, HTIF, TEIF, DMEIF, FEIF in their LISR positions
     /// for stream 0).
     flags: u32,
+    /// FIFO mode with different sizes: the bytes in the FIFO (the oldest
+    /// in the low byte) and their number.
+    fifo: u128,
+    fifo_len: u32,
 }
 
 impl Stream {
@@ -51,6 +60,28 @@ impl Stream {
     }
     fn size(bits: u32) -> u32 {
         1 << bits.min(2)
+    }
+    /// The memory address register in use (double buffer mode: CT selects).
+    fn mem_base(&self) -> u32 {
+        if self.cr & (CR_DBM | CR_CT) == CR_DBM | CR_CT { self.m1ar } else { self.m0ar }
+    }
+    fn push(&mut self, v: u32, size: u32) {
+        self.fifo |= u128::from(v) << (8 * self.fifo_len);
+        self.fifo_len += size;
+    }
+    fn pop(&mut self, size: u32) -> u32 {
+        let v = (self.fifo & ((1u128 << (8 * size)) - 1)) as u32;
+        self.fifo >>= 8 * size;
+        self.fifo_len -= size;
+        v
+    }
+    /// FCR.FS: the FIFO level in quarters, 4 = empty, 5 = full.
+    fn fifo_status(&self) -> u32 {
+        match self.fifo_len {
+            0 => 4,
+            16.. => 5,
+            n => n / 4,
+        }
     }
 }
 
@@ -187,7 +218,7 @@ impl DmaState {
     ) -> bool {
         let st = self.streams[c][s];
         let psize = Stream::size((st.cr >> 11) & 3);
-        let msize = if st.fcr & 4 != 0 { Stream::size((st.cr >> 13) & 3) } else { psize };
+        let msize = if st.fcr & FCR_DMDIS != 0 { Stream::size((st.cr >> 13) & 3) } else { psize };
         let periph = |a: u32| (0x4000_0000..0x6000_0000).contains(&a);
         let read = |addr: u32, size: u32, bus: &mut Bus, ctx: &mut DeviceCtx, ram: &Ram| {
             if periph(addr) { Some(bus.read(ctx, addr, size)) } else { ram.read(addr, size) }
@@ -200,26 +231,64 @@ impl DmaState {
                 ram.write(addr, size, v)
             }
         };
-        // peripheral to memory and memory to memory read PAR, write M0AR
-        let (src, ssize, dst, dsize) = match st.dir() {
-            1 => (st.m, msize, st.p, psize),
-            _ => (st.p, psize, st.m, msize),
-        };
-        let ok = match read(src, ssize, bus, ctx, ram) {
-            Some(v) => write(dst, dsize, v, bus, ctx, ram),
-            None => false,
+        let (pinc, minc) = (st.cr & CR_PINC != 0, st.cr & CR_MINC != 0);
+        let ok = if psize == msize {
+            // peripheral to memory and memory to memory read PAR, write M0AR
+            let (src, dst) = if st.dir() == 1 { (st.m, st.p) } else { (st.p, st.m) };
+            let ok = read(src, psize, bus, ctx, ram).is_some_and(|v| write(dst, psize, v, bus, ctx, ram));
+            let st = &mut self.streams[c][s];
+            if ok && pinc {
+                st.p = st.p.wrapping_add(psize);
+            }
+            if ok && minc {
+                st.m = st.m.wrapping_add(msize);
+            }
+            ok
+        } else {
+            // the FIFO packs (to memory) or unpacks (to the peripheral) the items
+            let st = &mut self.streams[c][s];
+            let mut ok = true;
+            if st.dir() == 1 {
+                while ok && st.fifo_len < psize {
+                    match read(st.m, msize, bus, ctx, ram) {
+                        Some(v) => st.push(v, msize),
+                        None => ok = false,
+                    }
+                    if minc {
+                        st.m = st.m.wrapping_add(msize);
+                    }
+                }
+                if ok {
+                    let v = st.pop(psize);
+                    ok = write(st.p, psize, v, bus, ctx, ram);
+                    if pinc {
+                        st.p = st.p.wrapping_add(psize);
+                    }
+                }
+            } else {
+                match read(st.p, psize, bus, ctx, ram) {
+                    Some(v) => st.push(v, psize),
+                    None => ok = false,
+                }
+                if pinc {
+                    st.p = st.p.wrapping_add(psize);
+                }
+                while ok && st.fifo_len >= msize {
+                    let v = st.pop(msize);
+                    ok = write(st.m, msize, v, bus, ctx, ram);
+                    if minc {
+                        st.m = st.m.wrapping_add(msize);
+                    }
+                }
+            }
+            ok
         };
         let st = &mut self.streams[c][s];
         if !ok {
             st.flags |= TEIF;
             st.cr &= !CR_EN;
+            (st.fifo, st.fifo_len) = (0, 0);
             return false;
-        }
-        if st.cr & CR_PINC != 0 {
-            st.p = st.p.wrapping_add(psize);
-        }
-        if st.cr & CR_MINC != 0 {
-            st.m = st.m.wrapping_add(msize);
         }
         st.ndtr -= 1;
         if st.ndtr == 1 {
@@ -232,7 +301,19 @@ impl DmaState {
         }
         if st.ndtr == 0 {
             st.flags |= TCIF;
-            if st.cr & CR_CIRC != 0 {
+            // bytes left over (sizes that do not divide the transfer) are lost
+            if st.dir() == 1 || st.cr & (CR_CIRC | CR_DBM) == 0 {
+                (st.fifo, st.fifo_len) = (0, 0);
+            }
+            if st.dir() == 2 {
+                // (memory to memory allows neither circular nor double buffer mode)
+                st.cr &= !CR_EN;
+                return false;
+            } else if st.cr & CR_DBM != 0 {
+                // the other buffer next
+                st.cr ^= CR_CT;
+                (st.ndtr, st.p, st.m) = (st.total, st.par, st.mem_base());
+            } else if st.cr & CR_CIRC != 0 {
                 (st.ndtr, st.p, st.m) = (st.total, st.par, st.m0ar);
             } else {
                 st.cr &= !CR_EN;
@@ -332,7 +413,7 @@ impl Peripheral for DmaRegs {
                     0x08 => st.par,
                     0x0C => st.m0ar,
                     0x10 => st.m1ar,
-                    _ => st.fcr | 0x20, // FS: FIFO empty
+                    _ => st.fcr | st.fifo_status() << 3,
                 }
             }
             _ => 0,
@@ -363,10 +444,15 @@ impl Peripheral for DmaRegs {
                 let enabled = st.cr & CR_EN != 0;
                 match field {
                     0x00 => {
-                        let v = merge_write(st.cr, off, size, value) & 0x0FEF_FFFF;
+                        let mut v = merge_write(st.cr, off, size, value) & 0x0FEF_FFFF;
+                        if enabled {
+                            v = v & !(CR_DBM | CR_CT) | st.cr & (CR_DBM | CR_CT);
+                        }
                         if !enabled && v & CR_EN != 0 {
                             // latch the transfer
-                            (st.total, st.p, st.m) = (st.ndtr, st.par, st.m0ar);
+                            st.cr = st.cr & !CR_CT | v & CR_CT;
+                            (st.total, st.p, st.m) = (st.ndtr, st.par, st.mem_base());
+                            (st.fifo, st.fifo_len) = (0, 0);
                             // memory to peripheral in direct mode reports a FIFO
                             // error when the peripheral requests already (as on the board)
                             let requesting = requests[s] & (1 << ((v >> 25) & 7)) != 0;
@@ -381,6 +467,9 @@ impl Peripheral for DmaRegs {
                         }
                         st.cr = v;
                     }
+                    // double buffer mode: the buffer not in use can be changed
+                    0x0C if enabled && st.cr & (CR_DBM | CR_CT) == CR_DBM | CR_CT => st.m0ar = value,
+                    0x10 if enabled && st.cr & (CR_DBM | CR_CT) == CR_DBM => st.m1ar = value,
                     // the others are read-only while the stream is enabled
                     _ if enabled => {}
                     0x04 => st.ndtr = value & 0xFFFF,

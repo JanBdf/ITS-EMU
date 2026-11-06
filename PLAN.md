@@ -49,7 +49,8 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   the ADCs/DAC; the TIM10/11/13/14 OC1 inputs of TIM9/TIM12 are missing. On the board, UG while
   the counter is stopped does not change CNT until it runs again (the
   emulator clears it at once)
-- DMA FIFO/bursts. Ethernet: the virtual network (`itsboard::net`, smoltcp)
+- DMA: bursts and the FIFO threshold (the FIFO packs, but memory is written
+  item by item at once); transfers take no time. Ethernet: the virtual network (`itsboard::net`, smoltcp)
   has no NAT to the computer's network, and IPv6 frames go nowhere. I2C with DMA keeps
   the CPU's byte timing: BTF is set after each byte although the DMA keeps
   DR filled on the board (the HAL ignores BTF while DMAEN is set).
