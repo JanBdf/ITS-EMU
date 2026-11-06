@@ -9,6 +9,7 @@ pub mod flash;
 pub mod pico;
 pub mod pins;
 pub mod pio;
+pub mod pwm;
 pub mod regs;
 pub mod shared;
 pub mod sio;
@@ -123,7 +124,7 @@ pub fn build() -> ([Bus; 2], Rp2040) {
     attach(&mut bus, 0x4004_4000, RegFile::unemulated("I2C0", 0x100, notices.clone()));
     attach(&mut bus, 0x4004_8000, RegFile::unemulated("I2C1", 0x100, notices.clone()));
     attach(&mut bus, 0x4004_C000, RegFile::unemulated("ADC", 0x24, notices.clone()));
-    attach(&mut bus, 0x4005_0000, RegFile::unemulated("PWM", 0xB4, notices.clone()));
+    attach(&mut bus, 0x4005_0000, pwm::Pwm::new(pins.clone(), notices.clone()));
     attach(&mut bus, 0x4005_4000, timer::Timer::new());
     attach(&mut bus, 0x4005_8000, sys::Watchdog::new());
     attach(&mut bus, 0x4005_C000, RegFile::unemulated("RTC", 0x30, notices.clone()));

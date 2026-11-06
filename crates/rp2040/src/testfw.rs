@@ -46,3 +46,34 @@ pub const BLINK: [u8; 44] = [
 pub fn blink_uf2() -> Vec<u8> {
     uf2::write(VECTOR_TABLE, &BLINK)
 }
+
+/// Puts PWM slice 0 channel A on GPIO 0 (period 1000 cycles of clk_sys,
+/// high for 250), then idles:
+///
+/// ```text
+///     .word 0x20042000        @ SP
+///     .word 0x10000109        @ reset
+/// reset:
+///     ldr  r0, =0x40014004    @ IO_BANK0 GPIO0_CTRL
+///     movs r1, #4             @ FUNCSEL = PWM
+///     str  r1, [r0]
+///     ldr  r0, =0x40050000    @ PWM slice 0
+///     ldr  r1, =999
+///     str  r1, [r0, #0x10]    @ TOP
+///     movs r1, #250
+///     str  r1, [r0, #0x0C]    @ CC: A = 250
+///     movs r1, #1
+///     str  r1, [r0, #0x00]    @ CSR: EN
+/// loop:
+///     b    loop
+/// ```
+pub const PWM: [u8; 44] = [
+    0x00, 0x20, 0x04, 0x20, 0x09, 0x01, 0x00, 0x10, 0x05, 0x48, 0x04, 0x21, 0x01, 0x60, 0x05, 0x48, 0x05, 0x49, 0x01,
+    0x61, 0xFA, 0x21, 0xC1, 0x60, 0x01, 0x21, 0x01, 0x60, 0xFE, 0xE7, 0x00, 0x00, 0x04, 0x40, 0x01, 0x40, 0x00, 0x00,
+    0x05, 0x40, 0xE7, 0x03, 0x00, 0x00,
+];
+
+/// [`PWM`] as a UF2 file.
+pub fn pwm_uf2() -> Vec<u8> {
+    uf2::write(VECTOR_TABLE, &PWM)
+}
