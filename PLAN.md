@@ -38,8 +38,11 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   SWO are not there; the flash AND semantics and PGSERR without a fault
   (see `stm32f429::flash`) neither
 
-- Timers: slave modes with internal triggers (ITR: timer chaining) or ETR,
-  complementary outputs and dead time of TIM1/TIM8. On the board, UG while
+- Timers: slave modes with ETR, complementary outputs and dead time of
+  TIM1/TIM8. Timer chaining (ITR0..3; TRGO = reset, enable, update) has
+  unit tests only: compare with the board (delay of a TRGO to the slave,
+  a HwCheck command), and TRGO from compare pulses/OCxREF (MMS >= 3) and
+  the TIM10/11/13/14 OC1 inputs of TIM9/TIM12 are missing. On the board, UG while
   the counter is stopped does not change CNT until it runs again (the
   emulator clears it at once)
 - DMA requests of I2C and timers (the controllers and the ADC, U(S)ART, SPI

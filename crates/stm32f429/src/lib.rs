@@ -222,6 +222,7 @@ pub fn build() -> (Bus, Stm32f429) {
     let mut bus = Bus::new();
     let dma = dma::SharedDma::default();
     let triggers = timer::SharedTriggers::default();
+    let trgo = timer::SharedTrgo::default();
 
     let spi1 = SpiSlot::default();
     let usart3 = SharedSerial::default();
@@ -234,12 +235,12 @@ pub fn build() -> (Bus, Stm32f429) {
     ];
     for (name, base, irq, wide, en_bit, pins) in timers {
         let t = GpTimer::new(name, irq, wide, ApbBus::Apb1, en_bit, clocks.clone()).with_inputs(pins, gpio.clone());
-        let trgo = [timer::TRGO_TIM2, timer::TRGO_TIM3, timer::TRGO_TIM4, timer::TRGO_TIM5][en_bit as usize];
-        let t = t.with_trgo(triggers.clone(), trgo);
+        let index = [timer::TRGO_TIM2, timer::TRGO_TIM3, timer::TRGO_TIM4, timer::TRGO_TIM5][en_bit as usize];
+        let t = t.with_trgo(triggers.clone(), index).with_itr(trgo.clone());
         tim_pwm.push(t.pwm());
         bus.attach(base, 0x400, Box::new(t));
     }
-    let timer = |name, irq, bus, en_bit| GpTimer::new(name, irq, false, bus, en_bit, clocks.clone());
+    let timer = |name, irq, bus, en_bit| GpTimer::new(name, irq, false, bus, en_bit, clocks.clone()).with_itr(trgo.clone());
     use ApbBus::{Apb1, Apb2};
     // TIM9..14 share their interrupt lines with TIM1/TIM8 (source 1), TIM6 with the DAC
     let g = || gpio.clone();
