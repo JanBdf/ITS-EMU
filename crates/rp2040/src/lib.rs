@@ -13,6 +13,7 @@ pub mod regs;
 pub mod shared;
 pub mod sio;
 pub mod sys;
+pub mod testfw;
 pub mod timer;
 pub mod uart;
 pub mod uf2;

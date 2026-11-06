@@ -24,6 +24,31 @@ fn with_generator(program: &str) -> Option<(Sim, PicoPlugin)> {
     Some((sim, pico))
 }
 
+/// The whole path without third-party files (runs everywhere): a Pico on
+/// its thread with the stand-in boot ROM and the blink firmware, GP0 wired
+/// to PF0, seen by the board's program at the Pico's pace.
+#[test]
+fn a_pico_on_its_thread_drives_a_board_pin() {
+    use rp2040::testfw::{blink_uf2, stub_bootrom};
+    let mut sim = Sim::boot("HwCheck.axf").expect("HwCheck.axf is published");
+    let pico = PicoPlugin::start(stub_bootrom(), blink_uf2(), vec![0]).unwrap();
+    sim.board.add_plugin(pico.link(), &[Some(('F', 0))]);
+
+    // GP0 toggles every 462 µs (3003 cycles at the ROSC's 6.5 MHz)
+    sim.run_until_ms(5);
+    let level = |sim: &Sim| sim.board.inputs() & 1;
+    let mut last = level(&sim);
+    let mut changes = 0;
+    for _ in 0..(20_000 / 50) {
+        sim.machine.run(sim.machine.clock().ns_to_cycles(50_000));
+        let now = level(&sim);
+        changes += u32::from(now != last);
+        last = now;
+    }
+    assert!((42..=45).contains(&changes), "20 ms / 462 µs: {changes} changes");
+    assert_eq!(pico.failure(), None);
+}
+
 #[test]
 fn square_wave_generator_drives_the_buttons_pins() {
     let Some((mut sim, pico)) = with_generator("HwCheck.axf") else { return };
