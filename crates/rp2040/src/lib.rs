@@ -6,6 +6,7 @@
 
 pub mod adc;
 pub mod bootrom;
+pub mod dma;
 pub mod flash;
 pub mod pico;
 pub mod pins;
@@ -83,6 +84,8 @@ pub struct Rp2040 {
     pub notices: Notices,
     /// Voltages at the ADC inputs, temperature at the sensor.
     pub analog: adc::SharedAnalog,
+    /// The DMA (it needs the cores' memory once they exist).
+    pub dma: dma::SharedDma,
 }
 
 fn attach<B: Block + 'static>(bus: &mut Bus, base: u32, block: B) {
@@ -137,14 +140,16 @@ pub fn build() -> ([Bus; 2], Rp2040) {
     attach(&mut bus, 0x4006_C000, RegFile::new("TBMAN", 0x4, &[], &TBMAN_FIXED));
     attach(&mut bus, 0x1400_0000, RegFile::new("XIP_CTRL", 0x20, &XIP_RESET, &XIP_FIXED));
     attach(&mut bus, 0x1800_0000, ssi);
-    attach(&mut bus, 0x5000_0000, RegFile::unemulated("DMA", 0xB00, notices.clone()));
+    let dma = dma::shared(notices.clone());
+    attach(&mut bus, 0x5000_0000, dma::Dma(dma.clone()));
     let usb = usb::usb(serial.clone());
     bus.attach(0x5010_0000, 0x1000, Box::new(usb::UsbDpram(usb.clone())));
     attach(&mut bus, 0x5011_0000, usb::UsbRegs(usb));
-    attach(&mut bus, 0x5020_0000, pio::Pio::new(0, pins.clone()));
-    attach(&mut bus, 0x5030_0000, pio::Pio::new(1, pins.clone()));
+    attach(&mut bus, 0x5020_0000, pio::Pio::new(0, pins.clone()).with_dma(dma.clone()));
+    attach(&mut bus, 0x5030_0000, pio::Pio::new(1, pins.clone()).with_dma(dma.clone()));
 
     let shared = shared::SharedBus::new(bus, sys::ROSC_HZ);
+    shared.set_dma(dma.clone());
     let sio = sio::SharedSio::default();
     let map = memory_map();
     let windows: Vec<_> = std::iter::once((map.periph_base, map.periph_size))
@@ -160,5 +165,5 @@ pub fn build() -> ([Bus; 2], Rp2040) {
         bus.attach_device(Box::new(shared.devices(core)));
         bus
     };
-    ([core_bus(0), core_bus(1)], Rp2040 { pins, serial, notices, analog })
+    ([core_bus(0), core_bus(1)], Rp2040 { pins, serial, notices, analog, dma })
 }

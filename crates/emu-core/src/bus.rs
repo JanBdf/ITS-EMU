@@ -11,7 +11,7 @@ use crate::nvic::Nvic;
 
 /// Context handed to peripherals on every access and update.
 /// Memory as a bus master (DMA) sees it: RAM and flash, without Unicorn.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Ram {
     /// Base address, backing store, writable.
     regions: Vec<(u32, *mut u8, u32, bool)>,

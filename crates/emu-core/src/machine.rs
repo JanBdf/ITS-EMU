@@ -1854,6 +1854,14 @@ impl Machine {
         Ok(())
     }
 
+    /// The memory as a bus master sees it (RAM and flash, past Unicorn),
+    /// for a DMA outside this machine's bus. Valid while this machine, or
+    /// one sharing its memory, lives; translated code is not dropped on
+    /// writes through it.
+    pub fn memory_view(&self) -> Ram {
+        self.uc.get_data().ram.clone()
+    }
+
     /// Loads a raw binary at `addr` (e.g. the font table at 0x0810_0000).
     pub fn load_bin(&mut self, addr: u32, data: &[u8]) -> Result<(), MachineError> {
         if self.write_mem(addr, data) { Ok(()) } else { Err(MachineError::SegmentOutOfRange { addr, len: data.len() }) }
