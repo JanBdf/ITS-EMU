@@ -28,7 +28,7 @@ for fw in $fixtures; do
             "$bin" "$fw" --seconds "$seconds" --continue-on-bkpt $mode --input "$input" \
                 --screenshot "$tmp/shot.png" >"$tmp/out$side" 2>&1
             # drop wall time, speed, paths and log timestamps
-            sed -i -E 's/wall [0-9.]+ s +\(.*\)//; s#/[^ ]*shot\.png##; s/^\[[0-9TZ:-]+ /[/' "$tmp/out$side"
+            sed -E 's/wall [0-9.]+ s +\(.*\)//; s#/[^ ]*shot\.png##; s/^\[[0-9TZ:-]+ /[/' "$tmp/out$side" >"$tmp/clean" && mv "$tmp/clean" "$tmp/out$side"
             [ -f "$tmp/shot.png" ] && md5sum <"$tmp/shot.png" >>"$tmp/out$side"
             rm -f "$tmp/shot.png"
         done
