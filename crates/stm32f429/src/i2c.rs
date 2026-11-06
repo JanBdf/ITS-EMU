@@ -35,6 +35,7 @@ const CR1_PE: u32 = 1 << 0;
 const CR1_START: u32 = 1 << 8;
 const CR1_STOP: u32 = 1 << 9;
 const CR1_ACK: u32 = 1 << 10;
+const CR1_POS: u32 = 1 << 11;
 const CR1_SWRST: u32 = 1 << 15;
 const CR2_ITERREN: u32 = 1 << 8;
 const CR2_ITEVTEN: u32 = 1 << 9;
@@ -90,6 +91,12 @@ pub struct I2c {
     addressed: bool,
     /// The byte being sent is an address.
     addr_phase: bool,
+    /// A received byte waiting in the shift register (DR is full) and
+    /// whether it was acknowledged.
+    shift: Option<(u8, bool)>,
+    /// POS: the acknowledge of the next byte, as ACK was when the previous
+    /// one ended.
+    next_ack: bool,
     /// Event in progress and the cycle it completes.
     pending: Option<(Pending, u64)>,
     /// DMA request lines (reception, transmission) and their levels.
@@ -132,6 +139,8 @@ impl I2c {
             sr1_read: false,
             addressed: false,
             addr_phase: false,
+            shift: None,
+            next_ack: true,
             pending: None,
             dma: None,
             dma_req: Default::default(),
@@ -157,6 +166,7 @@ impl I2c {
         (self.cr1, self.cr2, self.oar1, self.oar2, self.dr, self.sr1) = (0, 0, 0, 0, 0, 0);
         (self.sr2, self.ccr, self.trise, self.fltr) = (SR2_BUSY, 0, 2, 0);
         (self.sr1_read, self.addressed, self.addr_phase, self.pending) = (false, false, false, None);
+        (self.shift, self.next_ack) = (None, true);
     }
 
     fn clock_enabled(&self) -> bool {
@@ -238,18 +248,19 @@ impl I2c {
                 }
             }
             Pending::Receive => {
-                let ack = self.cr1 & CR1_ACK != 0 && !self.dma_last();
+                let acked = self.cr1 & CR1_ACK != 0;
+                let ack = if self.cr1 & CR1_POS != 0 { std::mem::replace(&mut self.next_ack, acked) } else { acked };
+                let ack = ack && !self.dma_last();
                 let byte = self.devices.borrow_mut().iter_mut().map(|d| d.read(ack)).next().unwrap_or(0xFF);
                 if self.sr1 & SR1_RXNE != 0 {
-                    self.sr1 |= SR1_BTF; // waits with the byte in the shift register
-                    self.pending = Some((Pending::Receive, u64::MAX));
+                    // waits in the shift register (SCL held low) until DR is read
+                    self.shift = Some((byte, ack));
+                    self.sr1 |= SR1_BTF;
                     return;
                 }
                 self.dr = u32::from(byte);
                 self.sr1 |= SR1_RXNE;
-                if ack && self.cr1 & CR1_STOP == 0 {
-                    self.schedule(Pending::Receive, ctx);
-                }
+                self.receive_next(ack, ctx);
             }
             Pending::Stop => {
                 self.cr1 &= !CR1_STOP;
@@ -260,6 +271,13 @@ impl I2c {
                     d.stop();
                 }
             }
+        }
+    }
+
+    /// After an acknowledged byte the device sends the next one.
+    fn receive_next(&mut self, acked: bool, ctx: &DeviceCtx) {
+        if acked && self.cr1 & CR1_STOP == 0 && self.addressed {
+            self.schedule(Pending::Receive, ctx);
         }
     }
 
@@ -337,13 +355,18 @@ impl Peripheral for I2c {
                     if let Some((dma, rx, _)) = &self.dma {
                         rx.take_one_left(dma);
                     }
+                    self.next_ack = true;
                     self.schedule(Pending::Receive, ctx);
                 }
             }
             0x10 => {
                 self.sr1 &= !(SR1_RXNE | SR1_BTF);
-                if self.pending == Some((Pending::Receive, u64::MAX)) {
-                    self.schedule(Pending::Receive, ctx);
+                if let Some((byte, acked)) = self.shift.take() {
+                    self.dr = u32::from(byte);
+                    self.sr1 |= SR1_RXNE;
+                    if self.pending.is_none() {
+                        self.receive_next(acked, ctx);
+                    }
                 }
             }
             _ => {}
