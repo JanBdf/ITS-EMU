@@ -3,8 +3,9 @@
 //! Conversions take (sampling time + resolution) ADC clocks, after a start
 //! latency of one ADC clock and four APB2 clocks; regular
 //! (single, scan, continuous) and injected groups, EOC/JEOC/OVR/STRT flags,
-//! the analog watchdog, the interrupt, DMA requests and the regular group's
-//! external trigger by TIM2/TIM3/TIM8 TRGO (update event) are modelled. The
+//! the analog watchdog, the interrupt, DMA requests and the external triggers
+//! by a timer's TRGO (regular group: TIM2/TIM3/TIM8, injected group:
+//! TIM1/TIM2/TIM4/TIM5) are modelled; not the CCx and EXTI triggers. The
 //! DAC: software and timer triggers, noise/triangle waves, DMA and underrun
 //! (HwCheck `dacwave`). Readings of the internal channels, of open pins and the
 //! transfer function of the buffered DAC were measured on the board
@@ -19,7 +20,9 @@ use emu_core::{Clock, DeviceCtx, Peripheral};
 use crate::dma::{DmaLine, SharedDma};
 use crate::gpio::{NUM_PORTS, PinMode, SharedGpio, port};
 use crate::rcc::SharedClocks;
-use crate::timer::{SharedTriggers, TRGO_TIM2, TRGO_TIM3, TRGO_TIM4, TRGO_TIM5, TRGO_TIM6, TRGO_TIM7, TRGO_TIM8};
+use crate::timer::{
+    SharedTriggers, TRGO_TIM1, TRGO_TIM2, TRGO_TIM3, TRGO_TIM4, TRGO_TIM5, TRGO_TIM6, TRGO_TIM7, TRGO_TIM8,
+};
 
 /// Analog supply, from VREFINT (1.21 V) reading 1495.
 pub const VDDA: f32 = 3.31;
@@ -126,8 +129,10 @@ struct Unit {
     dr: u32,
     /// DMA requests stopped after the last transfer (DDS = 0) until DMA is set again.
     dma_stopped: bool,
-    /// Last trigger (cycle) that started or was ignored by the regular group.
+    /// Last trigger (cycle) that started or was ignored by the regular and
+    /// the injected group.
     trigger_seen: u64,
+    jtrigger_seen: u64,
     /// Regular group: position in the sequence and end of the running conversion.
     regular: Option<(usize, u64)>,
     injected: Option<(usize, u64)>,
@@ -147,6 +152,20 @@ impl Unit {
             6 => Some(TRGO_TIM2),
             8 => Some(TRGO_TIM3),
             14 => Some(TRGO_TIM8),
+            _ => None,
+        }
+    }
+
+    /// The timer trigger output that starts the injected group (JEXTEN, JEXTSEL).
+    fn jtrigger_source(&self) -> Option<usize> {
+        if (self.cr2 >> 20) & 3 == 0 || self.cr2 & CR2_ADON == 0 {
+            return None;
+        }
+        match (self.cr2 >> 16) & 0xF {
+            1 => Some(TRGO_TIM1),
+            3 => Some(TRGO_TIM2),
+            9 => Some(TRGO_TIM4),
+            11 => Some(TRGO_TIM5),
             _ => None,
         }
     }
@@ -239,6 +258,12 @@ impl Adc {
         (t > unit.trigger_seen).then_some(t)
     }
 
+    /// A trigger that the injected group of `unit` has not seen yet.
+    fn new_jtrigger(&self, unit: &Unit) -> Option<u64> {
+        let t = self.triggers.get()[unit.jtrigger_source()?];
+        (t > unit.jtrigger_seen).then_some(t)
+    }
+
     fn clock_enabled(&self, unit: usize) -> bool {
         self.clocks.get().apb2enr & (1 << (8 + unit)) != 0
     }
@@ -303,6 +328,18 @@ impl Adc {
                     let ch = unit.regular_channel(0);
                     unit.sr |= SR_STRT;
                     unit.regular = Some((0, t + latency + unit.conversion_adc_clocks(ch) * per_clock));
+                }
+            }
+            // and the injected group (ignored while it converts)
+            if let Some(t) = self.new_jtrigger(&self.units[u])
+                && t <= ctx.now()
+            {
+                let unit = &mut self.units[u];
+                unit.jtrigger_seen = t;
+                if unit.injected.is_none() {
+                    let ch = unit.injected_channel(0);
+                    unit.sr |= SR_JSTRT;
+                    unit.injected = Some((0, t + latency + unit.conversion_adc_clocks(ch) * per_clock));
                 }
             }
         }
@@ -497,13 +534,15 @@ impl Peripheral for Adc {
                     unit.regular = None;
                     unit.injected = None;
                 } else {
-                    let unsupported = v & 0x0030_0000 != 0 || v & 0x3000_0000 != 0 && unit.trigger_source().is_none();
+                    let unsupported = v & 0x0030_0000 != 0 && unit.jtrigger_source().is_none()
+                        || v & 0x3000_0000 != 0 && unit.trigger_source().is_none();
                     if unsupported && !self.warned {
                         self.warned = true;
-                        log::warn!("ADC: only TIM2/TIM3/TIM8 TRGO are emulated as external triggers");
+                        log::warn!("ADC: only timer TRGO are emulated as external triggers (not CCx, EXTI)");
                     }
                     // triggers before the trigger was enabled do not count
                     unit.trigger_seen = unit.trigger_seen.max(ctx.now());
+                    unit.jtrigger_seen = unit.jtrigger_seen.max(ctx.now());
                     if v & CR2_SWSTART != 0 && unit.regular.is_none() {
                         self.start_regular(u, ctx);
                     }
@@ -533,7 +572,7 @@ impl Peripheral for Adc {
 
     fn next_event(&self) -> Option<u64> {
         let conversions = self.units.iter().flat_map(|u| [u.regular, u.injected]).flatten().map(|(_, end)| end);
-        let triggers = self.units.iter().filter_map(|u| self.new_trigger(u));
+        let triggers = self.units.iter().flat_map(|u| [self.new_trigger(u), self.new_jtrigger(u)]).flatten();
         conversions.chain(triggers).min()
     }
 
@@ -863,5 +902,32 @@ mod tests {
         ctx.clock.advance(15 * 4);
         assert_eq!(adc.read(&mut ctx, 0x4C, 4), VREFINT_COUNTS);
         assert_eq!(adc.next_event(), None);
+    }
+    #[test]
+    fn tim4_trgo_starts_the_injected_group() {
+        let triggers = SharedTriggers::default();
+        let clocks = SharedClocks::default();
+        let hz = 180_000_000;
+        clocks.set(Clocks { hclk: hz, pclk2: hz / 2, apb2enr: 1 << 8, ..Clocks::default() });
+        let mut adc =
+            Adc::new(clocks, SharedGpio::default(), SharedAnalog::default(), SharedDma::default(), triggers.clone());
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        adc.write(&mut ctx, 0x304, 4, CCR_TSVREFE);
+        adc.write(&mut ctx, 0x38, 4, 17 << 15); // JSQ4 = VREFINT
+        adc.write(&mut ctx, 0x08, 4, CR2_ADON | (9 << 16) | (1 << 20)); // TIM4_TRGO, rising
+        ctx.clock.advance(100);
+        assert_eq!(adc.next_event(), None, "no trigger yet");
+        let mut t = triggers.get();
+        t[TRGO_TIM4] = 100;
+        triggers.set(t);
+        assert_eq!(adc.next_event(), Some(100));
+        adc.update(&mut ctx);
+        assert_eq!(adc.read(&mut ctx, 0x00, 4) & SR_JSTRT, SR_JSTRT);
+        ctx.clock.advance(4 + 8 + 15 * 4);
+        adc.update(&mut ctx);
+        assert_eq!(adc.read(&mut ctx, 0x00, 4) & SR_JEOC, SR_JEOC);
+        assert_eq!(adc.read(&mut ctx, 0x3C, 4), VREFINT_COUNTS, "JDR1");
     }
 }

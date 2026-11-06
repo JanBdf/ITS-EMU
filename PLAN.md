@@ -50,9 +50,12 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
 - External devices: an I2C sensor via `I2cDevice`; the devices in the GUI
   (rotary encoder and DS18B20 exist on the command line, `itsboard::devices`;
   which header pins the course uses for them is still open)
-- ADC injected-group triggers, the CCx/EXTI11 (ADC) and EXTI9 (DAC) trigger
-  sources; TRGO other than the update event (the ADC regular group starts on
-  TIM2/TIM3/TIM8 TRGO, the DAC on TIM2/4/5/6/7/8 TRGO)
+- ADC/DAC triggers from the CCx events and EXTI11/EXTI15 (ADC) and EXTI9
+  (DAC), and TRGO from compare pulses/OCxREF (MMS >= 3): which signal the
+  ADC sees (OCxREF edges or compare pulses; the EXTI line before or after
+  RTSR/FTSR/IMR) is to be measured on the board first. The timer TRGO
+  triggers exist for both groups (update event, counter enable; UG with
+  MMS = 000 triggers nothing, HwCheck `dacwave`)
 - Pico: DMA, PWM, ADC, SPI, I2C and RTC only store their registers, flash
   program/erase commands are ignored (both noted to the user once). A core
   writing flash or RAM drops only its own translations: code one core
