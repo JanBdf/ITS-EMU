@@ -14,11 +14,13 @@
 //! other input's level, as measured with HwCheck `enc`), the slave modes reset,
 //! gated, trigger and external clock 1 with TI1F_ED/TI1FP1/TI2FP2 as trigger
 //! (HwCheck `timslave`) or another timer's TRGO (ITR0..3, timer chaining: TRGO
-//! = reset/UG, counter enable or update event; not yet compared with the board). OCxREF changes only at compare matches, counter wraps and
+//! = reset/UG, counter enable, update event, CC1 compare pulse or OC1REF..OC4REF;
+//! not yet compared with the board). OCxREF changes only at compare matches, counter wraps and
 //! forced levels, as measured on the board (HwCheck `timout`): a mode change
 //! takes effect at the next of them; PWM compares CNT < CCR counting up and
-//! CNT ≤ CCR counting down (HwCheck `timdir`). The other slave modes and the
-//! complementary outputs are not modelled (a warning is logged when used).
+//! CNT ≤ CCR counting down (HwCheck `timdir`). TIM1/TIM8 drive the
+//! complementary outputs with dead time. Slave modes with ETR are not
+//! modelled (a warning is logged when used).
 //! DMA requests: update, capture/compare and trigger events (UDE, CCxDE,
 //! TDE), one transfer each, and bursts through DMAR (DCR.DBA/DBL).
 
@@ -48,9 +50,10 @@ pub const TRGO_TIM1: usize = 7;
 /// trigger input (ITRx) sees it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TrgoEvent {
-    /// A pulse: update event (MMS = 010) or reset/UG (MMS = 000).
+    /// A pulse: update event (MMS = 010), reset/UG (MMS = 000) or a
+    /// capture/compare of channel 1 (MMS = 011).
     Pulse,
-    /// A new level: the counter enable (MMS = 001).
+    /// A new level: the counter enable (MMS = 001) or OC1REF..OC4REF (MMS = 1xx).
     Level(bool),
 }
 
@@ -58,14 +61,16 @@ pub enum TrgoEvent {
 /// counts the lost pulses without their times.
 const TRGO_LOG: usize = 256;
 
+/// Periods a master skipped over at once whose CC1 pulses and OCxREF
+/// changes it still puts on TRGO one by one (two events each at most).
+const TRGO_PERIODS: u128 = (TRGO_LOG / 2) as u128;
+
 #[derive(Default)]
 struct TrgoLine {
     /// Events since reset; `log` holds the last of them with their cycles.
     count: u64,
     log: std::collections::VecDeque<(u64, TrgoEvent)>,
     level: bool,
-    /// Master mode (CR2.MMS) of the timer driving the line.
-    mms: u32,
 }
 
 /// The trigger outputs of TIM1..TIM14 (index = timer number) as the
@@ -219,6 +224,10 @@ pub struct GpTimer {
     itr_level: bool,
     enable_level: bool,
     itr_kick: bool,
+    /// MMS = 1xx: the OCxREF level last put on TRGO, and the changes of
+    /// OCxREF (position in the period, level) `oc_span` found for it.
+    ref_level: bool,
+    ref_changes: Vec<(u128, bool)>,
     /// DMA request lines of the events in `DMA_EVENTS` (empty: none), the
     /// next register of a DMAR burst and the request that started it.
     dma: Option<(SharedDma, [DmaLine; 6])>,
@@ -294,6 +303,8 @@ impl GpTimer {
             itr_level: false,
             enable_level: false,
             itr_kick: false,
+            ref_level: false,
+            ref_changes: Vec::new(),
             dma: None,
             dma_index: 0,
             burst_req: 0,
@@ -407,13 +418,61 @@ impl GpTimer {
         }
     }
 
-    /// Puts an event on TRGO for the slave timers.
+    /// Puts an event on TRGO for the slave timers. A level is kept on the
+    /// line without a listener, too: a slave starts from it.
     fn itr_event(&mut self, cycle: u64, ev: TrgoEvent) {
-        if self.itr_listened()
-            && let Some(l) = &self.itr
-        {
-            l.borrow_mut().push(self.number, cycle, ev);
+        let Some(l) = &self.itr else { return };
+        let mut l = l.borrow_mut();
+        if l.listened(self.number) {
+            l.push(self.number, cycle, ev);
             self.itr_kick = true;
+        } else if let TrgoEvent::Level(v) = ev {
+            l.lines[usize::from(self.number)].level = v;
+        }
+    }
+
+    /// The channel whose OCxREF is TRGO (MMS = 1xx) for a listening slave.
+    fn trgo_ref_ch(&self) -> Option<usize> {
+        (self.mms() >= 4 && self.itr_listened()).then(|| self.mms() as usize - 4)
+    }
+
+    /// TRGO pulses at the CC1 events (MMS = 011) for a listening slave.
+    fn trgo_compare(&self) -> bool {
+        self.mms() == 3 && self.itr_listened()
+    }
+
+    /// Puts the OCxREF changes `oc_span` found on TRGO (positions relative to `base`).
+    fn emit_ref_changes(&mut self, clock: &Clock, base: u128) {
+        for (pos, v) in std::mem::take(&mut self.ref_changes) {
+            if v != self.ref_level {
+                self.ref_level = v;
+                self.itr_event(self.pos_cycle(clock, pos, base), TrgoEvent::Level(v));
+            }
+        }
+    }
+
+    /// TRGO follows OCxREF (MMS = 1xx) at `cycle`, for changes outside the
+    /// counter's matches and wraps (forced levels, CCR/CNT writes).
+    fn sync_ref_trgo(&mut self, cycle: u64) {
+        if self.mms() >= 4 {
+            let r = self.oc_ref[self.mms() as usize - 4];
+            if r != self.ref_level {
+                self.ref_level = r;
+                self.itr_event(cycle, TrgoEvent::Level(r));
+            }
+        }
+    }
+
+    /// CC1 compare matches at the positions from `from` (exclusive) to `to`
+    /// (inclusive) relative to `base` as pulses on TRGO (MMS = 011).
+    fn compare_pulses(&mut self, clock: &Clock, from: u128, to: u128, base: u128) {
+        if !self.trgo_compare() {
+            return;
+        }
+        for m in self.match_phases(0, false).into_iter().flatten() {
+            if from < m && m <= to {
+                self.itr_event(self.pos_cycle(clock, m, base), TrgoEvent::Pulse);
+            }
         }
     }
 
@@ -458,9 +517,9 @@ impl GpTimer {
         self.ic_events = [0; 4];
         self.oc_ref = [false; 4];
         (self.dt_main, self.dt_n, self.dt_ref, self.dt_rise) = ([false; 3], [true; 3], [false; 3], [None; 3]);
-        (self.enable_level, self.itr_kick, self.gate) = (false, false, false);
+        (self.enable_level, self.itr_kick, self.gate, self.ref_level) = (false, false, false, false);
         if let Some(l) = &self.itr {
-            l.borrow_mut().lines[usize::from(self.number)].mms = 0;
+            l.borrow_mut().lines[usize::from(self.number)].level = false;
         }
         self.update_itr_listen();
         self.update_watch();
@@ -527,9 +586,6 @@ impl GpTimer {
                 let line = &l.lines[usize::from(m)];
                 self.itr_seen = line.count;
                 self.itr_level = line.level;
-                if line.mms >= 3 {
-                    log::warn!("{}: TIM{m} TRGO with MMS = {} is not emulated as trigger", self.name, line.mms);
-                }
             }
         }
         if self.slave_mode() == Some(5) && source.is_some() {
@@ -778,7 +834,7 @@ impl GpTimer {
     }
 
     /// Captures the counter on the edges the watched pins had since the last call.
-    fn take_captures(&mut self, now_ps: u64) {
+    fn take_captures(&mut self, clock: &Clock, now_ps: u64) {
         let Some((pins, gpio)) = &self.inputs else { return };
         if self.watched.is_empty() {
             return;
@@ -805,7 +861,8 @@ impl GpTimer {
         for ch in 0..4 {
             let Some(src) = self.capture_source(ch) else { continue };
             let (rise, fall, edge_ps) = edges[src];
-            let cnt = self.cnt(if edge_ps == 0 { now_ps } else { edge_ps + delay_ps });
+            let at_ps = if edge_ps == 0 { now_ps } else { edge_ps + delay_ps };
+            let cnt = self.cnt(at_ps);
             let (p, np) = (self.ccer & (2 << (4 * ch)) != 0, self.ccer & (8 << (4 * ch)) != 0);
             let hit = match (p, np) {
                 (false, false) => rise,
@@ -826,6 +883,9 @@ impl GpTimer {
             }
             self.event(2 << ch);
             self.ccr[ch] = cnt;
+            if ch == 0 && self.trgo_compare() {
+                self.itr_event(clock.cycle_at_ps(at_ps.min(now_ps)), TrgoEvent::Pulse);
+            }
         }
     }
 
@@ -990,10 +1050,14 @@ impl GpTimer {
                 }
             }
             events.sort();
+            let traced = self.trgo_ref_ch() == Some(ch);
             for (q, kind) in events {
                 let changed = if kind == 0 { self.oc_wrap(ch, q) } else { self.oc_match(ch, q) };
                 if changed {
                     *last = Some(q);
+                    if traced {
+                        self.ref_changes.push((q, self.oc_ref[ch]));
+                    }
                 }
             }
         }
@@ -1060,6 +1124,13 @@ impl GpTimer {
     fn dead_time_event(&self, ctx: &DeviceCtx) -> Option<u64> {
         let ps = self.dt_rise.iter().flatten().min()?;
         Some(ctx.clock.cycle_at_ps(*ps).max(ctx.now() + 1))
+    }
+
+    /// Cycle of position `pos` of the counter, relative to `base`, rounded
+    /// as the time of an overflow (for TRGO events).
+    fn pos_cycle(&self, clock: &Clock, pos: u128, base: u128) -> u64 {
+        let hz = u128::from(self.kernel_hz().max(1));
+        clock.cycle_at_ps(self.base_ps + ((pos - base) * self.tick_ps_num() / hz) as u64)
     }
 
     /// Time (ps) of position `pos` of the counter, relative to `base`.
@@ -1370,11 +1441,12 @@ impl GpTimer {
 
     /// Processes overflows and compare matches up to `now_ps`.
     fn advance_to(&mut self, ctx: &mut DeviceCtx, now_ps: u64) {
-        self.take_captures(now_ps);
+        self.take_captures(ctx.clock, now_ps);
         if !self.running() || self.arr_active == 0 {
             self.push_outputs(ctx.clock, [now_ps; 4], now_ps);
+            self.sync_ref_trgo(ctx.clock.cycle_at_ps(now_ps));
             self.next_event = self.dead_time_event(ctx);
-            self.take_captures(now_ps);
+            self.take_captures(ctx.clock, now_ps);
             return;
         }
         let (ticks, _) = self.elapsed_ticks(now_ps);
@@ -1390,14 +1462,18 @@ impl GpTimer {
         };
         if ticks < to_overflow {
             self.flag_matches(base + self.checked, base + ticks);
+            self.compare_pulses(ctx.clock, base + self.checked, base + ticks, base);
             let last = self.oc_span(base + self.checked, base + ticks);
+            self.emit_ref_changes(ctx.clock, base);
             note(&mut edges, self, last, base);
             self.top_update(base + self.checked, base + ticks, base, ctx);
             self.checked = ticks;
         } else {
             let period = self.period();
             self.flag_matches(base + self.checked, period);
+            self.compare_pulses(ctx.clock, base + self.checked, period, base);
             let last = self.oc_span(base + self.checked, period);
+            self.emit_ref_changes(ctx.clock, base);
             note(&mut edges, self, last, base);
             self.top_update(base + self.checked, period, base, ctx);
             // Time of the (first) overflow, then restart from 0 there.
@@ -1419,10 +1495,23 @@ impl GpTimer {
                 let (ticks, _) = self.elapsed_ticks(now_ps);
                 let wraps = ticks / self.period();
                 if wraps > 0 {
-                    self.base_ps += (wraps * self.period() * self.tick_ps_num() / hz) as u64;
-                    self.flag_matches(0, self.period());
-                    for (e, changed) in edges.iter_mut().zip(self.oc_periods(wraps)) {
-                        if changed {
+                    let (start, period) = (self.base_ps, self.period());
+                    // a slave sees the CC1 pulses and OCxREF changes of the
+                    // first periods at their times
+                    let traced =
+                        if self.trgo_compare() || self.trgo_ref_ch().is_some() { wraps.min(TRGO_PERIODS) } else { 0 };
+                    let before = self.oc_ref;
+                    for k in 0..traced {
+                        self.base_ps = start + (k * period * self.tick_ps_num() / hz) as u64;
+                        self.compare_pulses(ctx.clock, 0, period, 0);
+                        self.oc_span(0, period);
+                        self.emit_ref_changes(ctx.clock, 0);
+                    }
+                    self.base_ps = start + (wraps * period * self.tick_ps_num() / hz) as u64;
+                    self.flag_matches(0, period);
+                    let changed = if wraps > traced { self.oc_periods(wraps - traced) } else { [false; 4] };
+                    for (ch, (e, changed)) in edges.iter_mut().zip(changed).enumerate() {
+                        if changed || self.oc_ref[ch] != before[ch] {
                             *e = self.base_ps;
                         }
                     }
@@ -1441,14 +1530,17 @@ impl GpTimer {
                 }
                 let (ticks, _) = self.elapsed_ticks(now_ps);
                 self.flag_matches(0, ticks);
+                self.compare_pulses(ctx.clock, 0, ticks, 0);
                 let last = self.oc_span(0, ticks);
+                self.emit_ref_changes(ctx.clock, 0);
                 note(&mut edges, self, last, 0);
                 self.top_update(0, ticks, 0, ctx);
                 self.checked = ticks;
             }
         }
         self.push_outputs(ctx.clock, edges, now_ps);
-        self.take_captures(now_ps);
+        self.sync_ref_trgo(ctx.clock.cycle_at_ps(now_ps));
+        self.take_captures(ctx.clock, now_ps);
         self.schedule(ctx);
     }
 
@@ -1470,8 +1562,10 @@ impl GpTimer {
         (0..4)
             .filter(|&ch| self.compares(ch))
             .flat_map(|ch| {
-                let flags = (self.dier & (0x202 << ch) != 0).then(|| self.match_phases(ch, false));
-                let out = self.drives(ch).then(|| self.match_phases(ch, true));
+                let pulse = ch == 0 && self.trgo_compare();
+                let flags = (self.dier & (0x202 << ch) != 0 || pulse).then(|| self.match_phases(ch, false));
+                let traced = self.trgo_ref_ch() == Some(ch);
+                let out = (self.drives(ch) || traced).then(|| self.match_phases(ch, true));
                 flags.into_iter().chain(out).flatten().flatten()
             })
             .map(|m| self.ticks_to_phase(m))
@@ -1491,7 +1585,8 @@ impl GpTimer {
         if !self.running() || self.arr_active == 0 {
             return;
         }
-        let driving = (0..self.channels).any(|ch| self.drives(ch) && matches!(self.oc_mode(ch), 6 | 7));
+        let driving = (0..self.channels)
+            .any(|ch| (self.drives(ch) || self.trgo_ref_ch() == Some(ch)) && matches!(self.oc_mode(ch), 6 | 7));
         let opm_stop = self.mms() == 1 && self.cr1 & CR1_OPM != 0 && self.itr_listened();
         let wake = self.dier & (DIER_UIE | DIER_UDE) != 0 || self.trgo_on_update() || driving || opm_stop;
         let overflow = wake.then(|| self.period() - self.base_phase());
@@ -1660,9 +1755,17 @@ impl Peripheral for GpTimer {
                 }
             }
             0x04 => {
+                let before = self.mms();
                 self.cr2 = v;
-                if let Some(l) = &self.itr {
-                    l.borrow_mut().lines[usize::from(self.number)].mms = self.mms();
+                if self.mms() != before {
+                    // TRGO takes the level of its new source
+                    let level = match self.mms() {
+                        1 => self.enable_level,
+                        m if m >= 4 => self.oc_ref[m as usize - 4],
+                        _ => false,
+                    };
+                    self.ref_level = level;
+                    self.itr_event(ctx.now(), TrgoEvent::Level(level));
                 }
             }
             0x08 => {
@@ -1696,6 +1799,9 @@ impl Peripheral for GpTimer {
                 // CCxG, COMG, TG, BG: set their flags
                 let channels = (0x1Eu32 >> (4 - self.channels)) & 0x1E;
                 self.event(v & (channels | 0xE0));
+                if v & 2 != 0 && self.trgo_compare() {
+                    self.itr_event(ctx.now(), TrgoEvent::Pulse);
+                }
             }
             0x18 | 0x1C => {
                 // CCxS can only be changed while the channel is off (CCxE = 0)
@@ -1764,8 +1870,9 @@ impl Peripheral for GpTimer {
             _ => {}
         }
         self.sync_enable_trgo(ctx.now());
+        self.sync_ref_trgo(ctx.now());
         self.push_outputs(ctx.clock, [now_ps; 4], now_ps);
-        self.take_captures(now_ps);
+        self.take_captures(ctx.clock, now_ps);
         self.schedule(ctx);
         self.sync_irq(ctx);
         self.update_pwm();
@@ -1915,6 +2022,77 @@ mod tests {
         let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
         assert_eq!(t3.read(&mut ctx, 0x24, 4), 225);
         assert_ne!(t3.read(&mut ctx, 0x10, 4) & SR_UIF, 0, "reset is an update event");
+    }
+
+    #[test]
+    fn slave_counts_the_rising_edges_of_the_masters_oc1ref() {
+        let (mut t2, mut t3) = tim2_tim3();
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        {
+            let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+            t3.write(&mut ctx, 0x08, 4, 7 | (1 << 4)); // SMS = external clock 1, TS = ITR1
+            t3.write(&mut ctx, 0x00, 4, 1);
+            t2.write(&mut ctx, 0x04, 4, 4 << 4); // MMS = OC1REF
+            t2.write(&mut ctx, 0x18, 4, 6 << 4); // PWM mode 1, no output enabled
+            t2.write(&mut ctx, 0x34, 4, 450);
+            t2.write(&mut ctx, 0x2C, 4, 899); // 10 us
+            t2.write(&mut ctx, 0x00, 4, 1);
+        }
+        // OC1REF rises with the CCR1 write (CNT = 0 < CCR1), then at each wrap
+        sweep_to([&mut t3, &mut t2], &mut clock, &mut nvic, 180_000_000 / 1000 + 450);
+        let cnt = {
+            let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+            assert_eq!(t3.read(&mut ctx, 0x24, 4), 101);
+            // OC1REF is high; forced inactive, the level is TRGO at once
+            t3.write(&mut ctx, 0x08, 4, 5 | (1 << 4)); // SMS = gated
+            t2.write(&mut ctx, 0x18, 4, 4 << 4);
+            t3.read(&mut ctx, 0x24, 4)
+        };
+        let until = clock.cycles() + 2000;
+        sweep_to([&mut t3, &mut t2], &mut clock, &mut nvic, until);
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        assert_eq!(t3.read(&mut ctx, 0x24, 4), cnt, "the gate is closed");
+    }
+
+    #[test]
+    fn oc1ref_edges_of_periods_passed_at_once_reach_the_slave() {
+        let (mut t2, mut t3) = tim2_tim3();
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        t3.write(&mut ctx, 0x08, 4, 7 | (1 << 4)); // SMS = external clock 1, TS = ITR1
+        t3.write(&mut ctx, 0x00, 4, 1);
+        t2.write(&mut ctx, 0x04, 4, 5 << 4); // MMS = OC2REF
+        t2.write(&mut ctx, 0x18, 4, 3 << 12); // OC2 toggles on match
+        t2.write(&mut ctx, 0x38, 4, 100);
+        t2.write(&mut ctx, 0x2C, 4, 899); // 10 us
+        t2.write(&mut ctx, 0x00, 4, 1);
+        ctx.clock.advance(50 * 1800 + 900); // 50.5 periods without a sweep
+        t2.update(&mut ctx);
+        t3.update(&mut ctx);
+        assert_eq!(t3.read(&mut ctx, 0x24, 4), 26, "a rising edge every other period");
+    }
+
+    #[test]
+    fn master_compare_pulses_reset_a_slave() {
+        let (mut t2, mut t3) = tim2_tim3();
+        let mut clock = Clock::new(180_000_000);
+        let mut nvic = Nvic::new();
+        {
+            let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+            t3.write(&mut ctx, 0x08, 4, 4 | (1 << 4)); // SMS = reset, TS = ITR1
+            t3.write(&mut ctx, 0x00, 4, 1);
+            t2.write(&mut ctx, 0x04, 4, 3 << 4); // MMS = compare pulse
+            t2.write(&mut ctx, 0x34, 4, 300); // frozen channel, no interrupt
+            t2.write(&mut ctx, 0x2C, 4, 899); // 10 us
+            t2.write(&mut ctx, 0x00, 4, 1);
+        }
+        // 1 ms + 2.5 us: the last match was 900 - 300 + 225 ticks ago
+        sweep_to([&mut t3, &mut t2], &mut clock, &mut nvic, 180_000 + 450);
+        let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        assert_eq!(t3.read(&mut ctx, 0x24, 4), 825);
+        assert_ne!(t2.read(&mut ctx, 0x10, 4) & 2, 0, "CC1IF");
     }
 
     #[test]
