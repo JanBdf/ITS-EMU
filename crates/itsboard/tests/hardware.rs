@@ -318,6 +318,19 @@ fn ccr_preload_matches_the_board() {
 }
 
 #[test]
+fn timer_chaining_matches_the_board() {
+    // TIM3 slave modes with TIM2's TRGO (ITR1)
+    let Some(out) = run("timchain", 500) else { return };
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("C ")).collect();
+    for line in ["C extclk cnt 100 sr 40", "C reset at50 50 sr 41", "C ug before 500 after 0"] {
+        assert!(emu.contains(&line), "{line} in {emu:?}");
+    }
+    // not recorded yet: tools/hw/cmd.py timchain | grep '^C ' > tests/hardware/HwCheck-timchain.txt
+    let Ok(board) = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timchain.txt")) else { return };
+    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
 fn encoder_mode_matches_the_board() {
     // TIM8 encoder modes on PC6/PC7, quadrature made by switching the pulls
     let Some(out) = run("enc", 500) else { return };

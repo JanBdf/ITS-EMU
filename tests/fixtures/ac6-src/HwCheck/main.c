@@ -39,6 +39,7 @@
  *   timpre          CCR preload (OCxPE) on TIM3_CH1/PC6
  *   timdir          TIM3 counting directions: PWM levels, flags
  *   timslave        TIM3 slave modes with TI1/TI2 on PC6/PC7 (pull switching)
+ *   timchain        TIM3 slave modes with TIM2's TRGO (ITR1): timer chaining
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -2027,6 +2028,88 @@ static void cmd_timpre(void) {
     GPIOC->MODER &= ~(3u << 12);
 }
 
+/* ---- Timer chaining: TIM3's slave mode controller with TIM2's TRGO (ITR1).
+ * TIM2 and TIM3 count at 1 MHz (PSC = 89) unless noted. */
+static void slave_wait_us(uint32_t us);
+
+static void chain_setup(uint32_t mms, uint32_t tim2_psc, uint32_t tim2_arr, uint32_t smcr, uint32_t tim3_psc) {
+    TIM2->CR1 = 0;
+    TIM2->CR2 = mms << 4;
+    TIM2->PSC = tim2_psc;
+    TIM2->ARR = tim2_arr;
+    TIM2->EGR = TIM_EGR_UG;
+    TIM2->CNT = 0;
+    TIM2->SR = 0;
+    TIM3->CR1 = 0;
+    TIM3->SMCR = 0;
+    TIM3->CCMR1 = 0;
+    TIM3->CCER = 0;
+    TIM3->PSC = tim3_psc;
+    TIM3->ARR = 0xFFFF;
+    TIM3->EGR = TIM_EGR_UG;
+    TIM3->CNT = 0;
+    TIM3->SMCR = smcr;
+    TIM3->SR = 0;
+}
+
+static void cmd_timchain(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN | RCC_APB1ENR_TIM3EN;
+    __DSB();
+    const uint32_t itr1 = 1u << 4;
+    // external clock 1: TIM3 counts TIM2's update events (every 10 us)
+    chain_setup(2, 89, 9, itr1 | 7u, 0);
+    TIM3->CR1 = TIM_CR1_CEN;
+    TIM2->CR1 = TIM_CR1_CEN;
+    slave_wait_us(1005);
+    TIM2->CR1 = 0;
+    printf("C extclk cnt %lu sr %02lx\n", (unsigned long)TIM3->CNT, (unsigned long)(TIM3->SR & 0x41));
+    // trigger: TIM2's counter enable starts TIM3 (both at 90 MHz: the delay in clocks)
+    chain_setup(1, 0, 0xFFFFFFFF, itr1 | 6u, 0);
+    uint32_t cen_before = TIM3->CR1 & 1;
+    TIM2->CR1 = TIM_CR1_CEN;
+    uint32_t c2 = TIM2->CNT, c3 = TIM3->CNT;
+    uint32_t cen = TIM3->CR1 & 1, sr = TIM3->SR & 0x41;
+    TIM2->CR1 = 0;
+    TIM3->CR1 = 0;
+    printf("C trigger cen %lu -> %lu lag %ld sr %02lx\n", (unsigned long)cen_before, (unsigned long)cen,
+           (long)(c2 - c3), (unsigned long)sr);
+    // gated: TIM3 counts while TIM2 runs one pulse of 100 us
+    chain_setup(1, 89, 99, itr1 | 5u, 89);
+    TIM3->CR1 = TIM_CR1_CEN;
+    TIM2->CR1 = TIM_CR1_CEN | TIM_CR1_OPM;
+    slave_wait_us(300);
+    uint32_t gated = TIM3->CNT;
+    sr = TIM3->SR & 0x41;
+    TIM3->CR1 = 0;
+    printf("C gated cnt %lu tim2_cen %lu sr %02lx\n", (unsigned long)gated, (unsigned long)(TIM2->CR1 & 1),
+           (unsigned long)sr);
+    // reset: TIM2's update events (every 100 us) reset TIM3
+    chain_setup(2, 89, 99, itr1 | 4u, 89);
+    TIM3->CR1 = TIM_CR1_CEN;
+    TIM2->CR1 = TIM_CR1_CEN;
+    slave_wait_us(1000);
+    while (TIM2->CNT != 50) {
+    }
+    c3 = TIM3->CNT;
+    sr = TIM3->SR & 0x41;
+    TIM2->CR1 = 0;
+    TIM3->CR1 = 0;
+    printf("C reset at50 %lu sr %02lx\n", (unsigned long)c3, (unsigned long)sr);
+    // MMS = reset: TIM2's UG resets TIM3
+    chain_setup(0, 89, 0xFFFFFFFF, itr1 | 4u, 89);
+    TIM3->CR1 = TIM_CR1_CEN;
+    slave_wait_us(500);
+    uint32_t before = TIM3->CNT;
+    TIM2->EGR = TIM_EGR_UG;
+    c3 = TIM3->CNT;
+    TIM3->CR1 = 0;
+    printf("C ug before %lu after %lu\n", (unsigned long)(before / 100 * 100), (unsigned long)c3);
+    TIM3->SMCR = 0;
+    TIM2->CR2 = 0;
+}
+
 /* ---- Counting directions of TIM3 (PWM1, CCR1 = 300, ARR = 999, 1 MHz) on
  * PC6: where the output is high per direction, update and CC1 flags. */
 static void timdir_run(const char *name, uint32_t cr1) {
@@ -2286,6 +2369,8 @@ static void execute(char *line) {
         cmd_timdir();
     } else if (!strcmp(line, "timslave")) {
         cmd_timslave();
+    } else if (!strcmp(line, "timchain")) {
+        cmd_timchain();
     } else if (!strcmp(line, "time")) {
         cmd_time();
     } else if (!strcmp(line, "dump")) {

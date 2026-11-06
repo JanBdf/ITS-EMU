@@ -40,8 +40,8 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
 
 - Timers: slave modes with ETR, complementary outputs and dead time of
   TIM1/TIM8. Timer chaining (ITR0..3; TRGO = reset, enable, update) has
-  unit tests only: compare with the board (delay of a TRGO to the slave,
-  a HwCheck command), and TRGO from compare pulses/OCxREF (MMS >= 3) and
+  not been compared with the board yet: record HwCheck `timchain` (delay
+  of a TRGO to the slave, gated count, see `timer_chaining_matches_the_board`), and TRGO from compare pulses/OCxREF (MMS >= 3) and
   the TIM10/11/13/14 OC1 inputs of TIM9/TIM12 are missing. On the board, UG while
   the counter is stopped does not change CNT until it runs again (the
   emulator clears it at once)
