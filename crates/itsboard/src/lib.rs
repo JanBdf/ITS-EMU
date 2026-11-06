@@ -14,6 +14,7 @@
 
 pub mod devices;
 pub mod ili9486;
+pub mod lm75;
 pub mod pico;
 pub mod plugin;
 pub mod sim;
@@ -143,14 +144,22 @@ pub struct LedDuty {
     pub nucleo: [f32; 3],
 }
 
+/// A temperature sensor on the board.
+enum Sensor {
+    /// DS18B20: its 1-Wire line and its place on it.
+    OneWire(Rc<RefCell<OneWireBus>>, usize),
+    /// LM75 on I2C1 (the I2C header).
+    Lm75(lm75::SharedCelsius),
+}
+
 pub struct ItsBoard {
     mcu: Stm32f429,
     lcd: Rc<RefCell<Ili9486>>,
     touch: Rc<RefCell<Xpt2046>>,
     devices: SharedDevices,
     encoders: RefCell<Vec<Rc<RefCell<RotaryEncoder>>>>,
-    /// DS18B20 sensors: their 1-Wire line and their place on it.
-    sensors: RefCell<Vec<(Rc<RefCell<OneWireBus>>, usize)>>,
+    /// Temperature sensors, numbered for [`Self::set_temperature`].
+    sensors: RefCell<Vec<Sensor>>,
     /// Pins the devices are connected to.
     device_pins: RefCell<Vec<(char, u32)>>,
 }
@@ -218,8 +227,12 @@ impl ItsBoard {
         let mut sensors = self.sensors.borrow_mut();
         let serial = 0x0000_0B1A_D5A1 + 0x1_0000 * sensors.len() as u64; // distinct ROM codes
         let at = (port(pin.0), pin.1);
-        let bus = match sensors.iter().find(|(b, _)| b.borrow().pin() == at) {
-            Some((b, _)) => b.clone(),
+        let on_pin = sensors.iter().find_map(|s| match s {
+            Sensor::OneWire(b, _) if b.borrow().pin() == at => Some(b.clone()),
+            _ => None,
+        });
+        let bus = match on_pin {
+            Some(b) => b,
             None => {
                 let b = Rc::new(RefCell::new(OneWireBus::new(self.mcu.gpio.clone(), pin)));
                 self.devices.borrow_mut().push(b.clone());
@@ -232,7 +245,18 @@ impl ItsBoard {
             b.sensors.push(Ds18b20::new(serial));
             b.sensors.len() - 1
         };
-        sensors.push((bus, index));
+        sensors.push(Sensor::OneWire(bus, index));
+        sensors.len() - 1
+    }
+
+    /// Connects an LM75 temperature sensor at `addr` (0x48..=0x4F) to the
+    /// I2C header (I2C1, SCL PB8, SDA PB9, pull-ups on the module); returns
+    /// its number for [`Self::set_temperature`].
+    pub fn add_lm75(&self, addr: u8) -> usize {
+        let celsius = lm75::SharedCelsius::new(std::cell::Cell::new(21.0));
+        self.mcu.i2c1.borrow_mut().push(Box::new(lm75::Lm75::new(addr, celsius.clone())));
+        let mut sensors = self.sensors.borrow_mut();
+        sensors.push(Sensor::Lm75(celsius));
         sensors.len() - 1
     }
 
@@ -254,6 +278,7 @@ impl ItsBoard {
         self.devices.borrow_mut().clear();
         self.encoders.borrow_mut().clear();
         self.sensors.borrow_mut().clear();
+        self.mcu.i2c1.borrow_mut().clear();
         let mut g = self.mcu.gpio.borrow_mut();
         for (p, pin) in self.device_pins.take() {
             let external = EXTERNAL_LEVELS.iter().find(|&&(ep, epin, _)| (ep, epin) == (p, pin)).map(|e| e.2);
@@ -263,17 +288,22 @@ impl ItsBoard {
         }
     }
 
-    /// Temperature at DS18B20 `n` (°C, -55..125); the next conversion measures it.
+    /// Temperature at sensor `n` (DS18B20 or LM75, °C, -55..125); the next
+    /// conversion measures it.
     pub fn set_temperature(&self, n: usize, celsius: f32) -> Result<(), String> {
-        let sensors = self.sensors.borrow();
-        let (bus, i) = sensors.get(n).ok_or_else(|| format!("there is no DS18B20 {n}"))?;
-        bus.borrow_mut().sensors[*i].set_celsius(celsius);
+        match self.sensors.borrow().get(n).ok_or_else(|| format!("there is no temperature sensor {n}"))? {
+            Sensor::OneWire(bus, i) => bus.borrow_mut().sensors[*i].set_celsius(celsius),
+            Sensor::Lm75(c) => c.set(celsius),
+        }
         Ok(())
     }
 
-    /// ROM code (family, serial, CRC) of DS18B20 `n`.
+    /// ROM code (family, serial, CRC) of sensor `n`, if it is a DS18B20.
     pub fn ds18b20_rom(&self, n: usize) -> Option<[u8; 8]> {
-        self.sensors.borrow().get(n).map(|(bus, i)| bus.borrow().sensors[*i].rom())
+        match self.sensors.borrow().get(n)? {
+            Sensor::OneWire(bus, i) => Some(bus.borrow().sensors[*i].rom()),
+            Sensor::Lm75(_) => None,
+        }
     }
 
     /// Turns encoder `n` by `detents` (negative: counter-clockwise), one

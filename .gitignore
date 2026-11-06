@@ -17,6 +17,7 @@
 !/tests/fixtures/ac6/SerialEcho.axf
 !/tests/fixtures/ac6/HwCheck.axf
 !/tests/fixtures/ac6/DelayLoops.axf
+!/tests/fixtures/ac6/I2cLm75.axf
 
 /tools/vscode-nodebug/*.vsix
 

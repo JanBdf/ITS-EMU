@@ -1,5 +1,5 @@
 //! External devices as the command line and the GUI's settings name them:
-//! `encoder@PA6,PA7`, `ds18b20@PG2`, `pico=FIRMWARE.uf2[@GP0=PF0,...]`.
+//! `encoder@PA6,PA7`, `ds18b20@PG2`, `lm75@0x48`, `pico=FIRMWARE.uf2[@GP0=PF0,...]`.
 
 use std::fmt;
 
@@ -12,6 +12,8 @@ pub enum DeviceSpec {
     Encoder((char, u32), (char, u32)),
     /// DS18B20 temperature sensor on a 1-Wire pin.
     Ds18b20((char, u32)),
+    /// LM75 temperature sensor on the I2C header, at an address 0x48..=0x4F.
+    Lm75(u8),
     /// Raspberry Pi Pico running a firmware.
     Pico(PicoSpec),
 }
@@ -22,13 +24,20 @@ impl DeviceSpec {
             return PicoSpec::parse(spec).map(Self::Pico);
         }
         let (kind, pins) = s.split_once('@').ok_or_else(|| format!("expected DEVICE@PINS, got {s:?}"))?;
+        if kind.trim().eq_ignore_ascii_case("lm75") {
+            let hex = pins.trim().trim_start_matches("0x").trim_start_matches("0X");
+            return match u8::from_str_radix(hex, 16) {
+                Ok(addr) if (0x48..=0x4F).contains(&addr) => Ok(Self::Lm75(addr)),
+                _ => Err(format!("an LM75 needs an address 0x48..0x4F: lm75@0x48, got {pins:?}")),
+            };
+        }
         let pins = pins.split(',').map(parse_pin).collect::<Result<Vec<_>, _>>()?;
         match (kind.trim().to_ascii_lowercase().as_str(), pins.as_slice()) {
             ("encoder", &[a, b]) => Ok(Self::Encoder(a, b)),
             ("encoder", _) => Err("an encoder needs two pins: encoder@PA,PB".to_owned()),
             ("ds18b20", &[pin]) => Ok(Self::Ds18b20(pin)),
             ("ds18b20", _) => Err("a DS18B20 needs one pin: ds18b20@PG2".to_owned()),
-            _ => Err(format!("unknown device {kind:?} (known: encoder, ds18b20, pico=FILE.uf2)")),
+            _ => Err(format!("unknown device {kind:?} (known: encoder, ds18b20, lm75, pico=FILE.uf2)")),
         }
     }
 
@@ -37,6 +46,7 @@ impl DeviceSpec {
         match self {
             Self::Encoder(a, b) => vec![*a, *b],
             Self::Ds18b20(pin) => vec![*pin],
+            Self::Lm75(_) => Vec::new(), // the I2C lines are shared
             Self::Pico(spec) => spec.wiring.iter().map(|&(_, pin)| pin).collect(),
         }
     }
@@ -47,6 +57,7 @@ impl fmt::Display for DeviceSpec {
         match self {
             Self::Encoder(a, b) => write!(f, "encoder@{},{}", pin_name(*a), pin_name(*b)),
             Self::Ds18b20(pin) => write!(f, "ds18b20@{}", pin_name(*pin)),
+            Self::Lm75(addr) => write!(f, "lm75@0x{addr:02X}"),
             Self::Pico(spec) => write!(f, "pico={spec}"),
         }
     }
@@ -77,7 +88,7 @@ mod tests {
 
     #[test]
     fn specs_read_back_what_they_write() {
-        for s in ["encoder@PA6,PA7", "ds18b20@PG2", "pico=/a/gen.uf2@GP0=PF0,GP5=PF1"] {
+        for s in ["encoder@PA6,PA7", "ds18b20@PG2", "lm75@0x4A", "pico=/a/gen.uf2@GP0=PF0,GP5=PF1"] {
             assert_eq!(DeviceSpec::parse(s).unwrap().to_string(), s);
         }
         assert_eq!(DeviceSpec::parse("Encoder@pa6, pb7").unwrap(), DeviceSpec::Encoder(('A', 6), ('B', 7)));
@@ -85,5 +96,7 @@ mod tests {
         assert!(DeviceSpec::parse("encoder@PA6").is_err());
         assert!(DeviceSpec::parse("ds18b20@PZ1").is_err());
         assert!(DeviceSpec::parse("lamp@PA1").is_err());
+        assert!(DeviceSpec::parse("lm75@0x50").is_err());
+        assert_eq!(DeviceSpec::parse("LM75@48").unwrap(), DeviceSpec::Lm75(0x48));
     }
 }

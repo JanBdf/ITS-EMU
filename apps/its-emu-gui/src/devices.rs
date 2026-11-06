@@ -25,6 +25,7 @@ const RUN_GUI_PY: &str = include_str!("../../../tools/pico/run_gui.py");
 enum Kind {
     Encoder,
     Ds18b20,
+    Lm75,
     Pico,
 }
 
@@ -70,6 +71,7 @@ pub struct DevicesPanel {
     kind: Kind,
     encoder_pins: String,
     sensor_pin: String,
+    lm75_addr: String,
     pico_firmware: String,
     pico_wiring: String,
     add_error: Option<String>,
@@ -86,6 +88,7 @@ impl DevicesPanel {
             kind: Kind::Pico,
             encoder_pins: "PC6,PC7".to_owned(),
             sensor_pin: "PG2".to_owned(),
+            lm75_addr: "0x48".to_owned(),
             pico_firmware: String::new(),
             pico_wiring: wiring_text(&itsboard::pico::DEFAULT_WIRING),
             add_error: None,
@@ -150,6 +153,7 @@ impl DevicesPanel {
         let title = match &d.spec {
             DeviceSpec::Encoder(a, b) => format!("Rotary encoder  A {} · B {}", pin_name(*a), pin_name(*b)),
             DeviceSpec::Ds18b20(pin) => format!("DS18B20  {}", pin_name(*pin)),
+            DeviceSpec::Lm75(addr) => format!("LM75  I2C1 0x{addr:02X}"),
             DeviceSpec::Pico(spec) => format!("Pico  {}", file_name(&spec.firmware)),
         };
         egui::CollapsingHeader::new(RichText::new(title).strong()).id_salt(("device", d.id)).default_open(true).show(
@@ -160,7 +164,7 @@ impl DevicesPanel {
                         ui.label(RichText::new(e).color(ERR_RED));
                     }
                     (DeviceSpec::Encoder(..), _) => show_encoder(ui, d.id, emu),
-                    (DeviceSpec::Ds18b20(_), DeviceState::Sensor { celsius, rom }) => {
+                    (DeviceSpec::Ds18b20(_) | DeviceSpec::Lm75(_), DeviceState::Sensor { celsius, rom }) => {
                         show_sensor(ui, d.id, *celsius, rom.as_ref(), emu);
                     }
                     (DeviceSpec::Pico(spec), DeviceState::Starting) => {
@@ -346,7 +350,12 @@ impl DevicesPanel {
     fn show_add(&mut self, ui: &mut egui::Ui, devices: &[DeviceView], settings: &mut Settings, emu: &EmuHandle) {
         ui.label(RichText::new("Connect a device").strong());
         ui.horizontal(|ui| {
-            for (kind, label) in [(Kind::Pico, "Pico"), (Kind::Encoder, "Rotary encoder"), (Kind::Ds18b20, "DS18B20")] {
+            for (kind, label) in [
+                (Kind::Pico, "Pico"),
+                (Kind::Encoder, "Rotary encoder"),
+                (Kind::Ds18b20, "DS18B20"),
+                (Kind::Lm75, "LM75"),
+            ] {
                 if ui.selectable_label(self.kind == kind, label).clicked() {
                     self.kind = kind;
                     self.add_error = None;
@@ -371,6 +380,15 @@ impl DevicesPanel {
                 .response
                 .on_hover_text("1-Wire data line (pull-up on the module); several sensors may share a pin");
                 format!("ds18b20@{}", self.sensor_pin)
+            }
+            Kind::Lm75 => {
+                ui.horizontal(|ui| {
+                    ui.label("Address:");
+                    ui.text_edit_singleline(&mut self.lm75_addr);
+                })
+                .response
+                .on_hover_text("I2C address 0x48..0x4F (A2..A0) on the I2C header: I2C1, SCL PB8, SDA PB9");
+                format!("lm75@{}", self.lm75_addr)
             }
             Kind::Pico => {
                 ui.horizontal(|ui| {
@@ -514,8 +532,13 @@ fn file_name(path: &Path) -> String {
 }
 
 /// A new device must not drive a pin another one drives (DS18B20 sensors
-/// share their 1-Wire line).
+/// share their 1-Wire line), nor use an I2C address another one uses.
 fn check_pins(spec: &DeviceSpec, devices: &[DeviceView]) -> Result<(), String> {
+    if let DeviceSpec::Lm75(addr) = spec
+        && devices.iter().any(|d| d.spec == *spec)
+    {
+        return Err(format!("address 0x{addr:02X} is in use"));
+    }
     for pin in spec.board_pins() {
         let shared_line =
             |other: &DeviceSpec| matches!((spec, other), (DeviceSpec::Ds18b20(_), DeviceSpec::Ds18b20(_)));

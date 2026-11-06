@@ -2,6 +2,7 @@
 # Builds own test programs (tests/fixtures/ac6-src/<Name>/main.c) with Arm
 # Compiler 6 into tests/fixtures/ac6/<Name>.axf.  Each is generated as a copy
 # of the TestStdinoutUSART project with absolute library paths, built in target/.
+# A file extra-hal next to main.c lists further HAL drivers to compile.
 # Usage: tools/build-own.sh [-b path/to/ITS-BRD-VSC] [Name...]   (default: all)
 set -e
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -28,6 +29,16 @@ for name in "$@"; do
         sed -e "s|TestStdinoutUSART|$name|g" -e "s|\.\./\.\./|$brd/|g" \
             "$template/TestStdinoutUSART.$f" > "$work/$name.$f"
     done
+    # extra HAL drivers (one per line, e.g. stm32f4xx_hal_i2c) after the DMA driver
+    if [ -f "$src/extra-hal" ]; then
+        awk -v list="$src/extra-hal" '
+            { print }
+            /stm32f4xx_hal_dma\.c$/ {
+                while ((getline name < list) > 0)
+                    if (name != "") { line = $0; sub(/stm32f4xx_hal_dma/, name, line); print line }
+            }' "$work/$name.cproject.yml" > "$work/cproject.tmp"
+        mv "$work/cproject.tmp" "$work/$name.cproject.yml"
+    fi
     cp "$template/TestStdinoutUSART_ITSboard.sct" "$work/${name}_ITSboard.sct"
     cp "$template/vcpkg-configuration.json" "$work/"
     (cd "$work" && cbuild "$name.csolution.yml" --context .Debug --packs >build.log 2>&1) ||
