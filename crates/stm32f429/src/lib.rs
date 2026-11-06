@@ -3,6 +3,7 @@
 pub mod adc;
 pub mod crc;
 pub mod dma;
+pub mod eth;
 pub mod exti;
 pub mod flash;
 pub mod gpio;
@@ -102,6 +103,9 @@ pub struct Stm32f429 {
     pub i2c1: i2c::I2cBus,
     /// DMA controllers; the machine runs them as its second bus master.
     pub dma: dma::SharedDma,
+    /// Ethernet MAC/DMA (a bus master too) and its cable.
+    pub eth: eth::SharedEth,
+    pub eth_link: eth::SharedEthLink,
     /// State of the flash interface (registers and programming side).
     pub flash: flash::SharedFlash,
 }
@@ -123,28 +127,6 @@ impl spi::SpiDevice for OpenMiso {
             None => 0xFFFF,
         }
     }
-}
-
-/// Ethernet MAC/DMA registers: reads as idle, writes ignored. The LCD driver
-/// briefly switches the MAC off around every SPI transfer, so the window must
-/// exist (and stay quiet) even though Ethernet is not emulated.
-struct EthStub;
-
-impl emu_core::Peripheral for EthStub {
-    fn name(&self) -> &str {
-        "ETH"
-    }
-
-    fn read_stable_until(&self, _offset: u32, _clock: &emu_core::Clock) -> u64 {
-        u64::MAX
-    }
-    fn write_is_inert(&self, _offset: u32) -> bool {
-        true
-    }
-    fn read(&mut self, _: &mut emu_core::DeviceCtx, _: u32, _: u32) -> u32 {
-        0
-    }
-    fn write(&mut self, _: &mut emu_core::DeviceCtx, _: u32, _: u32, _: u32) {}
 }
 
 /// Wait states of peripheral accesses, fitted to DWT->CYCCNT measurements at
@@ -184,11 +166,31 @@ fn bus_wait_states(clocks: SharedClocks) -> impl Fn(u32, bool, u64) -> u64 {
     }
 }
 
+/// The bus masters besides the core: they take turns.
+struct Masters(Vec<Box<dyn emu_core::BusMaster>>);
+
+impl emu_core::BusMaster for Masters {
+    fn wants_service(&self) -> bool {
+        self.0.iter().any(|m| m.wants_service())
+    }
+
+    fn service(&mut self, ctx: &mut emu_core::DeviceCtx, bus: &mut Bus, ram: &mut emu_core::Ram) {
+        for m in &mut self.0 {
+            if m.wants_service() {
+                m.service(ctx, bus, ram);
+            }
+        }
+    }
+}
+
 /// The emulated MCU: core and memory with `bus` (from [`build`]), the DMA
-/// controllers of `mcu` as second bus master.
+/// controllers and the Ethernet DMA of `mcu` as further bus masters.
 pub fn machine(bus: Bus, mcu: &Stm32f429) -> Result<Machine, MachineError> {
     let mut m = Machine::new(machine_config(), bus)?;
-    m.set_bus_master(Box::new(dma::DmaMaster(mcu.dma.clone())));
+    m.set_bus_master(Box::new(Masters(vec![
+        Box::new(dma::DmaMaster(mcu.dma.clone())),
+        Box::new(eth::EthMaster(mcu.eth.clone())),
+    ])));
     m.set_debug_ids(DEBUG_IDS);
     m.set_flash_controller(Box::new(flash::FlashProgrammer::new(mcu.flash.clone(), mcu.clocks.clone())));
     // Device electronic signature in system memory (read-only): unique ID
@@ -421,9 +423,11 @@ pub fn build() -> (Bus, Stm32f429) {
     bus.attach(0x5006_0800, 0x400, Box::new(crc::Rng::new(clocks.clone())));
     let flash = flash::SharedFlash::default();
     bus.attach(0x4002_3C00, 0x400, Box::new(flash::FlashInterface::new(flash.clone())));
-    bus.attach(0x4002_8000, 0x1400, Box::new(EthStub));
+    let eth_link = eth::SharedEthLink::default();
+    let eth = eth::Eth::new(eth_link.clone());
+    bus.attach(0x4002_8000, 0x1400, Box::new(eth::EthRegs::new(eth.clone(), clocks.clone())));
     bus.set_wait_states(Box::new(bus_wait_states(clocks.clone())));
 
     let tim_pwm: [SharedPwm; 4] = tim_pwm.try_into().unwrap_or_else(|_| unreachable!());
-    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3, analog, i2c1, dma, flash })
+    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3, analog, i2c1, dma, eth, eth_link, flash })
 }
