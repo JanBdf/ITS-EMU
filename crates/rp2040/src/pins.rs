@@ -10,6 +10,7 @@ use emu_core::{Clock, DeviceCtx};
 use crate::regs::{Block, Op};
 
 pub const NUM_GPIO: usize = 30;
+pub const FUNC_PWM: u32 = 4;
 pub const FUNC_SIO: u32 = 5;
 pub const FUNC_PIO0: u32 = 6;
 pub const FUNC_PIO1: u32 = 7;
@@ -33,6 +34,8 @@ pub struct Pins {
     /// Outputs and output enables of PIO0/PIO1 towards the pins.
     pub pio_out: [u32; 2],
     pub pio_oe: [u32; 2],
+    /// PWM outputs: bit 2n + ch = channel ch of slice n.
+    pub pwm_out: u32,
     /// Levels applied to the pins from outside (`None`: not connected).
     pub external: [Option<bool>; NUM_GPIO],
     driven: [Option<bool>; NUM_GPIO],
@@ -53,6 +56,7 @@ impl Default for Pins {
             sio_oe: 0,
             pio_out: [0; 2],
             pio_oe: [0; 2],
+            pwm_out: 0,
             external: [None; NUM_GPIO],
             driven: [None; NUM_GPIO],
             edges: Vec::new(),
@@ -70,6 +74,8 @@ impl Pins {
             FUNC_SIO => (self.sio_out & bit != 0, self.sio_oe & bit != 0),
             FUNC_PIO0 => (self.pio_out[0] & bit != 0, self.pio_oe[0] & bit != 0),
             FUNC_PIO1 => (self.pio_out[1] & bit != 0, self.pio_oe[1] & bit != 0),
+            // GPIO n: slice n / 2 mod 8, channel n mod 2
+            FUNC_PWM => (self.pwm_out & (1 << (n % 16)) != 0, true),
             _ => (false, false),
         };
         let out = match (ctrl >> 8) & 3 {
