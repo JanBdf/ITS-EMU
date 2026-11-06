@@ -155,6 +155,12 @@ impl PicoPlugin {
     pub fn failure(&self) -> Option<String> {
         self.status.lock().unwrap().failure.clone()
     }
+
+    /// What the firmware has used that the emulator does not do (DMA, PWM,
+    /// programming its flash, ...): it may not work as on a real Pico.
+    pub fn notices(&self) -> Vec<String> {
+        self.status.lock().unwrap().notices.clone()
+    }
 }
 
 impl Drop for PicoPlugin {
@@ -171,6 +177,8 @@ impl Drop for PicoPlugin {
 struct Status {
     output: Vec<u8>,
     failure: Option<String>,
+    /// What the firmware used that is not emulated.
+    notices: Vec<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -229,6 +237,10 @@ fn run(
         }
         if let Err((core, reason)) = pico.run_until_ps(target) {
             return Err(format!("Pico core {core} stopped at {:#010x}: {reason:?}", pico.pc(core)));
+        }
+        let notices = pico.take_notices();
+        if !notices.is_empty() {
+            status.lock().unwrap().notices.extend(notices);
         }
         let edges = pico.take_edges().into_iter().filter_map(|e| {
             let output = gpios.iter().position(|&g| g == e.pin)?;

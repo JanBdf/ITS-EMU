@@ -86,6 +86,8 @@ pub enum DeviceState {
     /// A Pico runs; host programs open its USB serial port here.
     Running {
         port: Option<PathBuf>,
+        /// What the firmware uses that is not emulated.
+        notices: Vec<String>,
     },
     Failed(String),
 }
@@ -354,7 +356,7 @@ impl Device {
                 rom: board.zip(self.board_index).and_then(|(b, n)| b.ds18b20_rom(n)),
             },
             DeviceSpec::Pico(_) => match &self.pico {
-                Some(p) => DeviceState::Running { port: p.serial_port().map(PathBuf::from) },
+                Some(p) => DeviceState::Running { port: p.serial_port().map(PathBuf::from), notices: p.notices() },
                 None => DeviceState::Starting,
             },
         }
