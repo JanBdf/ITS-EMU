@@ -131,6 +131,31 @@ static uint32_t v7m_mrs_xpsr(CPUARMState *env, uint32_t reg)
     return xpsr_read(env) & mask;
 }
 
+// ITS-EMU: R0..R15 and xPSR (as UC_ARM_REG_XPSR reads it) in one call, for
+// the emulator's idle detection at loop heads: without the dispatch per
+// register and the JIT write protection bookkeeping of uc_reg_read_batch.
+UNICORN_EXPORT
+void uc_its_core_regs(uc_engine *uc, uint32_t *out)
+{
+    CPUARMState *env = uc->cpu->env_ptr;
+
+    memcpy(out, env->regs, 16 * sizeof(uint32_t));
+    out[16] = v7m_mrs_xpsr(env, 3);
+}
+
+// ITS-EMU: sets R0..R15 (R15: the PC, Thumb state kept) and the NZCV flags
+// (bits 31..28 of `nzcv`), for code the emulator ran in its place (polling
+// loops). Not while the engine runs.
+UNICORN_EXPORT
+void uc_its_set_core_regs(uc_engine *uc, const uint32_t *regs, uint32_t nzcv)
+{
+    CPUARMState *env = uc->cpu->env_ptr;
+
+    memcpy(env->regs, regs, 16 * sizeof(uint32_t));
+    env->regs[15] &= ~1u;
+    xpsr_write(env, nzcv, XPSR_NZCV);
+}
+
 static void v7m_msr_xpsr(CPUARMState *env, uint32_t mask, uint32_t reg,
                          uint32_t val)
 {
