@@ -43,6 +43,14 @@ impl Pico {
         Ok(pico)
     }
 
+    /// Fast-forwarding of idle loops on both cores (on by default; the
+    /// result is the same without it, only slower).
+    pub fn set_idle_skipping(&mut self, on: bool) {
+        for core in &mut self.cores {
+            core.system_mut().idle_skipping = on;
+        }
+    }
+
     /// Core 0.
     pub fn machine(&self) -> &Machine {
         &self.cores[0]
