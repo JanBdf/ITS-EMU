@@ -77,3 +77,46 @@ pub const PWM: [u8; 44] = [
 pub fn pwm_uf2() -> Vec<u8> {
     uf2::write(VECTOR_TABLE, &PWM)
 }
+
+/// Converts the temperature sensor and GPIO 26 once each (START_ONCE,
+/// polling READY) into 0x2000_0000 and 0x2000_0004, then idles:
+///
+/// ```text
+///     .word 0x20042000
+///     .word 0x10000109
+/// reset:
+///     ldr  r0, =0x4004C000    @ ADC
+///     ldr  r3, =0x20000000    @ results
+///     ldr  r1, =0x4003        @ EN, TS_EN, AINSEL = 4
+///     str  r1, [r0]
+///     bl   convert
+///     str  r2, [r3, #0]
+///     ldr  r1, =0x0003        @ AINSEL = 0 (GPIO 26)
+///     str  r1, [r0]
+///     bl   convert
+///     str  r2, [r3, #4]
+/// loop:
+///     b    loop
+/// convert:                    @ START_ONCE, wait for READY, r2 = RESULT
+///     ldr  r2, [r0]
+///     movs r1, #4
+///     orrs r2, r1
+///     str  r2, [r0]
+/// wait:
+///     ldr  r2, [r0]
+///     lsrs r2, r2, #9         @ READY into carry
+///     bcc  wait
+///     ldr  r2, [r0, #4]
+///     bx   lr
+/// ```
+pub const ADC: [u8; 68] = [
+    0x00, 0x20, 0x04, 0x20, 0x09, 0x01, 0x00, 0x10, 0x0A, 0x48, 0x0B, 0x4B, 0x0B, 0x49, 0x01, 0x60, 0x00, 0xF0, 0x07,
+    0xF8, 0x1A, 0x60, 0x0A, 0x49, 0x01, 0x60, 0x00, 0xF0, 0x02, 0xF8, 0x5A, 0x60, 0xFE, 0xE7, 0x02, 0x68, 0x04, 0x21,
+    0x0A, 0x43, 0x02, 0x60, 0x02, 0x68, 0x52, 0x0A, 0xFC, 0xD3, 0x42, 0x68, 0x70, 0x47, 0x00, 0xC0, 0x04, 0x40, 0x00,
+    0x00, 0x00, 0x20, 0x03, 0x40, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+];
+
+/// [`ADC`] as a UF2 file.
+pub fn adc_uf2() -> Vec<u8> {
+    uf2::write(VECTOR_TABLE, &ADC)
+}
