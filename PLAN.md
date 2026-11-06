@@ -38,10 +38,10 @@ port; `rd`/`wr` for ad-hoc register probes). Board results live in
   SWO are not there; the flash AND semantics and PGSERR without a fault
   (see `stm32f429::flash`) neither
 
-- Timers: slave modes with ETR; of TIM1/TIM8 the break input, the lock
-  levels and the preloaded control bits (CCPC, COM event; complementary
-  outputs, dead time, MOE/AOE and the off states exist, not compared with
-  the board yet). Timer chaining (ITR0..3; TRGO = reset, enable, update) has
+- Timers: slave modes with ETR; of TIM1/TIM8 the lock levels (complementary
+  outputs, dead time, MOE/AOE, the off states, the break input BKIN/BG and
+  the COM event with CCPC/CCUS exist, not compared with the board yet; the
+  break input is polled at the sweeps, not at its edge). Timer chaining (ITR0..3; TRGO = reset, enable, update) has
   not been compared with the board yet: record HwCheck `timchain` (delay
   of a TRGO to the slave, gated count, see `timer_chaining_matches_the_board`).
   TRGO from the CC1 compare pulse and OC1REF..OC4REF (MMS >= 3) triggers

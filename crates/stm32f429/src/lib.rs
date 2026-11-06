@@ -65,10 +65,11 @@ pub fn machine_config() -> MachineConfig {
 
 /// Pins of the timer channels (LQFP144) and their alternate function.
 const fn pins(af: u32, pins: [&'static [(char, u32)]; 4]) -> ChannelPins {
-    ChannelPins { af, pins, npins: [&[]; 3] }
+    ChannelPins { af, pins, npins: [&[]; 3], bkin: &[] }
 }
 static TIM1_PINS: ChannelPins = ChannelPins {
     npins: [&[('A', 7), ('B', 13), ('E', 8)], &[('B', 0), ('B', 14), ('E', 10)], &[('B', 1), ('B', 15), ('E', 12)]],
+    bkin: &[('A', 6), ('B', 12), ('E', 15)],
     ..pins(1, [&[('A', 8), ('E', 9)], &[('A', 9), ('E', 11)], &[('A', 10), ('E', 13)], &[('A', 11), ('E', 14)]])
 };
 static TIM2_PINS: ChannelPins =
@@ -82,6 +83,7 @@ static TIM4_PINS: ChannelPins =
 static TIM5_PINS: ChannelPins = pins(2, [&[('A', 0)], &[('A', 1)], &[('A', 2)], &[('A', 3)]]);
 static TIM8_PINS: ChannelPins = ChannelPins {
     npins: [&[('A', 5), ('A', 7)], &[('B', 0), ('B', 14)], &[('B', 1), ('B', 15)]],
+    bkin: &[('A', 6)],
     ..pins(3, [&[('C', 6)], &[('C', 7)], &[('C', 8)], &[('C', 9)]])
 };
 static TIM9_PINS: ChannelPins = pins(3, [&[('A', 2), ('E', 5)], &[('A', 3), ('E', 6)], &[], &[]]);
