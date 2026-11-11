@@ -3,20 +3,41 @@
 
 use std::path::PathBuf;
 
-use eframe::egui::{self, Color32, Key, RichText};
+use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText};
 use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
-use crate::board::{self, BoardState};
+use crate::board::{self, BoardState, NUCLEO_BLUE, NUCLEO_GREEN, NUCLEO_RED};
+use crate::console::Console;
 use crate::emu::{self, Command, EmuHandle, RunState, Speed, UsbStatus};
 use crate::files::FilePicker;
-use crate::settings::Settings;
+use crate::settings::{ConsoleSide, Settings};
 
 const OK_GREEN: Color32 = Color32::from_rgb(0x34, 0xD3, 0x59);
 const ERR_RED: Color32 = Color32::from_rgb(0xFF, 0x5B, 0x50);
-const MAX_CONSOLE: usize = 200_000;
-const NUCLEO_GREEN: Color32 = Color32::from_rgb(0x2E, 0xE0, 0x5A);
-const NUCLEO_BLUE: Color32 = Color32::from_rgb(0x2F, 0x7B, 0xFF);
-const NUCLEO_RED: Color32 = Color32::from_rgb(0xFF, 0x2A, 0x22);
+const WARN_YELLOW: Color32 = Color32::from_rgb(0xFF, 0xD5, 0x4A);
+
+const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
+const RESET: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::R);
+const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
+const DISPLAY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::D);
+const PINS: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
+const SEE_THROUGH: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
+const DEVICES: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::E);
+const CONSOLE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::L);
+const QUIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
+const RUN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Space);
+const HELP: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F1);
+
+const SPEEDS: [(&str, Speed); 4] =
+    [("0.1×", Speed::Factor(0.1)), ("1×", Speed::Factor(1.0)), ("10×", Speed::Factor(10.0)), ("max", Speed::Max)];
+
+/// How long a notice stays in the status bar (seconds).
+const NOTICE_TIME: f64 = 8.0;
+/// Sizes for choosing where the console goes: its width on the right, its height below.
+const CONSOLE_W: f32 = 380.0;
+const CONSOLE_H: f32 = 150.0;
+/// Width of the Devices panel at the start.
+const DEVICES_W: f32 = 340.0;
 
 pub struct App {
     emu: EmuHandle,
@@ -33,10 +54,10 @@ pub struct App {
     sent_buttons: [bool; 8],
     sent_user: bool,
     sent_touch: Option<(f32, f32)>,
-    paused: bool,
     speed: Speed,
-    console: String,
-    console_input: String,
+    console: Console,
+    /// The console is right of the board (else below it).
+    console_right: bool,
     /// Levels set on the AUX0–5 pads (`None` = open).
     ints: [Option<bool>; 6],
     analog: [Option<f32>; 8],
@@ -48,6 +69,8 @@ pub struct App {
     lcd_focus: bool,
     /// The Nucleo and the display see-through, with this opacity.
     see_through: Option<f32>,
+    /// Opacity see-through starts with (the slider's last value).
+    see_through_opacity: f32,
     /// Filter the display texture was made with (sharp pixels when it is shown alone).
     display_options: egui::TextureOptions,
     /// The display shows the frame buffer's colours instead of the real panel's look.
@@ -59,7 +82,15 @@ pub struct App {
     /// The Devices panel is open.
     show_devices: bool,
     devices: crate::devices::DevicesPanel,
+    /// The help window is open.
+    show_help: bool,
+    /// Message in the status bar: text, error, until (egui time).
+    notice: Option<(String, bool, f64)>,
     files: FilePicker,
+    /// A text field had the keyboard focus at the end of the last frame (egui
+    /// drops the focus on Esc before the frame, so this tells an Esc that
+    /// left the field from one meant for the board).
+    text_was_focused: bool,
 }
 
 const SEE_THROUGH_DEFAULT: f32 = 0.25;
@@ -144,6 +175,35 @@ fn usb_hover(usb: &UsbStatus) -> String {
     }
 }
 
+/// The Run/Pause button for `state`: label, enabled, tooltip.
+fn run_button(state: &RunState) -> (&'static str, bool, &'static str) {
+    match state {
+        RunState::Running => ("Pause", true, "Pause the emulation · Space"),
+        RunState::Paused => ("Run", true, "Continue the emulation · Space"),
+        RunState::Halted => ("Run", false, "Halted by the debugger: continue in the debugger"),
+        _ => ("Run", false, "Nothing is running: open a firmware file or press Reset"),
+    }
+}
+
+/// A menu entry with its shortcut.
+fn menu_item(ui: &mut egui::Ui, text: &str, shortcut: &KeyboardShortcut) -> bool {
+    let shortcut = ui.ctx().format_shortcut(shortcut);
+    ui.add(egui::Button::new(text).shortcut_text(shortcut)).clicked()
+}
+
+/// A checkable menu entry with its shortcut.
+fn menu_toggle(ui: &mut egui::Ui, on: &mut bool, text: &str, shortcut: Option<&KeyboardShortcut>) -> bool {
+    let mut button = egui::Button::selectable(*on, text);
+    if let Some(s) = shortcut {
+        button = button.shortcut_text(ui.ctx().format_shortcut(s));
+    }
+    let clicked = ui.add(button).clicked();
+    if clicked {
+        *on = !*on;
+    }
+    clicked
+}
+
 impl App {
     pub fn new(
         cc: &eframe::CreationContext,
@@ -176,26 +236,29 @@ impl App {
             sent_buttons: [false; 8],
             sent_user: false,
             sent_touch: None,
-            paused: false,
             speed: Speed::Factor(1.0),
-            console: String::new(),
-            console_input: String::new(),
+            console: Console::new(settings.line_ending, settings.echo),
+            console_right: false,
             ints: [None; 6],
             analog: [None; 8],
             self_screenshot: SelfScreenshot::from_env(),
             usb_on,
             settings,
-            // ITS_EMU_GUI_VIEW=lcd, see-through, pins (comma separated): start
-            // in that view (documentation, visual checks)
+            // ITS_EMU_GUI_VIEW=lcd, see-through, pins, help (comma separated):
+            // start in that view (documentation, visual checks)
             lcd_focus: start_view("lcd"),
             see_through: start_view("see-through").then_some(SEE_THROUGH_DEFAULT),
+            see_through_opacity: SEE_THROUGH_DEFAULT,
             display_options: egui::TextureOptions::LINEAR,
             ideal_colors,
             title: String::new(),
             show_pins: start_view("pins"),
             show_devices: start_view("devices"),
             devices: crate::devices::DevicesPanel::new(bootrom_override),
+            show_help: start_view("help"),
+            notice: None,
             files,
+            text_was_focused: false,
         };
         if let Some(path) = firmware {
             app.load(path);
@@ -210,15 +273,471 @@ impl App {
         self.emu.send(Command::Load(path));
     }
 
+    fn notify(&mut self, ctx: &egui::Context, text: String, error: bool) {
+        if error {
+            log::error!("{text}");
+        }
+        self.notice = Some((text, error, ctx.input(|i| i.time) + NOTICE_TIME));
+    }
+
     /// Saves the display as it is shown (480 × 320 pixels) to a PNG file the user picks.
-    fn save_display_dialog(&self) {
+    fn save_display_dialog(&mut self, ctx: &egui::Context) {
         let file = rfd::FileDialog::new().add_filter("PNG image", &["png"]).set_file_name("display.png").save_file();
         if let Some(path) = file {
             let img = egui::ColorImage::from_rgba_unmultiplied([SCREEN_WIDTH, SCREEN_HEIGHT], &self.display_frame);
-            if let Err(e) = save_png(&path, &img) {
-                log::error!("cannot save {}: {e}", path.display());
+            match save_png(&path, &img) {
+                Ok(()) => self.notify(ctx, format!("Display saved to {}", path.display()), false),
+                Err(e) => self.notify(ctx, format!("Cannot save {}: {e}", path.display()), true),
             }
         }
+    }
+
+    /// Saves the text of the serial console to a file the user picks.
+    fn save_console_dialog(&mut self, ctx: &egui::Context) {
+        let file = rfd::FileDialog::new().add_filter("Text", &["txt", "log"]).set_file_name("serial.txt").save_file();
+        if let Some(path) = file {
+            match std::fs::write(&path, self.console.text()) {
+                Ok(()) => self.notify(ctx, format!("Serial console saved to {}", path.display()), false),
+                Err(e) => self.notify(ctx, format!("Cannot save {}: {e}", path.display()), true),
+            }
+        }
+    }
+
+    fn toggle_run(&self, state: &RunState) {
+        if run_button(state).1 {
+            self.emu.send(Command::SetPaused(*state == RunState::Running));
+        }
+    }
+
+    fn set_speed(&mut self, speed: Speed) {
+        self.speed = speed;
+        self.emu.send(Command::SetSpeed(speed));
+    }
+
+    fn set_usb(&mut self, on: bool) {
+        self.usb_on = on;
+        self.emu.send(Command::SetUsb(on));
+        self.settings.usb = on;
+        self.settings.save();
+    }
+
+    fn set_see_through(&mut self, on: bool) {
+        if let Some(opacity) = self.see_through {
+            self.see_through_opacity = opacity;
+        }
+        self.see_through = on.then_some(self.see_through_opacity);
+    }
+
+    fn set_console(&mut self, on: bool) {
+        self.settings.console = on;
+        self.settings.save();
+    }
+
+    /// Where the console goes: right of the board when the board is shown larger that way.
+    fn place_console(&mut self, ctx: &egui::Context) {
+        self.console_right = match self.settings.console_side {
+            ConsoleSide::Bottom => false,
+            ConsoleSide::Right => true,
+            ConsoleSide::Auto => {
+                let r = ctx.content_rect();
+                let pins = if self.show_pins { crate::pins::MIN_WIDTH + 20.0 } else { 0.0 };
+                let devices = if self.show_devices { DEVICES_W } else { 0.0 };
+                let (w, h) = (r.width() - pins - devices - 20.0, r.height() - 100.0);
+                let scale = |w: f32, h: f32| (w / board::BOARD_W).min(h / board::BOARD_H);
+                let below = scale(w, h - CONSOLE_H);
+                let right = scale(w - CONSOLE_W, h);
+                // a little hysteresis, so that it does not jump to and fro while resizing
+                if self.console_right { right > below * 0.95 } else { right > below * 1.05 }
+            }
+        };
+    }
+
+    fn menu_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, state: &RunState) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if menu_item(ui, "Open firmware…", &OPEN) {
+                    self.files.open(ctx, false);
+                }
+                if ui.button("Open with the built-in file browser…").clicked() {
+                    self.files.open(ctx, true);
+                }
+                let mut open = None;
+                ui.add_enabled_ui(!self.settings.recent.is_empty(), |ui| {
+                    ui.menu_button("Open recent", |ui| {
+                        for path in &self.settings.recent {
+                            let name = path.file_name().unwrap_or_default().to_string_lossy();
+                            let dir = path.parent().and_then(|d| d.file_name()).unwrap_or_default();
+                            let label = format!("{name}  ({})", dir.to_string_lossy());
+                            if ui.button(label).on_hover_text(path.display().to_string()).clicked() {
+                                open = Some(path.clone());
+                            }
+                        }
+                    });
+                });
+                if let Some(path) = open {
+                    self.load(path);
+                }
+                ui.separator();
+                if menu_item(ui, "Save display as PNG…", &SAVE) {
+                    self.save_display_dialog(ctx);
+                }
+                if ui.button("Save serial console…").clicked() {
+                    self.save_console_dialog(ctx);
+                }
+                ui.separator();
+                if menu_item(ui, "Quit", &QUIT) {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+            ui.menu_button("Emulation", |ui| {
+                let (label, enabled, _) = run_button(state);
+                let shortcut = ctx.format_shortcut(&RUN);
+                if ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(shortcut)).clicked() {
+                    self.toggle_run(state);
+                }
+                if menu_item(ui, "Reset", &RESET) {
+                    self.emu.send(Command::Reset);
+                }
+                ui.separator();
+                ui.label(RichText::new("Speed").weak());
+                for (label, s) in SPEEDS {
+                    if ui.radio(self.speed == s, label).clicked() {
+                        self.set_speed(s);
+                    }
+                }
+                ui.separator();
+                let mut on = self.usb_on;
+                if ui.checkbox(&mut on, "USB ST-LINK plugged in").changed() {
+                    self.set_usb(on);
+                }
+                let mut auto = self.settings.auto_reload;
+                if ui
+                    .checkbox(&mut auto, "Reload the firmware when it is rebuilt")
+                    .on_hover_text(
+                        "Load the .axf file again (and restart) when a new build replaces it — \
+                         not while a debugger is attached",
+                    )
+                    .changed()
+                {
+                    self.settings.auto_reload = auto;
+                    self.settings.save();
+                    self.emu.send(Command::SetAutoReload(auto));
+                }
+            });
+            ui.menu_button("View", |ui| {
+                menu_toggle(ui, &mut self.lcd_focus, "Display alone", Some(&DISPLAY));
+                let mut see = self.see_through.is_some();
+                if ui
+                    .add_enabled_ui(!self.lcd_focus, |ui| menu_toggle(ui, &mut see, "See-through", Some(&SEE_THROUGH)))
+                    .inner
+                {
+                    self.set_see_through(see);
+                }
+                menu_toggle(ui, &mut self.show_pins, "Pins", Some(&PINS));
+                menu_toggle(ui, &mut self.show_devices, "Devices", Some(&DEVICES));
+                let mut console = self.settings.console;
+                if menu_toggle(ui, &mut console, "Serial console", Some(&CONSOLE)) {
+                    self.set_console(console);
+                }
+                ui.menu_button("Serial console position", |ui| {
+                    for (side, label) in [
+                        (ConsoleSide::Auto, "Automatic (right in wide windows)"),
+                        (ConsoleSide::Bottom, "Below the board"),
+                        (ConsoleSide::Right, "Right of the board"),
+                    ] {
+                        if ui.radio(self.settings.console_side == side, label).clicked() {
+                            self.settings.console_side = side;
+                            self.settings.save();
+                        }
+                    }
+                });
+                ui.separator();
+                let mut real = !self.ideal_colors;
+                if ui
+                    .checkbox(&mut real, "Display colours as on the real panel")
+                    .on_hover_text(
+                        "The measured tone response of the board's display (darker mid tones, grey black); \
+                         off: the frame buffer's colours",
+                    )
+                    .changed()
+                {
+                    self.ideal_colors = !real;
+                    self.emu.send(Command::IdealColors(self.ideal_colors));
+                }
+                ui.separator();
+                egui::gui_zoom::zoom_menu_buttons(ui);
+            });
+            ui.menu_button("Help", |ui| {
+                if menu_item(ui, "Controls and mouse actions", &HELP) {
+                    self.show_help = true;
+                }
+            });
+        });
+    }
+
+    fn toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        state: &RunState,
+        usb: &UsbStatus,
+        nucleo: [f32; 3],
+        devices: usize,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            let open = ui.button("Open…").on_hover_text(format!(
+                "Open a firmware file (.axf) · {}\nShift+click: the emulator's own file browser",
+                ctx.format_shortcut(&OPEN)
+            ));
+            if open.clicked() {
+                self.files.open(ctx, ui.input(|i| i.modifiers.shift));
+            }
+            if ui
+                .button("Reset")
+                .on_hover_text(format!("RESET button of the Nucleo board · {}", ctx.format_shortcut(&RESET)))
+                .clicked()
+            {
+                self.emu.send(Command::Reset);
+            }
+            let (label, enabled, hover) = run_button(state);
+            // the same width for both labels, so that nothing moves
+            let width = ui.spacing().interact_size.x.max(52.0);
+            if ui
+                .add_enabled(enabled, egui::Button::new(label).min_size(egui::vec2(width, 0.0)))
+                .on_hover_text(hover)
+                .on_disabled_hover_text(hover)
+                .clicked()
+            {
+                self.toggle_run(state);
+            }
+            ui.separator();
+            ui.label("Speed:");
+            for (label, s) in SPEEDS {
+                if ui.selectable_label(self.speed == s, label).clicked() {
+                    self.set_speed(s);
+                }
+            }
+            ui.separator();
+            let mut on = self.usb_on;
+            if ui.toggle_value(&mut on, "USB ST-LINK").on_hover_text(usb_hover(usb)).changed() {
+                self.set_usb(on);
+            }
+            ui.separator();
+            ui.toggle_value(&mut self.lcd_focus, "Display").on_hover_text(format!(
+                "Only the display, as large as possible · {}, or right click on the display; Esc returns",
+                ctx.format_shortcut(&DISPLAY)
+            ));
+            let see = self.see_through.is_some();
+            if ui
+                .add_enabled(!self.lcd_focus, egui::Button::selectable(see, "See-through"))
+                .on_hover_text(format!(
+                    "Show the Nucleo and the display see-through, to see the carrier board under them · {}",
+                    ctx.format_shortcut(&SEE_THROUGH)
+                ))
+                .clicked()
+            {
+                self.set_see_through(!see);
+            }
+            // always there (greyed out when off), so that the buttons after it do not move
+            let mut opacity = self.see_through.unwrap_or(self.see_through_opacity);
+            let slider = ui
+                .scope(|ui| {
+                    ui.spacing_mut().slider_width = 64.0;
+                    ui.add_enabled(see && !self.lcd_focus, egui::Slider::new(&mut opacity, 0.0..=1.0).show_value(false))
+                })
+                .inner
+                .on_hover_text("Opacity of the Nucleo and the display");
+            if slider.changed()
+                && let Some(o) = &mut self.see_through
+            {
+                *o = opacity;
+            }
+            ui.toggle_value(&mut self.show_pins, "Pins")
+                .on_hover_text(format!("Mode and level of every pin of ports A–G · {}", ctx.format_shortcut(&PINS)));
+            let label = match devices {
+                0 => "Devices".to_owned(),
+                n => format!("Devices ({n})"),
+            };
+            ui.toggle_value(&mut self.show_devices, label).on_hover_text(format!(
+                "Devices on the header pins: Raspberry Pi Pico, rotary encoder, DS18B20 · {}",
+                ctx.format_shortcut(&DEVICES)
+            ));
+            let mut console = self.settings.console;
+            if ui
+                .toggle_value(&mut console, "Console")
+                .on_hover_text(format!("Serial console (virtual COM port) · {}", ctx.format_shortcut(&CONSOLE)))
+                .changed()
+            {
+                self.set_console(console);
+            }
+            ui.separator();
+            // The Nucleo user LEDs are hidden under the display on the real board.
+            ui.label(RichText::new("Nucleo").weak())
+                .on_hover_text("The user LEDs of the Nucleo board, hidden under the display on the real board");
+            for (i, (name, pin, color)) in
+                [("LD1", "PB0", NUCLEO_GREEN), ("LD2", "PB7", NUCLEO_BLUE), ("LD3", "PB14", NUCLEO_RED)]
+                    .into_iter()
+                    .enumerate()
+            {
+                let duty = nucleo[i];
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                let b = duty.clamp(0.0, 1.0).powf(1.0 / 2.2);
+                // an SMD LED with its glow, not a radio button or check box
+                let p = ui.painter();
+                if b > 0.01 {
+                    p.circle_filled(rect.center(), 7.0, color.gamma_multiply(0.35 * b));
+                }
+                let body = egui::Rect::from_center_size(rect.center(), egui::vec2(10.0, 6.0));
+                p.rect_filled(body, 1.5, Color32::from_gray(70).lerp_to_gamma(color, b));
+                if b > 0.01 {
+                    p.circle_filled(rect.center(), 2.0, Color32::WHITE.gamma_multiply(0.8 * b));
+                }
+                let text = format!("Nucleo {name} ({pin}): {:.0} %", duty * 100.0);
+                let label = text.clone();
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &label));
+                resp.on_hover_text(text);
+                ui.label(RichText::new(name).small());
+            }
+            ui.separator();
+            if ui
+                .button("?")
+                .on_hover_text(format!("Controls and mouse actions · {}", ctx.format_shortcut(&HELP)))
+                .clicked()
+            {
+                self.show_help = !self.show_help;
+            }
+        });
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn status_bar(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &RunState,
+        firmware: &Option<String>,
+        virtual_ns: u64,
+        core_mhz: u32,
+        speed: f64,
+        gdb: &(Result<String, String>, bool),
+        usb: &UsbStatus,
+    ) {
+        ui.horizontal_wrapped(|ui| {
+            let (text, color) = match state {
+                RunState::NoFirmware => (
+                    "no firmware — open an .axf file or load one with the debugger".to_owned(),
+                    ui.visuals().weak_text_color(),
+                ),
+                RunState::Running => ("running".to_owned(), OK_GREEN),
+                RunState::Paused => ("paused".to_owned(), WARN_YELLOW),
+                RunState::Halted => ("halted by debugger".to_owned(), WARN_YELLOW),
+                RunState::Stopped(why) => (format!("stopped: {why}"), ERR_RED),
+                RunState::Error(e) => (e.clone(), ERR_RED),
+            };
+            ui.label(RichText::new(text).color(color));
+            ui.separator();
+            // time, clock and speed only mean something with a firmware
+            if *state != RunState::NoFirmware {
+                if let Some(name) = firmware {
+                    ui.label(name);
+                    ui.separator();
+                }
+                ui.label(format!("t = {:.3} s", virtual_ns as f64 / 1e9));
+                ui.separator();
+                ui.label(format!("{core_mhz} MHz"));
+                ui.separator();
+                let behind = matches!(self.speed, Speed::Factor(f) if *state == RunState::Running && speed < f * 0.9);
+                let text = RichText::new(format!("{speed:.2}× real time"));
+                if behind {
+                    ui.label(text.color(WARN_YELLOW))
+                        .on_hover_text("The computer cannot keep up with the chosen speed");
+                } else {
+                    ui.label(text);
+                }
+                ui.separator();
+            }
+            match gdb {
+                (Ok(addr), true) => ui.label(RichText::new(format!("GDB attached ({addr})")).color(OK_GREEN)),
+                (Ok(addr), false) => ui.label(format!("GDB: {addr}")),
+                (Err(e), _) => ui.label(RichText::new(format!("GDB: {e}")).color(ui.visuals().weak_text_color())),
+            };
+            let (text, color) = match usb {
+                UsbStatus::Off => (None, OK_GREEN),
+                UsbStatus::PluggedIn { debugging: true, .. } => (Some("ST-LINK in use by a debugger"), OK_GREEN),
+                UsbStatus::PluggedIn { .. } => (Some("ST-LINK plugged in"), OK_GREEN),
+                UsbStatus::Unplugged { error: None, .. } => (Some("ST-LINK: waiting for usbip attach"), WARN_YELLOW),
+                UsbStatus::Unplugged { error: Some(_), .. } if stlink::restart_needed() => {
+                    (Some("ST-LINK: restart the computer (kernel updated)"), ERR_RED)
+                }
+                UsbStatus::Unplugged { error: Some(_), .. } | UsbStatus::Unavailable(_) => {
+                    (Some("ST-LINK: not attached"), ERR_RED)
+                }
+            };
+            if let Some(text) = text {
+                ui.separator();
+                ui.label(RichText::new(text).color(color)).on_hover_text(usb_hover(usb));
+            }
+            let now = ui.input(|i| i.time);
+            if let Some((text, error, until)) = self.notice.clone() {
+                if now < until {
+                    ui.separator();
+                    let color = if error { ERR_RED } else { ui.visuals().strong_text_color() };
+                    let label = egui::Label::new(RichText::new(text).color(color)).sense(egui::Sense::click());
+                    if ui.add(label).on_hover_text("Click to dismiss").clicked() {
+                        self.notice = None;
+                    }
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(until - now));
+                } else {
+                    self.notice = None;
+                }
+            }
+        });
+    }
+
+    fn help_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_help;
+        let key = |s: &KeyboardShortcut| ctx.format_shortcut(s);
+        egui::Window::new("Controls")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                egui::Grid::new("controls").num_columns(2).spacing([16.0, 4.0]).striped(true).show(ui, |ui| {
+                    let mut row = |what: &str, how: String| {
+                        ui.label(what);
+                        ui.label(RichText::new(how).strong());
+                        ui.end_row();
+                    };
+                    row("Press S0–S7", "Click on a button · keys 0–7".into());
+                    row("Latch S0–S7 (stays pressed)", "Right click on the button".into());
+                    row("USER / RESET of the Nucleo", "Click on the blue / black button".into());
+                    row("Touch the display", "Click or drag on the display".into());
+                    row("Display alone, and back", format!("Right click on the display · {} · Esc", key(&DISPLAY)));
+                    row("AUX0–5: open → GND → 3V3", "Click on the pad".into());
+                    row("Voltage on an Analog pad", "Mouse wheel (±0.05 V) or right click on the pad".into());
+                    row("Load a firmware file", format!("Drop it onto the window · {} · File menu", key(&OPEN)));
+                    row("Run / pause", key(&RUN));
+                    row("Reset", key(&RESET));
+                    row("Save the display as PNG", key(&SAVE));
+                    row(
+                        "See-through · pins · devices · console",
+                        format!("{} · {} · {} · {}", key(&SEE_THROUGH), key(&PINS), key(&DEVICES), key(&CONSOLE)),
+                    );
+                    row("Zoom the whole window", "Ctrl + / Ctrl − / Ctrl 0".into());
+                    row("Keys back from the console to the board", "Esc".into());
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(format!(
+                        "ITS-Board Emulator {} · not affiliated with the HAW Hamburg · the real board is the reference",
+                        env!("CARGO_PKG_VERSION")
+                    ))
+                    .small()
+                    .weak(),
+                );
+            });
+        self.show_help = open;
     }
 }
 
@@ -236,13 +755,8 @@ impl eframe::App for App {
                 new_frame = true;
             }
             if !snap.serial.is_empty() {
-                self.console.push_str(&String::from_utf8_lossy(&snap.serial));
+                self.console.received(&String::from_utf8_lossy(&snap.serial));
                 snap.serial.clear();
-                if self.console.len() > MAX_CONSOLE {
-                    let cut = self.console.len() - MAX_CONSOLE / 2;
-                    let cut = (cut..self.console.len()).find(|&i| self.console.is_char_boundary(i)).unwrap_or(0);
-                    self.console.drain(..cut);
-                }
             }
             (
                 snap.state.clone(),
@@ -279,268 +793,107 @@ impl eframe::App for App {
                 None => self.display = Some(ctx.load_texture("display", image, options)),
             }
         }
+        if let Some(text) = self.files.notice.take() {
+            self.notify(&ctx, text, false);
+        }
 
         // ---- keyboard shortcuts
-        let shortcut = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
-        if shortcut(Key::O) {
+        // keys without Ctrl only while no text field takes them
+        let typing = ctx.text_edit_focused();
+        let shortcut = |s: &KeyboardShortcut| {
+            (s.modifiers != Modifiers::NONE || !typing) && ctx.input_mut(|i| i.consume_shortcut(s))
+        };
+        if shortcut(&OPEN) {
             self.files.open(&ctx, false);
         }
-        if shortcut(Key::R) {
+        if shortcut(&RESET) {
             self.emu.send(Command::Reset);
         }
-        if shortcut(Key::S) {
-            self.save_display_dialog();
+        if shortcut(&SAVE) {
+            self.save_display_dialog(&ctx);
         }
-        if shortcut(Key::D) {
+        if shortcut(&DISPLAY) {
             self.lcd_focus = !self.lcd_focus;
         }
-        if shortcut(Key::P) {
+        if shortcut(&PINS) {
             self.show_pins = !self.show_pins;
         }
-        if shortcut(Key::E) {
+        if shortcut(&SEE_THROUGH) {
+            self.set_see_through(self.see_through.is_none());
+        }
+        if shortcut(&DEVICES) {
             self.show_devices = !self.show_devices;
         }
-        if shortcut(Key::T) {
-            self.see_through = self.see_through.is_none().then_some(SEE_THROUGH_DEFAULT);
+        if shortcut(&CONSOLE) {
+            self.set_console(!self.settings.console);
+        }
+        if shortcut(&QUIT) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        if shortcut(&RUN) {
+            self.toggle_run(&state);
+        }
+        if shortcut(&HELP) {
+            self.show_help = !self.show_help;
         }
 
-        // ---- toolbar
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let open = ui.button("📂 Open…").on_hover_text(
-                    "Open a firmware file (.axf) · Ctrl+O\nShift+click: the emulator's own file browser",
-                );
-                if open.clicked() {
-                    self.files.open(&ctx, ui.input(|i| i.modifiers.shift));
-                }
-                if ui.button("⟲ Reset").on_hover_text("RESET button of the Nucleo board · Ctrl+R").clicked() {
-                    self.emu.send(Command::Reset);
-                }
-                let pause_label = if self.paused { "▶ Run" } else { "⏸ Pause" };
-                if ui.button(pause_label).clicked() {
-                    self.paused = !self.paused;
-                    self.emu.send(Command::SetPaused(self.paused));
-                }
-                ui.separator();
-                ui.label("Speed:");
-                for (label, s) in [
-                    ("1×", Speed::Factor(1.0)),
-                    ("0.1×", Speed::Factor(0.1)),
-                    ("10×", Speed::Factor(10.0)),
-                    ("max", Speed::Max),
-                ] {
-                    if ui.selectable_label(self.speed == s, label).clicked() {
-                        self.speed = s;
-                        self.emu.send(Command::SetSpeed(s));
-                    }
-                }
-                ui.separator();
-                let mut on = self.usb_on;
-                let switch = ui.toggle_value(&mut on, "USB ST-LINK").on_hover_text(usb_hover(&usb));
-                if switch.changed() {
-                    self.usb_on = on;
-                    self.emu.send(Command::SetUsb(on));
-                    self.settings.usb = on;
-                    self.settings.save();
-                }
-                ui.separator();
-                ui.toggle_value(&mut self.lcd_focus, "🖵 Display").on_hover_text(
-                    "Only the display, as large as possible · Ctrl+D, or right click on the display; Esc returns",
-                );
-                let mut see = self.see_through.is_some();
-                if ui
-                    .add_enabled(!self.lcd_focus, egui::Button::selectable(see, "👁 See-through"))
-                    .on_hover_text(
-                        "Show the Nucleo and the display see-through, to see the carrier board under them · Ctrl+T",
-                    )
-                    .clicked()
-                {
-                    see = !see;
-                    self.see_through = see.then_some(SEE_THROUGH_DEFAULT);
-                }
-                if let Some(opacity) = &mut self.see_through
-                    && !self.lcd_focus
-                {
-                    ui.add(egui::Slider::new(opacity, 0.0..=1.0).show_value(false))
-                        .on_hover_text("Opacity of the Nucleo and the display");
-                }
-                ui.toggle_value(&mut self.show_pins, "Pins")
-                    .on_hover_text("Mode and level of every pin of ports A–G · Ctrl+P");
-                let label = match devices.len() {
-                    0 => "🔌 Devices".to_owned(),
-                    n => format!("🔌 Devices ({n})"),
-                };
-                ui.toggle_value(&mut self.show_devices, label)
-                    .on_hover_text("Devices on the header pins: Raspberry Pi Pico, rotary encoder, DS18B20 · Ctrl+E");
-                ui.separator();
-                ui.menu_button("☰", |ui| {
-                    let mut auto = self.settings.auto_reload;
-                    if ui
-                        .checkbox(&mut auto, "Reload the firmware when it is rebuilt")
-                        .on_hover_text(
-                            "Load the .axf file again (and restart) when a new build replaces it — \
-                             not while a debugger is attached",
-                        )
-                        .changed()
-                    {
-                        self.settings.auto_reload = auto;
-                        self.settings.save();
-                        self.emu.send(Command::SetAutoReload(auto));
-                    }
-                    let mut real = !self.ideal_colors;
-                    if ui
-                        .checkbox(&mut real, "Display colours as on the real panel")
-                        .on_hover_text(
-                            "The measured tone response of the board's display (darker mid tones, grey black); \
-                             off: the frame buffer's colours",
-                        )
-                        .changed()
-                    {
-                        self.ideal_colors = !real;
-                        self.emu.send(Command::IdealColors(self.ideal_colors));
-                    }
-                    ui.separator();
-                    let mut open = None;
-                    ui.add_enabled_ui(!self.settings.recent.is_empty(), |ui| {
-                        ui.menu_button("Open recent", |ui| {
-                            for path in &self.settings.recent {
-                                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                                let dir = path.parent().and_then(|d| d.file_name()).unwrap_or_default();
-                                let label = format!("{name}  ({})", dir.to_string_lossy());
-                                if ui.button(label).on_hover_text(path.display().to_string()).clicked() {
-                                    open = Some(path.clone());
-                                    ui.close();
-                                }
-                            }
-                        });
-                    });
-                    if let Some(path) = open {
-                        self.load(path);
-                    }
-                    if ui.button("📷 Save display as PNG…  Ctrl+S").clicked() {
-                        ui.close();
-                        self.save_display_dialog();
-                    }
-                })
-                .response
-                .on_hover_text("Options");
-                ui.separator();
-                // The Nucleo user LEDs are hidden under the display on the real board.
-                for (i, (name, pin, color)) in
-                    [("LD1", "PB0", NUCLEO_GREEN), ("LD2", "PB7", NUCLEO_BLUE), ("LD3", "PB14", NUCLEO_RED)]
-                        .into_iter()
-                        .enumerate()
-                {
-                    let duty = nucleo_duty[i];
-                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                    let b = duty.clamp(0.0, 1.0).powf(1.0 / 2.2);
-                    ui.painter().circle_filled(rect.center(), 5.5, Color32::from_gray(60).lerp_to_gamma(color, b));
-                    resp.on_hover_text(format!(
-                        "Nucleo {name} ({pin}): {:.0} % — under the display on the real board",
-                        duty * 100.0
-                    ));
-                    ui.label(name);
-                }
-            });
-        });
+        // ---- menu bar, toolbar
+        egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui, &ctx, &state));
+        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui, &ctx, &state, &usb, nucleo_duty, devices.len()));
 
         // ---- status bar
         egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let (text, color) = match &state {
-                    RunState::NoFirmware => (
-                        "flash empty — open an .axf file or load one with the debugger".to_owned(),
-                        ui.visuals().weak_text_color(),
-                    ),
-                    RunState::Running => ("running".to_owned(), OK_GREEN),
-                    RunState::Paused => ("paused".to_owned(), Color32::YELLOW),
-                    RunState::Halted => ("halted by debugger".to_owned(), Color32::YELLOW),
-                    RunState::Stopped(why) => (format!("stopped: {why}"), ERR_RED),
-                    RunState::Error(e) => (e.clone(), ERR_RED),
-                };
-                ui.label(RichText::new(text).color(color));
-                ui.separator();
-                if let Some(name) = &firmware {
-                    ui.label(name);
-                    ui.separator();
-                }
-                ui.label(format!("t = {:.3} s", virtual_ns as f64 / 1e9));
-                ui.separator();
-                ui.label(format!("{core_mhz} MHz"));
-                ui.separator();
-                ui.label(format!("{speed:.2}× real time"));
-                ui.separator();
-                match &gdb {
-                    (Ok(addr), true) => ui.label(RichText::new(format!("GDB attached ({addr})")).color(OK_GREEN)),
-                    (Ok(addr), false) => ui.label(format!("GDB: {addr}")),
-                    (Err(e), _) => ui.label(RichText::new(format!("GDB: {e}")).color(ui.visuals().weak_text_color())),
-                };
-                let (text, color) = match &usb {
-                    UsbStatus::Off => (None, OK_GREEN),
-                    UsbStatus::PluggedIn { debugging: true, .. } => (Some("ST-LINK in use by a debugger"), OK_GREEN),
-                    UsbStatus::PluggedIn { .. } => (Some("ST-LINK plugged in"), OK_GREEN),
-                    UsbStatus::Unplugged { error: None, .. } => {
-                        (Some("ST-LINK: waiting for usbip attach"), Color32::YELLOW)
-                    }
-                    UsbStatus::Unplugged { error: Some(_), .. } if stlink::restart_needed() => {
-                        (Some("ST-LINK: restart the computer (kernel updated)"), ERR_RED)
-                    }
-                    UsbStatus::Unplugged { error: Some(_), .. } | UsbStatus::Unavailable(_) => {
-                        (Some("ST-LINK: not attached"), ERR_RED)
-                    }
-                };
-                if let Some(text) = text {
-                    ui.separator();
-                    ui.label(RichText::new(text).color(color)).on_hover_text(usb_hover(&usb));
-                }
-            });
+            self.status_bar(ui, &state, &firmware, virtual_ns, core_mhz, speed, &gdb, &usb);
         });
 
-        // ---- serial console
-        egui::Panel::bottom("console").resizable(true).default_size(180.0).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Virtual COM port (USART3, 115200 8N1)").strong());
-                if ui.small_button("clear").clicked() {
-                    self.console.clear();
-                }
-            });
-            let input_height = 28.0;
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .auto_shrink([false, false])
-                .max_height(ui.available_height() - input_height)
-                .show(ui, |ui| {
-                    ui.add(egui::Label::new(RichText::new(&self.console).monospace()).wrap());
-                });
-            ui.horizontal(|ui| {
-                let edit = ui.add(
-                    egui::TextEdit::singleline(&mut self.console_input)
-                        .hint_text("type and press Enter to send")
-                        .desired_width(f32::INFINITY),
-                );
-                if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                    let mut data = std::mem::take(&mut self.console_input).into_bytes();
-                    data.push(b'\n');
-                    self.emu.send(Command::Serial(data));
-                    edit.request_focus();
-                }
-            });
-        });
+        // ---- serial console, below the board or right of it
+        if self.settings.console {
+            self.place_console(&ctx);
+            let panel = if self.console_right {
+                egui::Panel::right("console-right").resizable(true).default_size(CONSOLE_W).min_size(240.0)
+            } else {
+                egui::Panel::bottom("console").resizable(true).default_size(CONSOLE_H).min_size(80.0)
+            };
+            let action = panel.show(ui, |ui| self.console.show(ui)).inner;
+            if let Some(bytes) = action.send {
+                self.emu.send(Command::Serial(bytes));
+            }
+            if action.hide {
+                self.set_console(false);
+            }
+            if action.save {
+                self.save_console_dialog(&ctx);
+            }
+            if action.options_changed {
+                self.settings.line_ending = self.console.line_ending;
+                self.settings.echo = self.console.echo;
+                self.settings.save();
+            }
+        }
 
         // ---- devices
         if self.show_devices {
-            egui::Panel::right("devices").resizable(true).default_size(340.0).show(ui, |ui| {
+            egui::Panel::right("devices").resizable(true).default_size(DEVICES_W).show(ui, |ui| {
                 self.devices.show(ui, &devices, &mut self.settings, &self.emu);
             });
         }
 
         // ---- pin inspector
         if let Some(pins) = &pins {
-            egui::Panel::right("pins").resizable(false).show(ui, |ui| crate::pins::show(ui, pins));
+            egui::Panel::right("pins")
+                .resizable(true)
+                .default_size(crate::pins::MIN_WIDTH + 8.0)
+                .min_size(crate::pins::MIN_WIDTH)
+                .show(ui, |ui| crate::pins::show(ui, pins));
         }
 
         // ---- the board
-        let typing = ctx.memory(|m| m.focused().is_some());
+        let open_hint = (state == RunState::NoFirmware).then(|| {
+            format!(
+                "Click here or press {} to open an .axf file,\nor drop it onto the window",
+                ctx.format_shortcut(&OPEN)
+            )
+        });
         let board_state = BoardState {
             led_duty: &led_duty,
             inputs,
@@ -549,12 +902,14 @@ impl eframe::App for App {
             latched: &self.latched,
             analog: &self.analog,
             dac1,
+            nucleo_duty: &nucleo_duty,
+            open_hint: open_hint.as_deref(),
         };
         let view = match self.see_through {
             Some(opacity) => board::View { nucleo_opacity: opacity, shield_opacity: opacity },
             None => board::View::default(),
         };
-        let input = egui::CentralPanel::default()
+        let central = egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::from_gray(28)).inner_margin(10.0))
             .show(ui, |ui| {
                 if self.lcd_focus {
@@ -566,10 +921,22 @@ impl eframe::App for App {
                     })
                     .inner
                 }
-            })
-            .inner;
-        if input.focus_toggled || (self.lcd_focus && !typing && ctx.input(|i| i.key_pressed(Key::Escape))) {
+            });
+        let input = central.inner;
+        if input.focus_toggled {
             self.lcd_focus = !self.lcd_focus;
+        }
+        // Esc closes the help, else leaves the display view; not when it only
+        // left a text field or closes the file browser
+        if !typing && !self.text_was_focused && !self.files.is_open() && ctx.input(|i| i.key_pressed(Key::Escape)) {
+            if self.show_help {
+                self.show_help = false;
+            } else {
+                self.lcd_focus = false;
+            }
+        }
+        if input.open_requested {
+            self.files.open(&ctx, false);
         }
 
         const KEYS: [Key; 8] = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7];
@@ -577,7 +944,8 @@ impl eframe::App for App {
             if input.latch_toggled[i] {
                 self.latched[i] = !self.latched[i];
             }
-            let down = input.buttons[i] || self.latched[i] || (!typing && ctx.input(|inp| inp.key_down(key)));
+            let key_down = !typing && ctx.input(|inp| inp.key_down(key) && !inp.modifiers.command);
+            let down = input.buttons[i] || self.latched[i] || key_down;
             if down != self.sent_buttons[i] {
                 self.sent_buttons[i] = down;
                 self.emu.send(Command::Button(i as u32, down));
@@ -607,6 +975,29 @@ impl eframe::App for App {
             self.emu.send(Command::Analog(n, volts));
         }
 
+        self.help_window(&ctx);
+
+        // ---- drag & drop of firmware files: a hint while a file is over the window
+        if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
+            let painter =
+                ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("drop-target")));
+            let rect = central.response.rect.shrink(6.0);
+            painter.rect_filled(rect, 8.0, Color32::from_black_alpha(170));
+            painter.rect_stroke(
+                rect,
+                8.0,
+                egui::Stroke::new(2.0, ctx.global_style().visuals.selection.bg_fill),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Drop to load the firmware",
+                egui::FontId::proportional(28.0),
+                Color32::WHITE,
+            );
+        }
+
         if let Some(shot) = &mut self.self_screenshot {
             shot.tick(&ctx);
         }
@@ -624,6 +1015,7 @@ impl eframe::App for App {
             Some(name) => format!("{name} — ITS-Board Emulator"),
             None => "ITS-Board Emulator".to_owned(),
         };
+        self.text_was_focused = ctx.text_edit_focused();
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;

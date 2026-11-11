@@ -68,16 +68,20 @@ cargo run --release -p its-emu -- path/to/Program.axf --seconds 10 \
 GUI: keys `0`–`7` press S0–S7, right click latches a button, clicking the
 display is a touch, clicking an AUX pad connects it to GND/3V3, the mouse
 wheel or a right click on a pad of the Analog header applies a voltage,
-firmware files can be dropped onto the window. A right click on the display
-(or *Display*, Ctrl+D) shows it alone, as large as the window allows, with
-the LEDs, S0–S7 and the USER button in a row below; right click or Esc
-returns. *See-through* (Ctrl+T) makes the Nucleo and the display
-transparent (slider: opacity), to see the carrier board under them. When a
-new build replaces the firmware file, the GUI loads it again and restarts
-(not while a debugger is attached; switch off in the ☰ menu, which also
-saves the display as a PNG, Ctrl+S). *Pins* (Ctrl+P) shows the mode and
-level of every pin of ports A–G and what the board connects to it. Ctrl+O
-opens a file (☰ also lists the recent ones), Ctrl+R resets.
+firmware files can be dropped onto the window (or click the empty display).
+A right click on the display (or *Display*, Ctrl+D) shows it alone, as large
+as the window allows, with the LEDs, S0–S7, USER, RESET and LD1–LD3 in a row
+below; right click or Esc returns. *See-through* (Ctrl+T) makes the Nucleo
+and the display transparent (slider: opacity), to see the carrier board
+under them. When a new build replaces the firmware file, the GUI loads it
+again and restarts (not while a debugger is attached; switch off in the
+*Emulation* menu). *Pins* (Ctrl+P) shows the mode and level of every pin of
+ports A–G and what the board connects to it. The serial console (Ctrl+L)
+sits below the board, or right of it in wide windows (*View* menu); it can
+echo what is sent, choose what Enter sends, send every key at once, and
+copy or save its text. Space runs/pauses, Ctrl+R resets, Ctrl+O opens a
+file (*File* also lists the recent ones and saves the display as a PNG,
+Ctrl+S); F1 lists all controls.
 
 *Devices* (Ctrl+E) connects and removes devices on the header pins while the
 board runs: a Raspberry Pi Pico (firmware file and wiring, see below), a

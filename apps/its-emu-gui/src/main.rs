@@ -5,6 +5,7 @@
 
 mod app;
 mod board;
+mod console;
 mod devices;
 mod emu;
 mod files;
