@@ -21,6 +21,7 @@ use crate::scs::{self, PPB_BASE, PPB_SIZE, Scs, ScsAction};
 use crate::timing::{self, BlockTiming, DivSite};
 
 mod delay;
+mod poll;
 
 /// Address space layout of the emulated MCU.
 #[derive(Debug, Clone)]
@@ -364,6 +365,79 @@ impl System {
         }
     }
 
+    /// A peripheral read by the core (the MMIO callback).
+    fn mmio_read(&mut self, addr: u32, size: u32) -> u32 {
+        let ws = self.bus.wait_states(addr, false, self.clock.cycles() - self.mmio_shift);
+        self.clock.advance(ws);
+        let (mut ctx, bus) = self.ctx();
+        let value = bus.read(&mut ctx, addr, size);
+        self.service_master();
+        let now = self.clock.cycles();
+        let until = self.bus.read_stable_until(addr, &self.clock);
+        self.idle.note_read(until, now);
+        self.clip_slice_to_events();
+        value
+    }
+
+    /// The block hook entering the block at `addr`: the pipeline refill of a
+    /// taken branch at the end of the previous block (for unconditional
+    /// branches included in the block's cycles). Returns whether a branch
+    /// led here.
+    #[inline]
+    fn enter_block(&mut self, addr: u64) -> bool {
+        match self.branch_from.take() {
+            Some((_, false)) => true,
+            Some((fallthrough, true)) if fallthrough != addr => {
+                self.clock.advance(1);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// What the block at `addr` (cached timing `slot`) costs when entered so.
+    #[inline]
+    fn block_charge(&self, slot: usize, addr: u64, size: u32, entered_by_branch: bool) -> BlockCharge {
+        // Read in place: copying the whole entry costs a store-forwarding stall.
+        let info = self.block_insns.at(slot);
+        let refill = if entered_by_branch { info.entry_penalty } else { 0 };
+        let (saving, stall, continues) = match self.fell_through {
+            Some((prev_end, last_load_rt, last_fp_dst)) if prev_end == addr => {
+                (info.continuation_saving(last_load_rt), info.continuation_stall(last_fp_dst), true)
+            }
+            _ => (0, 0, false),
+        };
+        let end = addr + u64::from(size);
+        let branch_from = if info.ends_with_branch {
+            Some((end, true))
+        } else if info.ends_with_jump {
+            Some((end, false))
+        } else {
+            None
+        };
+        BlockCharge {
+            cycles: u64::from(info.cycles + refill + stall - saving),
+            continues,
+            stores: info.stores,
+            side_effects: info.side_effects,
+            branch_from,
+            fell_through: branch_from.is_none().then_some((end, info.last_load_rt, info.last_fp_dst)),
+        }
+    }
+
+    /// Accounts for the block at `addr` before it executes.
+    #[inline]
+    fn commit_block(&mut self, addr: u64, size: u32, charge: &BlockCharge) {
+        self.clock.advance(charge.cycles);
+        self.block = Some((addr, size));
+        self.cyccnt_reads = 0;
+        // Peripheral accesses see the time of their block; a block that
+        // continues a split one counts as part of it.
+        self.mmio_shift = if charge.continues { self.mmio_shift + charge.cycles } else { 0 };
+        self.fell_through = charge.fell_through;
+        self.branch_from = charge.branch_from;
+    }
+
     /// Cycles skipped by idle-loop fast-forwarding since reset.
     pub fn idle_skipped_cycles(&self) -> u64 {
         self.idle.skipped_cycles + self.idle.delay.skipped_cycles
@@ -391,6 +465,16 @@ impl System {
             _ => Prot::ALL,
         }
     }
+}
+
+/// The block hook's accounting for one block (see `System::block_charge`).
+struct BlockCharge {
+    cycles: u64,
+    continues: bool,
+    stores: bool,
+    side_effects: bool,
+    branch_from: Option<(u64, bool)>,
+    fell_through: Option<(u64, Option<u8>, Option<u8>)>,
 }
 
 /// Backing store of a memory region, shared by the cores of a multi-core MCU.
@@ -581,10 +665,18 @@ struct IdleDetector {
     unpromising_next: usize,
     /// Visits of `head` to skip before comparing again (back-off).
     skip: u32,
+    /// Blocks in the last period (between visits of `head`).
+    period_blocks: u32,
     backoff: u32,
     /// Total cycles skipped (statistics).
     skipped_cycles: u64,
     delay: delay::DelayDetector,
+    /// The block hook stops at this loop head for `Machine::fast_forward_poll`
+    /// (`poll_ready` then).
+    poll_armed: Option<u64>,
+    poll_ready: bool,
+    /// Loop heads `fast_forward_poll` cannot run (most recent first).
+    poll_failed: [Option<u64>; 4],
 }
 
 struct Snapshot {
@@ -611,6 +703,8 @@ unsafe extern "C" {
     fn uc_its_stop_exception(uc: *mut std::ffi::c_void) -> std::ffi::c_int;
     // R0..R15 and xPSR into `out` (17 words)
     fn uc_its_core_regs(uc: *mut std::ffi::c_void, out: *mut u32);
+    // sets R0..R15 and the NZCV flags (code the emulator ran in its place)
+    fn uc_its_set_core_regs(uc: *mut std::ffi::c_void, regs: *const u32, nzcv: u32);
 }
 
 /// QEMU's EXCP_YIELD: the core stopped at WFE or YIELD.
@@ -746,6 +840,17 @@ impl IdleDetector {
         self.stable_until = u64::MAX;
     }
 
+    /// The loop at `head` is short and `fast_forward_poll` may run it.
+    fn polls_here(&self) -> bool {
+        self.period_blocks <= 8 && !self.poll_failed.contains(&Some(self.head))
+    }
+
+    /// `fast_forward_poll` cannot run the loop at `head`: not again.
+    fn poll_failed(&mut self, head: u64) {
+        self.poll_failed.rotate_right(1);
+        self.poll_failed[0] = Some(head);
+    }
+
     /// Called at the start of every block. Returns `Some(t)` if the core
     /// repeats the same loop iteration until cycle `t` (at most the end of the
     /// slice; whole iterations, so `t` is the start of one).
@@ -857,7 +962,8 @@ impl IdleDetector {
         }
         let action = {
             let d = &mut uc.get_data_mut().idle;
-            d.blocks_since_head = 0;
+            let blocks = std::mem::replace(&mut d.blocks_since_head, 0);
+            d.period_blocks = blocks;
             if !d.clean {
                 // Outside influence: start over, but only snapshot after a
                 // clean period so that busy loops pay nothing.
@@ -887,6 +993,13 @@ impl IdleDetector {
                 if regs_same && d.stored && !snap.ram {
                     // The loop stores: compare RAM from the next visit on.
                     Self::take_snapshot(uc, true);
+                    None
+                } else if !regs_same && !d.stored && d.stable_until != u64::MAX && d.polls_here() {
+                    // Only loads, of peripheral registers that change with
+                    // time: a polling loop, run in place of Unicorn from the
+                    // next visit on.
+                    let d = &mut uc.get_data_mut().idle;
+                    d.poll_armed = Some(d.head);
                     None
                 } else if !regs_same || (d.stored && !Self::ram_unchanged(sys)) {
                     // RAM is only worth copying once the registers repeat.
@@ -1098,18 +1211,7 @@ impl Machine {
                 u64::from(base),
                 u64::from(size),
                 Some(move |uc: &mut Unicorn<System>, off: u64, size: usize| {
-                    let sys = uc.get_data_mut();
-                    let addr = base + off as u32;
-                    let ws = sys.bus.wait_states(addr, false, sys.clock.cycles() - sys.mmio_shift);
-                    sys.clock.advance(ws);
-                    let (mut ctx, bus) = sys.ctx();
-                    let value = bus.read(&mut ctx, addr, size as u32);
-                    sys.service_master();
-                    let now = sys.clock.cycles();
-                    let until = sys.bus.read_stable_until(addr, &sys.clock);
-                    sys.idle.note_read(until, now);
-                    sys.clip_slice_to_events();
-                    u64::from(value)
+                    u64::from(uc.get_data_mut().mmio_read(base + off as u32, size as u32))
                 }),
                 Some(move |uc: &mut Unicorn<System>, off: u64, size: usize, value: u64| {
                     let sys = uc.get_data_mut();
@@ -1207,16 +1309,14 @@ impl Machine {
                 sys.block = None;
                 return;
             }
-            // Taken branch at the end of the previous block: pipeline refill
-            // (for unconditional branches included in the block's cycles).
-            let entered_by_branch = match sys.branch_from.take() {
-                Some((_, false)) => true,
-                Some((fallthrough, true)) if fallthrough != addr => {
-                    sys.clock.advance(1);
-                    true
-                }
-                _ => false,
-            };
+            if sys.idle.poll_armed == Some(addr) {
+                // A polling loop: `Machine::fast_forward_poll` runs it from here.
+                sys.idle.poll_armed = None;
+                sys.idle.poll_ready = true;
+                let _ = uc.emu_stop();
+                return;
+            }
+            let entered_by_branch = sys.enter_block(addr);
             if sys.clock.cycles() >= sys.slice_end && !sys.continue_after_events() {
                 let _ = uc.emu_stop();
                 return;
@@ -1229,28 +1329,9 @@ impl Machine {
                 },
             };
             let sys = uc.get_data_mut();
-            // Read in place: copying the whole entry costs a store-forwarding stall.
-            let info = sys.block_insns.at(slot);
-            let refill = if entered_by_branch { info.entry_penalty } else { 0 };
-            let (saving, stall, continues) = match sys.fell_through {
-                Some((prev_end, last_load_rt, last_fp_dst)) if prev_end == addr => {
-                    (info.continuation_saving(last_load_rt), info.continuation_stall(last_fp_dst), true)
-                }
-                _ => (0, 0, false),
-            };
-            let cycles = u64::from(info.cycles + refill + stall - saving);
-            let (stores, side_effects) = (info.stores, info.side_effects);
-            let end = addr + u64::from(size);
-            let next_branch_from = if info.ends_with_branch {
-                Some((end, true))
-            } else if info.ends_with_jump {
-                Some((end, false))
-            } else {
-                None
-            };
-            let next_fell_through = next_branch_from.is_none().then_some((end, info.last_load_rt, info.last_fp_dst));
+            let charge = sys.block_charge(slot, addr, size, entered_by_branch);
             if sys.idle_skipping
-                && let Some(until) = IdleDetector::on_block(uc, addr, stores, side_effects)
+                && let Some(until) = IdleDetector::on_block(uc, addr, charge.stores, charge.side_effects)
             {
                 let sys = uc.get_data_mut();
                 let now = sys.clock.cycles();
@@ -1271,15 +1352,7 @@ impl Machine {
                     sys.clock.advance(until - now);
                 }
             }
-            let sys = uc.get_data_mut();
-            sys.clock.advance(cycles);
-            sys.block = Some((addr, size));
-            sys.cyccnt_reads = 0;
-            // Peripheral accesses see the time of their block; a block that
-            // continues a split one counts as part of it.
-            sys.mmio_shift = if continues { sys.mmio_shift + cycles } else { 0 };
-            sys.fell_through = next_fell_through;
-            sys.branch_from = next_branch_from;
+            uc.get_data_mut().commit_block(addr, size, &charge);
         })?;
 
         uc.add_intr_hook(Self::on_cpu_exception)?;
@@ -2139,8 +2212,16 @@ impl Machine {
                     other => return other,
                 }
             }
-            let result = self.uc.emu_start(u64::from(pc | 1), u64::MAX, 0, 0);
-            self.uc.get_data_mut().debug.retired();
+            let result = loop {
+                let result = self.uc.emu_start(u64::from(self.pc() | 1), u64::MAX, 0, 0);
+                self.uc.get_data_mut().debug.retired();
+                // A polling loop: run here, then Unicorn continues after it
+                // (as if it had run the loop), unless the slice ended in it.
+                if result.is_ok() && std::mem::take(&mut self.uc.get_data_mut().idle.poll_ready) && self.fast_forward_poll() {
+                    continue;
+                }
+                break result;
+            };
             let at = self.pc();
             if let Err(err) = result {
                 self.on_emu_error(err);

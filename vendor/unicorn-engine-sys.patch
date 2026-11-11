@@ -701,7 +701,7 @@
  /*
 --- a/qemu/target/arm/unicorn_arm.c
 +++ b/qemu/target/arm/unicorn_arm.c
-@@ -131,6 +131,18 @@
+@@ -131,6 +131,31 @@
      return xpsr_read(env) & mask;
  }
  
@@ -717,10 +717,23 @@
 +    out[16] = v7m_mrs_xpsr(env, 3);
 +}
 +
++// ITS-EMU: sets R0..R15 (R15: the PC, Thumb state kept) and the NZCV flags
++// (bits 31..28 of `nzcv`), for code the emulator ran in its place (polling
++// loops). Not while the engine runs.
++UNICORN_EXPORT
++void uc_its_set_core_regs(uc_engine *uc, const uint32_t *regs, uint32_t nzcv)
++{
++    CPUARMState *env = uc->cpu->env_ptr;
++
++    memcpy(env->regs, regs, 16 * sizeof(uint32_t));
++    env->regs[15] &= ~1u;
++    xpsr_write(env, nzcv, XPSR_NZCV);
++}
++
  static void v7m_msr_xpsr(CPUARMState *env, uint32_t mask, uint32_t reg,
                           uint32_t val)
  {
-@@ -154,6 +166,12 @@
+@@ -154,6 +179,12 @@
      }
  
      xpsr_write(env, val, xpsrmask);
@@ -733,7 +746,7 @@
  }
  
  static uc_err read_cp_reg(CPUARMState *env, uc_arm_cp_reg *cp)
-@@ -578,6 +596,8 @@
+@@ -578,6 +609,8 @@
          return false;
      case EXCP_UDEF:
      case EXCP_YIELD:
@@ -742,7 +755,7 @@
          return true;
      case EXCP_INVSTATE:
          uc->invalid_error = UC_ERR_EXCEPTION;
-@@ -770,6 +790,8 @@
+@@ -770,6 +803,8 @@
      return UC_ERR_OK;
  }
  
@@ -751,7 +764,7 @@
  DEFAULT_VISIBILITY
  void uc_init(struct uc_struct *uc)
  {
-@@ -788,4 +810,5 @@
+@@ -788,4 +823,5 @@
      uc->context_save = uc_arm_context_save;
      uc->context_restore = uc_arm_context_restore;
      uc_common_init(uc);
