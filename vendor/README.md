@@ -44,7 +44,9 @@ crates.io (GPL-2.0, see `unicorn-engine-sys/COPYING`), used through
   "not dirty" slow path, which Unicorn takes once per TLB entry anyway), and
   `uc_its_rearm_writes` re-arms it for the TLB of the current MMU index.
 - `uc_its_core_regs` reads R0..R15 and xPSR in one call (idle detection at
-  every loop head), without `uc_reg_read_batch`'s dispatch per register.
+  every loop head), without `uc_reg_read_batch`'s dispatch per register;
+  `uc_its_set_core_regs` sets R0..R15 and NZCV after the emulator ran a
+  polling loop in Unicorn's place.
 - WFE and YIELD (QEMU's EXCP_YIELD) stop emulation as an invalid
   instruction, like an undefined one (EXCP_UDEF); `uc_its_stop_exception`
   tells which of the two it was.
