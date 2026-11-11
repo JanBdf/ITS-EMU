@@ -22,6 +22,8 @@ pub struct FilePicker {
     state: State,
     /// Directory the last file was taken from.
     last_dir: Option<PathBuf>,
+    /// Message for the user (taken by the application).
+    pub notice: Option<String>,
 }
 
 enum State {
@@ -40,7 +42,7 @@ impl FilePicker {
     pub fn new(last_dir: Option<PathBuf>) -> Self {
         // ITS_EMU_FILE_DIALOG=builtin|native chooses the dialog
         let native = std::env::var("ITS_EMU_FILE_DIALOG").map_or(true, |v| v != "builtin");
-        Self { native, state: State::Idle, last_dir }
+        Self { native, state: State::Idle, last_dir, notice: None }
     }
 
     /// Opens the system's file dialog, or the built-in one (`builtin`, or
@@ -78,6 +80,11 @@ impl FilePicker {
             });
         }
         self.state = State::Native { result, since };
+    }
+
+    /// A dialog is open.
+    pub fn is_open(&self) -> bool {
+        !matches!(self.state, State::Idle)
     }
 
     /// Draws the built-in browser if it is open; returns the chosen file.
@@ -120,6 +127,11 @@ impl FilePicker {
                      backend such as xdg-desktop-portal-gtk, or zenity); using the built-in one"
                 );
                 self.native = false;
+                self.notice = Some(
+                    "The system's file dialog did not open (no xdg-desktop-portal FileChooser or zenity); \
+                     using the built-in file browser"
+                        .to_owned(),
+                );
                 self.state = State::Builtin(Browser::new(self.start_dir()));
                 None
             }

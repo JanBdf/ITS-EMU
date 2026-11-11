@@ -226,6 +226,10 @@ pub struct BoardState<'a> {
     pub analog: &'a [Option<f32>; 8],
     /// DAC1 output while it is enabled.
     pub dac1: Option<f32>,
+    /// Brightness of the Nucleo's LD1–LD3.
+    pub nucleo_duty: &'a [f32; 3],
+    /// No firmware: what the display says about opening one.
+    pub open_hint: Option<&'a str>,
 }
 
 /// What the user did on the board in this frame.
@@ -245,6 +249,8 @@ pub struct BoardInput {
     pub analog: Option<(usize, Option<f32>)>,
     /// The display was right-clicked (switch between the board and the display alone).
     pub focus_toggled: bool,
+    /// The empty display was clicked (open a firmware file).
+    pub open_requested: bool,
 }
 
 /// Maps design units to screen coordinates.
@@ -327,7 +333,7 @@ impl Pcb<'_> {
                 (0.0, tint(lerp(color, Color32::WHITE, 0.9), a(1.0))),
                 (0.28, tint(lerp(color, Color32::WHITE, 0.6), a(1.0))),
                 (0.45, tint(lerp(color, Color32::WHITE, 0.15), a(0.8))),
-                (0.7, tint(color, a(0.35))),
+                (0.7, tint(color, a(0.5))),
                 (1.0, tint(color, 0)),
             ],
         );
@@ -342,6 +348,36 @@ impl Pcb<'_> {
             Stroke::new(self.len(1.0), Color32::from_black_alpha(110)),
         );
     }
+}
+
+/// Gives a spot of the drawing a name for screen readers.
+fn named(resp: egui::Response, role: egui::Role, label: impl ToString) -> egui::Response {
+    let label = label.to_string();
+    resp.widget_info(|| egui::WidgetInfo::labeled(role, true, &label));
+    resp
+}
+
+/// The call to open a firmware file on the empty display.
+fn draw_open_hint(painter: &egui::Painter, glass: Rect, hint: &str, hovered: bool) {
+    let size = glass.height() / 14.0;
+    let color = if hovered { Color32::from_gray(235) } else { Color32::from_gray(170) };
+    painter.text(
+        glass.center() - Vec2::new(0.0, size * 0.9),
+        egui::Align2::CENTER_CENTER,
+        "No firmware",
+        egui::FontId::proportional(size * 1.3),
+        color,
+    );
+    // centred lines, wrapped to the glass
+    let mut job = egui::text::LayoutJob::simple(
+        hint.to_owned(),
+        egui::FontId::proportional(size * 0.75),
+        color.gamma_multiply(0.85),
+        glass.width() * 0.85,
+    );
+    job.halign = egui::Align::Center;
+    let galley = painter.layout_job(job);
+    painter.galley(Pos2::new(glass.center().x, glass.center().y + size * 0.3), galley, Color32::WHITE);
 }
 
 fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -415,32 +451,34 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
         let (color, pin) =
             if bit >= 8 { (LED_YELLOW, format!("PE{}", bit - 8)) } else { (LED_BLUE, format!("PD{bit}")) };
         pcb.led(x, LED_Y, color, state.led_duty[bit]);
-        ui.interact(
+        let text = format!("OUT{bit} = {pin} (LED D{}): {:.0} %", bit + 8, state.led_duty[bit] * 100.0);
+        let resp = ui.interact(
             pcb.r(x - 14.0, LED_Y - 22.0, x + 14.0, LED_Y + 52.0),
             ui.scope_id().with(("out", bit)),
             Sense::hover(),
-        )
-        .on_hover_text(format!("OUT{bit} = {pin} (LED D{}): {:.0} %", bit + 8, state.led_duty[bit] * 100.0));
+        );
+        named(resp, egui::Role::Label, &text).on_hover_text(text);
     }
 
     // ---- In: IN7..IN0 (PF7..PF0), red LEDs show the line level, buttons S7..S0
     for bit in 0..8 {
         let high = state.inputs & (1 << bit) != 0;
         pcb.led(IN_X[bit], LED_Y, LED_RED, if high { 1.0 } else { 0.0 });
-        ui.interact(
+        let text = format!("IN{bit} = PF{bit} (LED D{bit}): {}", if high { "high" } else { "low" });
+        let resp = ui.interact(
             pcb.r(IN_X[bit] - 14.0, LED_Y - 22.0, IN_X[bit] + 14.0, LED_Y + 52.0),
             ui.scope_id().with(("in", bit)),
             Sense::hover(),
-        )
-        .on_hover_text(format!("IN{bit} = PF{bit} (LED D{bit}): {}", if high { "high" } else { "low" }));
+        );
+        named(resp, egui::Role::Label, &text).on_hover_text(text);
 
         let (x, y) = (BUTTON_X[bit], BUTTON_Y);
-        let resp = ui
-            .interact(
-                pcb.r(x - 14.0, y - 14.0, x + 14.0, y + 14.0),
-                ui.scope_id().with(("button", bit)),
-                Sense::click_and_drag(),
-            )
+        let resp = ui.interact(
+            pcb.r(x - 14.0, y - 14.0, x + 14.0, y + 14.0),
+            ui.scope_id().with(("button", bit)),
+            Sense::click_and_drag(),
+        );
+        let resp = named(resp, egui::Role::Button, format!("Button S{bit}"))
             .on_hover_text(format!("S{bit} → IN{bit} (PF{bit}) · key {bit} · right click latches"));
         let held = resp.is_pointer_button_down_on() && primary_down(ui);
         input.buttons[bit] = held;
@@ -474,12 +512,12 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
             Some(false) => "GND",
             Some(true) => "3V3",
         };
-        let hit = ui
-            .interact(
-                pcb.r(AUX_X - 10.0, y - 10.0, AUX_X + 30.0, y + 10.0),
-                ui.scope_id().with(("aux", n)),
-                Sense::click(),
-            )
+        let hit = ui.interact(
+            pcb.r(AUX_X - 10.0, y - 10.0, AUX_X + 30.0, y + 10.0),
+            ui.scope_id().with(("aux", n)),
+            Sense::click(),
+        );
+        let hit = named(hit, egui::Role::Button, format!("AUX{n} pad: {txt}"))
             .on_hover_text(format!("AUX{n} / INT{n} = PG{n}: {txt} — click: open → GND → 3V3"));
         if hit.clicked() {
             input.int_clicked = Some(n);
@@ -512,9 +550,12 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
             hover += &format!(", DAC1 output {d:.2} V");
         }
         hover += " — scroll: ±0.05 V, right click: set or open";
-        let resp = ui
-            .interact(pcb.r(x - 10.0, y - 10.0, x + 10.0, y + 10.0), ui.scope_id().with(("analog", n)), Sense::click())
-            .on_hover_text(hover);
+        let resp = ui.interact(
+            pcb.r(x - 10.0, y - 10.0, x + 10.0, y + 10.0),
+            ui.scope_id().with(("analog", n)),
+            Sense::click(),
+        );
+        let resp = named(resp, egui::Role::Button, hover.clone()).on_hover_text(hover);
         if resp.hovered() {
             let scroll: f32 = ui.input(|i| {
                 i.raw
@@ -549,24 +590,22 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
     }
 
     // ---- Nucleo buttons
-    let user = ui
-        .interact(
-            pcb.r(USER.0 - 13.0, USER.1 - 13.0, USER.0 + 13.0, USER.1 + 13.0),
-            ui.scope_id().with("user"),
-            Sense::click_and_drag(),
-        )
-        .on_hover_text("USER button B1 (PC13)");
+    let user = ui.interact(
+        pcb.r(USER.0 - 13.0, USER.1 - 13.0, USER.0 + 13.0, USER.1 + 13.0),
+        ui.scope_id().with("user"),
+        Sense::click_and_drag(),
+    );
+    let user = named(user, egui::Role::Button, "USER button B1").on_hover_text("USER button B1 (PC13)");
     input.user = user.is_pointer_button_down_on();
     if input.user {
         pcb.pressed(USER.0, USER.1, 8.5);
     }
-    let reset = ui
-        .interact(
-            pcb.r(RESET.0 - 13.0, RESET.1 - 13.0, RESET.0 + 13.0, RESET.1 + 13.0),
-            ui.scope_id().with("reset"),
-            Sense::click(),
-        )
-        .on_hover_text("RESET button B2");
+    let reset = ui.interact(
+        pcb.r(RESET.0 - 13.0, RESET.1 - 13.0, RESET.0 + 13.0, RESET.1 + 13.0),
+        ui.scope_id().with("reset"),
+        Sense::click(),
+    );
+    let reset = named(reset, egui::Role::Button, "RESET button B2").on_hover_text("RESET button B2 · Ctrl+R");
     input.reset_clicked = reset.clicked();
     if reset.is_pointer_button_down_on() {
         pcb.pressed(RESET.0, RESET.1, 8.5);
@@ -576,9 +615,16 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
     let xs = GLASS.map(|p| p.0);
     let ys = GLASS.map(|p| p.1);
     let glass = pcb.r(xs[0].max(xs[3]), ys[0].max(ys[1]), xs[1].min(xs[2]), ys[2].min(ys[3]));
-    let touch = ui
-        .interact(glass, ui.scope_id().with("display"), Sense::click_and_drag())
-        .on_hover_cursor(egui::CursorIcon::Crosshair);
+    let touch = ui.interact(glass, ui.scope_id().with("display"), Sense::click_and_drag());
+    let touch = named(touch, egui::Role::Image, "Display (touch screen)");
+    if let Some(hint) = state.open_hint {
+        draw_open_hint(&painter, glass, hint, touch.hovered());
+        input.open_requested = touch.clicked();
+        input.focus_toggled = touch.secondary_clicked();
+        touch.on_hover_cursor(egui::CursorIcon::PointingHand);
+        return input;
+    }
+    let touch = touch.on_hover_cursor(egui::CursorIcon::Crosshair);
     let to_px = |p: Pos2| {
         let (x, y) = glass_pixel((p.x - outer.min.x) / s + BOARD_ORIGIN.0, (p.y - outer.min.y) / s + BOARD_ORIGIN.1);
         (x.clamp(0.0, 479.99), y.clamp(0.0, 319.99))
@@ -631,38 +677,46 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
             painter.rect_filled(glass, 0.0, Color32::from_rgb(8, 9, 10));
         }
     }
-    let touch = ui
-        .interact(glass, ui.scope_id().with("lcd"), Sense::click_and_drag())
-        .on_hover_cursor(egui::CursorIcon::Crosshair);
-    let to_px = |p: Pos2| {
-        let v = (p - glass.min) / glass.size();
-        ((v.x * 480.0).clamp(0.0, 479.99), (v.y * 320.0).clamp(0.0, 319.99))
-    };
-    input.touch = (touch.is_pointer_button_down_on() && primary_down(ui))
-        .then(|| touch.interact_pointer_pos())
-        .flatten()
-        .filter(|p| glass.contains(*p))
-        .map(to_px);
+    let touch = ui.interact(glass, ui.scope_id().with("lcd"), Sense::click_and_drag());
+    let touch = named(touch, egui::Role::Image, "Display (touch screen)");
     input.focus_toggled = touch.secondary_clicked();
-    if let Some((x, y)) = input.touch.or_else(|| touch.hover_pos().map(to_px)) {
-        touch.on_hover_text_at_pointer(format!(
-            "x = {:.0}, y = {:.0} · right click: back to the board",
-            x.floor(),
-            y.floor()
-        ));
+    if let Some(hint) = state.open_hint {
+        draw_open_hint(&painter, glass, hint, touch.hovered());
+        input.open_requested = touch.clicked();
+        touch.on_hover_cursor(egui::CursorIcon::PointingHand);
+    } else {
+        let touch = touch.on_hover_cursor(egui::CursorIcon::Crosshair);
+        let to_px = |p: Pos2| {
+            let v = (p - glass.min) / glass.size();
+            ((v.x * 480.0).clamp(0.0, 479.99), (v.y * 320.0).clamp(0.0, 319.99))
+        };
+        input.touch = (touch.is_pointer_button_down_on() && primary_down(ui))
+            .then(|| touch.interact_pointer_pos())
+            .flatten()
+            .filter(|p| glass.contains(*p))
+            .map(to_px);
+        if let Some((x, y)) = input.touch.or_else(|| touch.hover_pos().map(to_px)) {
+            touch.on_hover_text_at_pointer(format!(
+                "x = {:.0}, y = {:.0} · right click: back to the board",
+                x.floor(),
+                y.floor()
+            ));
+        }
     }
 
-    // ---- LEDs and buttons below: OUT15..OUT0, IN7..IN0 with S7..S0, USER
-    let d = 16.0_f32.min(frame.width() / 30.0);
+    // ---- LEDs and buttons below: OUT15..OUT0, IN7..IN0 with S7..S0,
+    // USER and RESET, LD1–LD3 (slots of width d)
+    const SLOTS: f32 = 36.0;
+    let d = 18.0_f32.min(frame.width() / (SLOTS + 1.0));
     let y = (frame.bottom() + 6.0 + STRIP / 2.0).min(avail.bottom() - STRIP / 2.0) - d * 0.4;
-    let x0 = avail.center().x - 29.0 * d / 2.0 + d / 2.0;
+    let x0 = avail.center().x - SLOTS * d / 2.0 + d / 2.0;
     let label = |x: f32, text: &str| {
         painter.text(
-            Pos2::new(x, y + d * 1.35),
+            Pos2::new(x, y + d * 1.4),
             egui::Align2::CENTER_CENTER,
             text,
-            egui::FontId::proportional(d * 0.62),
-            Color32::from_gray(120),
+            egui::FontId::proportional(d * 0.7),
+            Color32::from_gray(175),
         );
     };
     for bit in (0..16).rev() {
@@ -671,14 +725,15 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
         let duty = state.led_duty[bit];
         strip_led(&painter, Pos2::new(x, y - d * 0.45), d, color, duty);
         let r = Rect::from_center_size(Pos2::new(x, y), Vec2::new(d, 2.0 * d));
-        ui.interact(r, ui.scope_id().with(("lcd-out", bit)), Sense::hover())
-            .on_hover_text(format!("OUT{bit}: {:.0} %", duty * 100.0));
+        let text = format!("OUT{bit}: {:.0} %", duty * 100.0);
+        named(ui.interact(r, ui.scope_id().with(("lcd-out", bit)), Sense::hover()), egui::Role::Label, &text)
+            .on_hover_text(text);
         painter.text(
             Pos2::new(x, y + d * 0.45),
             egui::Align2::CENTER_CENTER,
             bit.to_string(),
             egui::FontId::proportional(d * 0.55),
-            Color32::from_gray(150),
+            Color32::from_gray(185),
         );
     }
     label(x0 + 7.5 * d, "Out 15–0");
@@ -687,13 +742,13 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
         let x = x1 + (7 - bit) as f32 * d;
         let high = state.inputs & (1 << bit) != 0;
         strip_led(&painter, Pos2::new(x, y - d * 0.45), d, LED_RED, if high { 1.0 } else { 0.0 });
-        let c = Pos2::new(x, y + d * 0.45);
-        let resp = ui
-            .interact(
-                Rect::from_center_size(c, Vec2::splat(d)),
-                ui.scope_id().with(("lcd-button", bit)),
-                Sense::click_and_drag(),
-            )
+        let c = Pos2::new(x, y + d * 0.5);
+        let resp = ui.interact(
+            Rect::from_center_size(c, Vec2::splat(d)),
+            ui.scope_id().with(("lcd-button", bit)),
+            Sense::click_and_drag(),
+        );
+        let resp = named(resp, egui::Role::Button, format!("Button S{bit}"))
             .on_hover_text(format!("S{bit} → IN{bit} (PF{bit}) · key {bit} · right click latches"));
         let held = resp.is_pointer_button_down_on() && primary_down(ui);
         input.buttons[bit] = held;
@@ -701,34 +756,80 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
         let down = held || state.latched[bit] || !high;
         strip_button(&painter, c, d, Color32::from_rgb(0xd9, 0x43, 0x4b), down);
         if state.latched[bit] {
-            painter.circle_stroke(c, d * 0.48, Stroke::new(1.5, Color32::from_rgb(0xFF, 0xE0, 0x40)));
+            painter.rect_stroke(
+                Rect::from_center_size(c, Vec2::splat(d * 0.92)),
+                d * 0.18,
+                Stroke::new(1.5, Color32::from_rgb(0xFF, 0xE0, 0x40)),
+                egui::StrokeKind::Outside,
+            );
         }
     }
     label(x1 + 3.5 * d, "In 7–0 · S7–S0");
-    let c = Pos2::new(x1 + 10.0 * d, y + d * 0.45);
-    let user = ui
-        .interact(
+    // the Nucleo's buttons
+    let x2 = x1 + 10.0 * d;
+    for (n, (name, color)) in
+        [("User", Color32::from_rgb(0x2a, 0x8b, 0xd8)), ("Reset", Color32::from_gray(25))].into_iter().enumerate()
+    {
+        let c = Pos2::new(x2 + n as f32 * 2.4 * d, y + d * 0.5);
+        let resp = ui.interact(
             Rect::from_center_size(c, Vec2::splat(d * 1.2)),
-            ui.scope_id().with("lcd-user"),
+            ui.scope_id().with(("lcd-nucleo", n)),
             Sense::click_and_drag(),
-        )
-        .on_hover_text("USER button B1 (PC13)");
-    input.user = user.is_pointer_button_down_on() && primary_down(ui);
-    strip_button(&painter, c, d * 1.15, Color32::from_rgb(0x2a, 0x8b, 0xd8), input.user);
-    label(c.x, "User");
+        );
+        let (full, hover) = if n == 0 {
+            ("USER button B1", "USER button B1 (PC13)")
+        } else {
+            ("RESET button B2", "RESET button B2 · Ctrl+R")
+        };
+        let resp = named(resp, egui::Role::Button, full).on_hover_text(hover);
+        let down = resp.is_pointer_button_down_on() && primary_down(ui);
+        if n == 0 {
+            input.user = down;
+        } else {
+            input.reset_clicked = resp.clicked();
+        }
+        strip_button(&painter, c, d * 1.1, color, down);
+        label(c.x, name);
+    }
+    // the Nucleo's LEDs (under the display on the real board)
+    let x3 = x2 + 5.2 * d;
+    for (i, (name, color)) in [("LD1", NUCLEO_GREEN), ("LD2", NUCLEO_BLUE), ("LD3", NUCLEO_RED)].into_iter().enumerate()
+    {
+        let x = x3 + i as f32 * d;
+        let duty = state.nucleo_duty[i];
+        strip_led(&painter, Pos2::new(x, y + d * 0.1), d, color, duty);
+        let r = Rect::from_center_size(Pos2::new(x, y), Vec2::new(d, 2.0 * d));
+        let text = format!("Nucleo {name}: {:.0} %", duty * 100.0);
+        named(ui.interact(r, ui.scope_id().with(("lcd-ld", i)), Sense::hover()), egui::Role::Label, &text)
+            .on_hover_text(text);
+    }
+    label(x3 + d, "Nucleo LD1–3");
     input
 }
 
-/// A push button of the row below the display alone.
+/// Colours of the Nucleo's user LEDs.
+pub const NUCLEO_GREEN: Color32 = Color32::from_rgb(0x2E, 0xE0, 0x5A);
+pub const NUCLEO_BLUE: Color32 = Color32::from_rgb(0x2F, 0x7B, 0xFF);
+pub const NUCLEO_RED: Color32 = Color32::from_rgb(0xFF, 0x2A, 0x22);
+
+/// A tact switch of the row below the display alone: a light square body
+/// with a coloured cap, like on the board (so that it does not look like an LED).
 fn strip_button(painter: &egui::Painter, c: Pos2, d: f32, color: Color32, down: bool) {
-    painter.circle_filled(c, d * 0.36, if down { lerp(color, Color32::BLACK, 0.45) } else { color });
+    let body = Rect::from_center_size(c, Vec2::splat(d * 0.82));
+    let shade = |c: Color32| if down { lerp(c, Color32::BLACK, 0.4) } else { c };
+    painter.rect_filled(body, d * 0.14, shade(Color32::from_gray(205)));
+    painter.circle_filled(c, d * 0.27, shade(color));
 }
 
-/// A lit LED of the row below the display alone.
+/// An LED of the row below the display alone: a white-hot centre in a glow,
+/// like the LEDs on the board.
 fn strip_led(painter: &egui::Painter, c: Pos2, d: f32, color: Color32, duty: f32) {
     let b = duty.clamp(0.0, 1.0).powf(1.0 / 2.2);
+    if b > 0.01 {
+        painter.circle_filled(c, d * 0.5, color.gamma_multiply(0.3 * b));
+    }
     painter.circle_filled(c, d * 0.3, lerp(Color32::from_gray(55), color, b));
     if b > 0.01 {
-        painter.circle_filled(c, d * 0.5, color.gamma_multiply(0.25 * b));
+        painter.circle_filled(c, d * 0.15, lerp(color, Color32::WHITE, 0.7).gamma_multiply(b));
     }
 }

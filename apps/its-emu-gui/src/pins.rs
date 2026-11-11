@@ -103,22 +103,28 @@ fn colors(v: &PinView) -> (Color32, &'static str) {
         PinMode::Input => (IN_HI, "input"),
         PinMode::Output => (OUT_HI, "output"),
         PinMode::Alternate => (AF_HI, "alternate function"),
-        PinMode::Analog => return (ANALOG.gamma_multiply(0.45), "analog"),
+        PinMode::Analog => return (ANALOG.gamma_multiply(0.5), "analog"),
     };
-    (if v.level { hi } else { hi.gamma_multiply(0.22) }, mode)
+    (if v.level { hi } else { hi.gamma_multiply(0.32) }, mode)
 }
+
+/// Width of the inspector at its smallest.
+pub const MIN_WIDTH: f32 = LABEL_W + 16.0 * MIN_CELL;
+const LABEL_W: f32 = 28.0;
+const MIN_CELL: f32 = 18.0;
+const MAX_CELL: f32 = 34.0;
 
 pub fn show(ui: &mut egui::Ui, pins: &PinsView) {
     ui.label(egui::RichText::new("Pins").strong());
-    let cell = 17.0;
-    let label_w = 26.0;
+    // the cells grow with the panel
+    let cell = ((ui.available_width() - LABEL_W) / 16.0).clamp(MIN_CELL, MAX_CELL).floor();
     let (rect, _) =
-        ui.allocate_exact_size(Vec2::new(label_w + 16.0 * cell, cell * (PORTS as f32 + 1.0)), Sense::hover());
+        ui.allocate_exact_size(Vec2::new(LABEL_W + 16.0 * cell, cell * (PORTS as f32 + 1.0)), Sense::hover());
     let painter = ui.painter_at(rect);
-    let text_color = ui.visuals().weak_text_color();
+    let text_color = ui.visuals().text_color();
     for pin in 0..16 {
-        let c = Pos2::new(rect.left() + label_w + (pin as f32 + 0.5) * cell, rect.top() + cell * 0.5);
-        painter.text(c, egui::Align2::CENTER_CENTER, pin.to_string(), FontId::monospace(9.0), text_color);
+        let c = Pos2::new(rect.left() + LABEL_W + (pin as f32 + 0.5) * cell, rect.top() + cell * 0.55);
+        painter.text(c, egui::Align2::CENTER_CENTER, pin.to_string(), FontId::monospace(cell * 0.55), text_color);
     }
     for (port, row) in pins.iter().enumerate() {
         let y = rect.top() + cell * (port as f32 + 1.0);
@@ -127,20 +133,29 @@ pub fn show(ui: &mut egui::Ui, pins: &PinsView) {
             Pos2::new(rect.left() + 2.0, y + cell * 0.5),
             egui::Align2::LEFT_CENTER,
             &name,
-            FontId::monospace(11.0),
-            ui.visuals().text_color(),
+            FontId::monospace(cell * 0.65),
+            text_color,
         );
         for (pin, v) in row.iter().enumerate() {
-            let r = Rect::from_min_size(Pos2::new(rect.left() + label_w + pin as f32 * cell, y), Vec2::splat(cell))
+            let r = Rect::from_min_size(Pos2::new(rect.left() + LABEL_W + pin as f32 * cell, y), Vec2::splat(cell))
                 .shrink(1.5);
             let (fill, mode) = colors(v);
             painter.rect_filled(r, CornerRadius::same(3), fill);
+            let high = v.level && v.mode != PinMode::Analog;
+            if high {
+                // high is marked by a bar, not only by the brightness
+                let bar = Rect::from_min_max(
+                    Pos2::new(r.left() + 3.0, r.bottom() - 3.5),
+                    Pos2::new(r.right() - 3.0, r.bottom() - 1.5),
+                );
+                painter.rect_filled(bar, CornerRadius::same(1), Color32::from_black_alpha(150));
+            }
             let used = board_use(port, pin);
             if used.is_some() {
                 painter.rect_stroke(
                     r,
                     CornerRadius::same(3),
-                    Stroke::new(1.0, Color32::from_white_alpha(70)),
+                    Stroke::new(1.5, Color32::from_white_alpha(170)),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -150,8 +165,9 @@ pub fn show(ui: &mut egui::Ui, pins: &PinsView) {
                 PinMode::Alternate => format!("{:X}", v.af),
                 PinMode::Analog => "~".to_owned(),
             };
-            let ink = if v.level && v.mode != PinMode::Analog { Color32::BLACK } else { Color32::from_gray(200) };
-            painter.text(r.center(), egui::Align2::CENTER_CENTER, letter, FontId::monospace(9.5), ink);
+            let ink = if high { Color32::BLACK } else { Color32::from_gray(225) };
+            let at = r.center() - Vec2::new(0.0, if high { 1.0 } else { 0.0 });
+            painter.text(at, egui::Align2::CENTER_CENTER, letter, FontId::monospace(cell * 0.6), ink);
             let mut hover = format!("{name}{pin}: {mode}");
             if v.mode == PinMode::Alternate {
                 hover += &format!(" AF{}", v.af);
@@ -170,7 +186,10 @@ pub fn show(ui: &mut egui::Ui, pins: &PinsView) {
             if let Some(u) = used {
                 hover += &format!("\n{u}");
             }
-            ui.interact(r, ui.scope_id().with(("pin", port, pin)), Sense::hover()).on_hover_text(hover);
+            let resp = ui.interact(r, ui.scope_id().with(("pin", port, pin)), Sense::hover());
+            let label = hover.replace('\n', ", ");
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &label));
+            resp.on_hover_text(hover);
         }
     }
     ui.add_space(4.0);
@@ -183,5 +202,7 @@ pub fn show(ui: &mut egui::Ui, pins: &PinsView) {
             ui.label(egui::RichText::new(text).small());
         }
     });
-    ui.label(egui::RichText::new("bright: high, dark: low · framed: used on the board").small().weak());
+    ui.label(
+        egui::RichText::new("bright with a bar: high · dark: low · white frame: used on the board").small().weak(),
+    );
 }
