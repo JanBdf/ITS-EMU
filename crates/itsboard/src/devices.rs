@@ -57,8 +57,103 @@ impl Peripheral for DeviceHub {
 const QUADRATURE: [(bool, bool); 4] = [(true, true), (false, true), (false, false), (true, false)];
 /// Transitions per detent (one full quadrature cycle).
 pub const TRANSITIONS_PER_DETENT: i32 = 4;
-/// Time between two transitions while the knob turns.
+/// Time between two transitions while the knob turns (`rotate`).
 const TRANSITION_NS: u64 = 1_000_000;
+
+/// The mechanical contacts of the board: tact switches S0–S7, the Nucleo's
+/// USER button and the encoder. With `bounce` on, a new level reaches the
+/// pin after a burst of short glitches, as real contacts do (typical tact
+/// switch: a few bounces within 0.1–2 ms; not measured on this board), so
+/// that firmware without debouncing misbehaves here as it does on the board.
+/// The sequence is deterministic (own xorshift generator).
+pub struct Contacts {
+    gpio: SharedGpio,
+    pub bounce: bool,
+    /// Levels requested from outside the machine's time, not yet scheduled.
+    requests: Vec<(usize, u32, bool)>,
+    /// Scheduled edges: (cycle, port, pin, level), unsorted.
+    edges: Vec<(u64, usize, u32, bool)>,
+    rng: u32,
+}
+
+impl Contacts {
+    pub fn new(gpio: SharedGpio) -> Self {
+        Self { gpio, bounce: false, requests: Vec::new(), edges: Vec::new(), rng: 0x9E37_79B9 }
+    }
+
+    fn next(&mut self) -> u32 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 17;
+        self.rng ^= self.rng << 5;
+        self.rng
+    }
+
+    /// Drives the pin to `level` (bouncing if that is on); from outside the
+    /// emulation, so the bounce starts at the next sweep of the devices.
+    pub fn set(&mut self, port: usize, pin: u32, level: bool) {
+        if !self.bounce {
+            self.edges.retain(|e| (e.1, e.2) != (port, pin));
+            self.gpio.borrow_mut().drive(port, pin, Some(level));
+            return;
+        }
+        self.requests.push((port, pin, level));
+    }
+
+    /// Leaves the pin open (nothing drives it), cancelling a pending bounce.
+    pub fn open(&mut self, port: usize, pin: u32) {
+        self.edges.retain(|e| (e.1, e.2) != (port, pin));
+        self.requests.retain(|r| (r.0, r.1) != (port, pin));
+        self.gpio.borrow_mut().drive(port, pin, None);
+    }
+
+    /// Schedules the edges of a transition to `level` at cycle `at`
+    /// (`ns_to_cycles` converts durations). `glitches`: how many bounces at most.
+    pub fn schedule(&mut self, port: usize, pin: u32, level: bool, at: u64, glitches: u32, ns: impl Fn(u64) -> u64) {
+        // a newer transition on the pin replaces what was still to come
+        self.edges.retain(|e| (e.1, e.2) != (port, pin));
+        let mut t = at;
+        self.edges.push((t, port, pin, level));
+        let n = if glitches == 0 { 0 } else { self.next() % (glitches + 1) };
+        for i in 0..n {
+            // the contacts separate again for a short moment, later ones further apart
+            t += ns(30_000 + u64::from(self.next() % 250_000) * u64::from(i + 1));
+            self.edges.push((t, port, pin, !level));
+            t += ns(5_000 + u64::from(self.next() % 80_000));
+            self.edges.push((t, port, pin, level));
+        }
+    }
+}
+
+impl PinDevice for Contacts {
+    fn update(&mut self, ctx: &mut DeviceCtx) {
+        let now = ctx.now();
+        for (port, pin, level) in std::mem::take(&mut self.requests) {
+            self.schedule(port, pin, level, now, 3, |n| ctx.clock.ns_to_cycles(n));
+        }
+        // in time order, so that a later edge of a burst wins
+        self.edges.sort_unstable_by_key(|e| e.0);
+        let mut g = self.gpio.borrow_mut();
+        let mut i = 0;
+        while i < self.edges.len() {
+            let (at, port, pin, level) = self.edges[i];
+            if at > now {
+                break;
+            }
+            g.drive_at(port, pin, Some(level), at);
+            i += 1;
+        }
+        self.edges.drain(..i);
+    }
+
+    fn next_event(&self) -> Option<u64> {
+        if !self.requests.is_empty() {
+            return Some(0);
+        }
+        self.edges.iter().map(|e| e.0).min()
+    }
+}
+
+pub type SharedContacts = Rc<RefCell<Contacts>>;
 
 /// Mechanical rotary encoder with contacts to GND on two pins (A, B) and
 /// pull-ups on the module. Clockwise, A falls before B: a timer in encoder
@@ -72,18 +167,45 @@ pub struct RotaryEncoder {
     pending: i32,
     /// Cycle of the next transition (0: as soon as possible).
     next_at: Option<u64>,
+    /// Time between two transitions of the current turn.
+    transition_ns: u64,
+    /// The board's contacts, for bouncing transitions.
+    contacts: Option<SharedContacts>,
 }
 
 impl RotaryEncoder {
     pub fn new(gpio: SharedGpio, a: (char, u32), b: (char, u32)) -> Self {
-        let mut e = Self { gpio, a: (port(a.0), a.1), b: (port(b.0), b.1), state: 0, pending: 0, next_at: None };
+        let mut e = Self {
+            gpio,
+            a: (port(a.0), a.1),
+            b: (port(b.0), b.1),
+            state: 0,
+            pending: 0,
+            next_at: None,
+            transition_ns: TRANSITION_NS,
+            contacts: None,
+        };
         e.drive(0);
         e
     }
 
-    /// Turns the knob by `detents` (negative: counter-clockwise).
+    /// Bounces its contacts through `contacts` when that has bounce on.
+    pub fn with_contacts(mut self, contacts: SharedContacts) -> Self {
+        self.contacts = Some(contacts);
+        self
+    }
+
+    /// Turns the knob by `detents` (negative: counter-clockwise), a
+    /// transition every millisecond (a quick spin).
     pub fn rotate(&mut self, detents: i32) {
+        self.rotate_paced(detents, TRANSITION_NS);
+    }
+
+    /// Turns the knob by `detents` with `transition_ns` between the
+    /// transitions (four per detent): a hand turns a detent in 10–50 ms.
+    pub fn rotate_paced(&mut self, detents: i32, transition_ns: u64) {
         self.pending += detents * TRANSITIONS_PER_DETENT;
+        self.transition_ns = transition_ns.max(1);
         if self.pending != 0 && self.next_at.is_none() {
             self.next_at = Some(0);
         }
@@ -95,6 +217,25 @@ impl RotaryEncoder {
         g.drive_at(self.a.0, self.a.1, Some(a), cycle);
         g.drive_at(self.b.0, self.b.1, Some(b), cycle);
     }
+
+    /// One transition at `cycle`; only the contact that changes is driven
+    /// (through the bouncing contacts when those bounce).
+    fn transition(&mut self, cycle: u64, ctx: &DeviceCtx) {
+        let (a0, b0) = QUADRATURE[self.state];
+        self.state = (self.state as i32 + self.pending.signum()).rem_euclid(4) as usize;
+        let (a1, b1) = QUADRATURE[self.state];
+        match self.contacts.as_ref().filter(|c| c.borrow().bounce) {
+            Some(c) => {
+                let mut c = c.borrow_mut();
+                for ((p, pin), old, new) in [(self.a, a0, a1), (self.b, b0, b1)] {
+                    if old != new {
+                        c.schedule(p, pin, new, cycle, 2, |n| ctx.clock.ns_to_cycles(n));
+                    }
+                }
+            }
+            None => self.drive(cycle),
+        }
+    }
 }
 
 impl PinDevice for RotaryEncoder {
@@ -104,10 +245,9 @@ impl PinDevice for RotaryEncoder {
             && at <= now
         {
             let at = if at == 0 { now } else { at };
-            self.state = (self.state as i32 + self.pending.signum()).rem_euclid(4) as usize;
+            self.transition(at, ctx);
             self.pending -= self.pending.signum();
-            self.drive(at);
-            self.next_at = (self.pending != 0).then(|| at + ctx.clock.ns_to_cycles(TRANSITION_NS).max(1));
+            self.next_at = (self.pending != 0).then(|| at + ctx.clock.ns_to_cycles(self.transition_ns).max(1));
         }
     }
 

@@ -112,13 +112,24 @@ fn main() -> eframe::Result {
 }
 
 fn run(args: Args, renderer: eframe::Renderer) -> eframe::Result {
+    // the window as it was left last time (a laptop screen may be smaller
+    // than the default size; the application clamps it to the monitor)
+    let saved = settings::Settings::load().window;
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("ITS-Board Emulator")
+        // matches the desktop file of the Linux package (window icon, taskbar grouping)
+        .with_app_id("its-emu-gui")
+        .with_inner_size(saved.map_or([1280.0, 1000.0], |w| w.size))
+        .with_min_inner_size([640.0, 480.0])
+        .with_drag_and_drop(true);
+    if let Some(w) = saved {
+        if let Some(pos) = w.pos {
+            viewport = viewport.with_position(pos);
+        }
+        viewport = viewport.with_maximized(w.maximized);
+    }
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("ITS-Board Emulator")
-            // matches the desktop file of the Linux package (window icon, taskbar grouping)
-            .with_app_id("its-emu-gui")
-            .with_inner_size([1280.0, 1000.0])
-            .with_drag_and_drop(true),
+        viewport,
         renderer,
         // dithering adds noise that makes the small print of the board drawing hard to read
         dithering: false,
