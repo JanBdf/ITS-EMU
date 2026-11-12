@@ -17,7 +17,7 @@
 //! | LDR (any width) | 2, 1 if the previous instruction was a load whose result it does not use as address |
 //! | LDM/STM/PUSH/POP, LDRD/STRD, VLDM/VSTM | 1 + registers |
 //! | B, BL, BX, POP/LDR to PC | 1 + 1 (pipeline refill, also to the next instruction) |
-//! | B<cond>, CBZ/CBNZ | 1, + 1 if taken |
+//! | `B<cond>`, CBZ/CBNZ | 1, + 1 if taken |
 //! | BLX register | 3 |
 //! | TBB/TBH | 3 |
 //! | UDIV/SDIV | 2..12 by operand size, see [`div_cycles`] |

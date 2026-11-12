@@ -563,10 +563,9 @@ impl Block for Dma {
                     d.write_trigger(ctx, n, written);
                 }
             }
-            0x400 => d.intr &= !op.clears(value),
+            0x400 | 0x40C | 0x41C => d.intr &= !op.clears(value),
             0x404 => d.inte[0] = op.apply(d.inte[0], value) & 0xFFF,
             0x408 => d.intf[0] = op.apply(d.intf[0], value) & 0xFFF,
-            0x40C | 0x41C => d.intr &= !op.clears(value),
             0x414 => d.inte[1] = op.apply(d.inte[1], value) & 0xFFF,
             0x418 => d.intf[1] = op.apply(d.intf[1], value) & 0xFFF,
             0x420..=0x42C => {
@@ -682,10 +681,10 @@ mod tests {
 
         fn write(&mut self, addr: u32, v: u32) {
             let (mut ctx, bus, dma) = self.ctx();
-            if !(RAM..RAM + 0x1000).contains(&addr) {
-                bus.write(&mut ctx, addr, 4, v);
-            } else {
+            if (RAM..RAM + 0x1000).contains(&addr) {
                 dma.borrow_mut().ram.as_mut().unwrap().write(addr, 4, v);
+            } else {
+                bus.write(&mut ctx, addr, 4, v);
             }
             pump(dma, bus, &mut ctx);
         }

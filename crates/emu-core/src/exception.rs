@@ -263,9 +263,9 @@ mod tests {
                 CoreReg::R(n) => self.r[n as usize] = v,
                 CoreReg::Sp => {
                     if !handler && self.control & 2 != 0 {
-                        self.psp = v
+                        self.psp = v;
                     } else {
-                        self.msp = v
+                        self.msp = v;
                     }
                 }
                 CoreReg::Lr => self.lr = v,

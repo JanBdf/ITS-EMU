@@ -17,6 +17,39 @@ pub const HSI_HZ: u32 = 16_000_000;
 pub const HSE_HZ: u32 = 8_000_000;
 
 /// Clock frequencies and peripheral clock enables, shared with other peripherals.
+/// The APB bus a peripheral sits on (selects its clock and enable register).
+#[derive(Debug, Clone, Copy)]
+pub enum ApbBus {
+    Apb1,
+    Apb2,
+}
+
+impl ApbBus {
+    /// Bit `bit` of the bus's RCC_APBxENR is set.
+    pub fn enabled(self, c: &Clocks, bit: u32) -> bool {
+        let enr = match self {
+            Self::Apb1 => c.apb1enr,
+            Self::Apb2 => c.apb2enr,
+        };
+        enr & (1 << bit) != 0
+    }
+
+    pub fn pclk(self, c: &Clocks) -> u32 {
+        match self {
+            Self::Apb1 => c.pclk1,
+            Self::Apb2 => c.pclk2,
+        }
+    }
+
+    /// Timer kernel clock (PCLK, doubled when the APB prescaler is not 1).
+    pub fn timer_hz(self, c: &Clocks) -> u32 {
+        match self {
+            Self::Apb1 => c.apb1_timer,
+            Self::Apb2 => c.apb2_timer,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Clocks {
     pub sysclk: u32,

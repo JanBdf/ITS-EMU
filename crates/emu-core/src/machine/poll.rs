@@ -1,16 +1,14 @@
 //! Polling loops run in place of the translated code.
 //!
-//! Idle detection skips a loop while its registers repeat, so a loop that
-//! polls a counter (`while (timer_hw->timerawl < t);`, the Pico SDK's
-//! `busy_wait_until`) is skipped at most up to the next change of the
-//! counter: it runs a few iterations through Unicorn and the block hook
-//! every microsecond, which costs more than the microsecond. Such loops only
-//! load and compare. [`Machine::fast_forward_poll`] runs them here instead,
-//! block by block with the block hook's time keeping and the MMIO callback's
-//! peripheral reads, and skips whole iterations while the registers the loop
-//! goes on to read (not those it overwrites first, such as the polled value)
-//! and the polled values repeat. The result is the same as running the loop:
-//! same cycles, same accesses at the same times.
+//! A loop polling a counter (`while (timer_hw->timerawl < t);`, the Pico
+//! SDK's `busy_wait_until`) changes state with every counter tick, so idle
+//! detection skips it only up to the next tick, and running it through
+//! Unicorn with the block hook costs more than the time it covers. Such
+//! loops only load and compare. [`Machine::fast_forward_poll`] runs them
+//! here, block by block with the block hook's timekeeping and the MMIO
+//! callback's peripheral reads, and skips whole iterations while the
+//! registers the loop reads before writing and the polled values repeat.
+//! Cycles and accesses (and their times) are the same as running the loop.
 
 use super::{Machine, RAM_PAGE, System, uc_its_core_regs, uc_its_set_core_regs};
 use crate::machine::CpuModel;
@@ -47,24 +45,70 @@ enum Addr {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Op {
     /// LSLS/LSRS/ASRS Rd, Rm, #imm (`kind` 0, 1, 2); LSLS #0 is MOVS Rd, Rm.
-    ShiftImm { kind: u8, rd: u8, rm: u8, imm: u8 },
+    ShiftImm {
+        kind: u8,
+        rd: u8,
+        rm: u8,
+        imm: u8,
+    },
     /// ADDS/SUBS Rd, Rn, #imm / Rm.
-    AddSub { rd: u8, rn: u8, b: Operand, sub: bool },
-    MovImm { rd: u8, imm: u32 },
-    CmpImm { rn: u8, imm: u32 },
+    AddSub {
+        rd: u8,
+        rn: u8,
+        b: Operand,
+        sub: bool,
+    },
+    MovImm {
+        rd: u8,
+        imm: u32,
+    },
+    CmpImm {
+        rn: u8,
+        imm: u32,
+    },
     /// Data processing with registers (ANDS ... MVNS), `op` 0..15.
-    Alu { op: u8, rdn: u8, rm: u8 },
+    Alu {
+        op: u8,
+        rdn: u8,
+        rm: u8,
+    },
     /// ADD / CMP / MOV with high registers (not the PC).
-    AddHi { rd: u8, rm: u8 },
-    CmpHi { rn: u8, rm: u8 },
-    MovHi { rd: u8, rm: u8 },
+    AddHi {
+        rd: u8,
+        rm: u8,
+    },
+    CmpHi {
+        rn: u8,
+        rm: u8,
+    },
+    MovHi {
+        rd: u8,
+        rm: u8,
+    },
     /// ADD Rd, SP, #imm; ADR (`base` 13 / none); ADD/SUB SP, #imm.
-    AddSp { rd: u8, imm: u32 },
-    Adr { rd: u8, value: u32 },
-    AdjustSp { delta: u32 },
+    AddSp {
+        rd: u8,
+        imm: u32,
+    },
+    Adr {
+        rd: u8,
+        value: u32,
+    },
+    AdjustSp {
+        delta: u32,
+    },
     /// SXTH, SXTB, UXTH, UXTB (`kind` 0..3).
-    Extend { kind: u8, rd: u8, rm: u8 },
-    Load { rt: u8, addr: Addr, size: u8, signed: bool },
+    Extend {
+        kind: u8,
+        rd: u8,
+        rm: u8,
+    },
+    Load {
+        rt: u8,
+        addr: Addr,
+        size: u8,
+        signed: bool,
+    },
     Nop,
 }
 
@@ -74,8 +118,15 @@ enum End {
     /// The translator ends blocks before the next page.
     Fall,
     Jump(u32),
-    Cond { cond: u8, target: u32 },
-    Cbz { rn: u8, nonzero: bool, target: u32 },
+    Cond {
+        cond: u8,
+        target: u32,
+    },
+    Cbz {
+        rn: u8,
+        nonzero: bool,
+        target: u32,
+    },
 }
 
 #[derive(Debug)]
@@ -342,9 +393,11 @@ fn live_in(blocks: &[Block]) -> Vec<u32> {
     loop {
         let mut changed = false;
         for (i, b) in blocks.iter().enumerate() {
-            let out = b.successors().into_iter().flatten().fold(0, |acc, s| {
-                acc | blocks.iter().position(|x| x.addr == s).map_or(ALL, |j| live[j])
-            });
+            let out = b
+                .successors()
+                .into_iter()
+                .flatten()
+                .fold(0, |acc, s| acc | blocks.iter().position(|x| x.addr == s).map_or(ALL, |j| live[j]));
             let l = b.uses | (out & !b.defs);
             if l != live[i] {
                 live[i] = l;
@@ -599,7 +652,8 @@ impl System {
             }
             let charge = self.block_charge(slot, u64::from(pc), b.size, entered_by_branch);
             if pc == head {
-                let state = HeadState { cpu: cpu.masked(head_live), cycles: charge.cycles, continues: charge.continues };
+                let state =
+                    HeadState { cpu: cpu.masked(head_live), cycles: charge.cycles, continues: charge.continues };
                 if let Some((prev, at)) = last_head
                     && prev == state
                     && self.idle.clean
@@ -692,7 +746,8 @@ impl Machine {
         }
         let live = live_in(&blocks)[0];
         let x = all[16];
-        let mut cpu = Cpu { r: [0; 16], n: x >> 31 != 0, z: x >> 30 & 1 != 0, c: x >> 29 & 1 != 0, v: x >> 28 & 1 != 0 };
+        let mut cpu =
+            Cpu { r: [0; 16], n: x >> 31 != 0, z: x >> 30 & 1 != 0, c: x >> 29 & 1 != 0, v: x >> 28 & 1 != 0 };
         cpu.r.copy_from_slice(&all[..16]);
         cpu.r[15] = head;
         let start = cpu;
@@ -705,7 +760,8 @@ impl Machine {
         // idle detection starts over: its observations are from before
         sys.idle.restart();
         if cpu != start {
-            let nzcv = u32::from(cpu.n) << 31 | u32::from(cpu.z) << 30 | u32::from(cpu.c) << 29 | u32::from(cpu.v) << 28;
+            let nzcv =
+                u32::from(cpu.n) << 31 | u32::from(cpu.z) << 30 | u32::from(cpu.c) << 29 | u32::from(cpu.v) << 28;
             // SAFETY: the engine of this machine, not running.
             unsafe { uc_its_set_core_regs(self.uc.get_handle().cast(), cpu.r.as_ptr(), nzcv) };
         }

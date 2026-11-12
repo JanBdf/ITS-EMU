@@ -14,8 +14,7 @@ use emu_core::bus::{extract_read, merge_write};
 use emu_core::{Clock, DeviceCtx, Peripheral};
 
 use crate::dma::{DmaLine, SharedDma};
-use crate::rcc::SharedClocks;
-use crate::timer::ApbBus;
+use crate::rcc::{ApbBus, SharedClocks};
 
 /// The host side of a serial line (e.g. the ST-LINK virtual COM port).
 #[derive(Debug, Default)]
@@ -150,20 +149,11 @@ impl Usart {
     }
 
     fn clocks_enabled(&self) -> bool {
-        let c = self.clocks.get();
-        let enr = match self.bus {
-            ApbBus::Apb1 => c.apb1enr,
-            ApbBus::Apb2 => c.apb2enr,
-        };
-        enr & (1 << self.enable_bit) != 0
+        self.bus.enabled(&self.clocks.get(), self.enable_bit)
     }
 
     fn pclk(&self) -> u32 {
-        let c = self.clocks.get();
-        match self.bus {
-            ApbBus::Apb1 => c.pclk1,
-            ApbBus::Apb2 => c.pclk2,
-        }
+        self.bus.pclk(&self.clocks.get())
     }
 
     fn baud(&self) -> f64 {
@@ -214,9 +204,7 @@ impl Usart {
             }
         }
         // Receiver
-        if !self.enabled(CR1_RE) {
-            self.rx_done_at = None;
-        } else {
+        if self.enabled(CR1_RE) {
             loop {
                 match self.rx_done_at {
                     None => {
@@ -250,6 +238,8 @@ impl Usart {
                 self.sr |= SR_IDLE;
                 self.idle_at = None;
             }
+        } else {
+            self.rx_done_at = None;
         }
         self.sync_irq(ctx);
     }

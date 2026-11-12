@@ -331,7 +331,7 @@ mod tests {
             frame.for_each_rgb565(at.into_iter(), |r, g, b| {
                 got.push(
                     ((u32::from(r) * 255 / 31) << 16) | ((u32::from(g) * 255 / 63) << 8) | (u32::from(b) * 255 / 31),
-                )
+                );
             });
             let want: Vec<u32> = at.iter().map(|&(x, y)| d.panel_pixel(x, y)).collect();
             assert_eq!(got, want, "madctl {madctl:#x} dfc {dfc1:#x}");

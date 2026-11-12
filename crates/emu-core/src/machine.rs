@@ -1688,11 +1688,6 @@ impl Machine {
         self.uc.get_data().locked_up
     }
 
-    /// A debugger halts the core (as if it wrote DHCSR.C_HALT).
-    pub fn debug_halt(&mut self) {
-        let _ = self.debug_write(PPB_BASE + debug::DHCSR, 4, 0xA05F_0003);
-    }
-
     /// Drives the reset pin (NRST). Releasing it resets the MCU; the core
     /// does not run while it is held low.
     pub fn set_reset_pin(&mut self, low: bool) {
@@ -2302,7 +2297,10 @@ impl Machine {
                 self.uc.get_data_mut().debug.retired();
                 // A polling loop: run here, then Unicorn continues after it
                 // (as if it had run the loop), unless the slice ended in it.
-                if result.is_ok() && std::mem::take(&mut self.uc.get_data_mut().idle.poll_ready) && self.fast_forward_poll() {
+                if result.is_ok()
+                    && std::mem::take(&mut self.uc.get_data_mut().idle.poll_ready)
+                    && self.fast_forward_poll()
+                {
                     continue;
                 }
                 break result;

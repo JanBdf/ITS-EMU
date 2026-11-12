@@ -63,17 +63,6 @@ impl SetupPacket {
             length: u16::from_le_bytes([b[6], b[7]]),
         }
     }
-
-    pub fn to_bytes(&self) -> [u8; 8] {
-        let [v0, v1] = self.value.to_le_bytes();
-        let [i0, i1] = self.index.to_le_bytes();
-        let [l0, l1] = self.length.to_le_bytes();
-        [self.request_type, self.request, v0, v1, i0, i1, l0, l1]
-    }
-
-    pub fn is_in(&self) -> bool {
-        self.request_type & 0x80 != 0
-    }
 }
 
 /// A device's answer to a transfer.

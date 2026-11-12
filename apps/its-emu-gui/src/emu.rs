@@ -255,7 +255,7 @@ pub fn spawn(
             for spec in devices {
                 worker.add_device(spec);
             }
-            worker.run()
+            worker.run();
         })
         .expect("spawn emulator thread");
     EmuHandle { commands: tx, snapshot, thread: Some(thread) }

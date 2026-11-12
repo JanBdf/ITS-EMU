@@ -886,13 +886,6 @@ impl Block for Pio {
     }
 }
 
-impl Pio {
-    /// Brings the state machines up to `ctx.now()` (pin changes are logged).
-    pub fn catch_up(&mut self, ctx: &mut DeviceCtx) {
-        self.run_to(ctx, ctx.now());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

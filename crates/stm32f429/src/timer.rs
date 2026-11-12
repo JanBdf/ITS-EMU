@@ -1,29 +1,28 @@
 //! Timers (TIM1–TIM14).
 //!
-//! The counter is evaluated lazily from virtual time, as a phase in its cycle:
-//! up-counting (CNT = phase), down-counting (CNT = ARR − phase) and
-//! center-aligned (up to ARR, then down: a cycle of 2·ARR ticks with update
-//! events at both ends; CMS selects the directions that set the CC flags). Supported: prescaler and
-//! auto-reload and compare values (with preload), update events (overflow, `EGR`), the
-//! repetition counter of TIM1/TIM8, output compare flags and interrupts, PWM
-//! duty cycles, `CNT` reads/writes, input capture of edges that drive the
-//! channel pins from outside (buttons, analog inputs; with prescaler,
-//! polarity and overcapture), and the output compare channels driving their
-//! pins (frozen, active/inactive/toggle on match, forced, PWM 1/2; MOE of
-//! TIM1/TIM8), encoder mode (SMS 1–3: TI1 and/or TI2 edges count up/down by the
-//! other input's level, as measured with HwCheck `enc`), the slave modes reset,
-//! gated, trigger and external clock 1 with TI1F_ED/TI1FP1/TI2FP2 as trigger
-//! (HwCheck `timslave`) or another timer's TRGO (ITR0..3, timer chaining: TRGO
-//! = reset/UG, counter enable, update event, CC1 compare pulse or OC1REF..OC4REF;
-//! not yet compared with the board). OCxREF changes only at compare matches, counter wraps and
-//! forced levels, as measured on the board (HwCheck `timout`): a mode change
-//! takes effect at the next of them; PWM compares CNT < CCR counting up and
-//! CNT ≤ CCR counting down (HwCheck `timdir`). TIM1/TIM8 drive the
-//! complementary outputs with dead time, have the break input (BKIN, BG)
-//! and the COM event (CCPC/CCUS: COMG or TRGI). Slave modes with ETR are not
-//! modelled (a warning is logged when used).
-//! DMA requests: update, capture/compare and trigger events (UDE, CCxDE,
-//! TDE), one transfer each, and bursts through DMAR (DCR.DBA/DBL).
+//! The counter is evaluated lazily from virtual time as a phase in its cycle:
+//! up (CNT = phase), down (CNT = ARR − phase) or center-aligned (a cycle of
+//! 2·ARR ticks with updates at both ends; CMS selects which directions set
+//! the CC flags).
+//!
+//! - Prescaler, ARR and CCR with preload; update events (overflow, `EGR`);
+//!   TIM1/TIM8 repetition counter; `CNT` reads and writes.
+//! - Output compare flags and interrupts; outputs driving their pins
+//!   (frozen, active/inactive/toggle on match, forced, PWM 1/2, MOE).
+//!   OCxREF changes only at compare matches, wraps and forced levels, so a
+//!   mode change takes effect at the next of them; PWM compares CNT < CCR
+//!   counting up and CNT ≤ CCR counting down (HwCheck `timout`, `timdir`).
+//! - Input capture of external edges (buttons, analog inputs) with
+//!   prescaler, polarity and overcapture.
+//! - Encoder mode (SMS 1–3, HwCheck `enc`).
+//! - Slave modes reset, gated, trigger and external clock 1, triggered by
+//!   TI1F_ED/TI1FP1/TI2FP2 (HwCheck `timslave`) or another timer's TRGO
+//!   (ITR0–3; TRGO = reset/UG, enable, update, CC1 pulse or OC1REF–OC4REF;
+//!   not yet compared with the board). ETR is not modelled (logged).
+//! - TIM1/TIM8: complementary outputs with dead time, break input (BKIN,
+//!   BG), COM event (CCPC/CCUS: COMG or TRGI).
+//! - DMA requests on update, CC and trigger events (UDE, CCxDE, TDE), one
+//!   transfer each, and DMAR bursts (DCR.DBA/DBL).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -178,12 +177,7 @@ const BDTR_MOE: u32 = 1 << 15;
 /// (measured: toggle on CCR1 = 500, CH2 captures 512).
 const LOOPBACK_CLOCKS: u64 = 12;
 
-/// Which APB bus clocks the timer (selects the kernel clock and enable register).
-#[derive(Debug, Clone, Copy)]
-pub enum ApbBus {
-    Apb1,
-    Apb2,
-}
+pub use crate::rcc::ApbBus;
 
 pub struct GpTimer {
     name: &'static str,
@@ -541,7 +535,9 @@ impl GpTimer {
         self.warned_clock = false;
         self.dma_index = 0;
         if let Some((dma, lines)) = &self.dma {
-            lines.iter().for_each(|l| l.cancel(dma));
+            for l in lines {
+                l.cancel(dma);
+            }
         }
         self.ic_events = [0; 4];
         self.oc_ref = [false; 4];
@@ -807,7 +803,7 @@ impl GpTimer {
                 }
                 self.enc_level[i] = level;
                 // TI1F_ED: every edge of TI1; TI1FP1/TI2FP2: rising after the polarity
-                let input = if ts == 6 { 1 } else { 0 };
+                let input = usize::from(ts == 6);
                 if i != input {
                     continue;
                 }
@@ -1137,7 +1133,7 @@ impl GpTimer {
                     events.push((q, 0)); // the wrap first, then a match at the same phase
                 }
             }
-            events.sort();
+            events.sort_unstable();
             let traced = self.trgo_ref_ch() == Some(ch);
             for (q, kind) in events {
                 let changed = if kind == 0 { self.oc_wrap(ch, q) } else { self.oc_match(ch, q) };
@@ -1280,20 +1276,11 @@ impl GpTimer {
     }
 
     fn kernel_hz(&self) -> u32 {
-        let c = self.clocks.get();
-        match self.bus {
-            ApbBus::Apb1 => c.apb1_timer,
-            ApbBus::Apb2 => c.apb2_timer,
-        }
+        self.bus.timer_hz(&self.clocks.get())
     }
 
     fn clock_enabled(&self) -> bool {
-        let c = self.clocks.get();
-        let enr = match self.bus {
-            ApbBus::Apb1 => c.apb1enr,
-            ApbBus::Apb2 => c.apb2enr,
-        };
-        enr & (1 << self.enable_bit) != 0
+        self.bus.enabled(&self.clocks.get(), self.enable_bit)
     }
 
     fn running(&self) -> bool {

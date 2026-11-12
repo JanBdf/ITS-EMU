@@ -168,7 +168,7 @@ impl Console {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     action.options_changed = self.options(ui, true);
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        self.input_line(ui, &mut action)
+                        self.input_line(ui, &mut action);
                     });
                 });
             });

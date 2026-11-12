@@ -174,7 +174,8 @@ pub fn build() -> ([Bus; 2], Rp2040) {
         for &(base, size) in &windows {
             bus.attach(base, size, Box::new(shared.window(core, base)));
         }
-        let sio = sio::Sio::new(core, sio.clone(), pins.clone()).with_wake_signals(wake[core].clone(), event[core].clone());
+        let sio =
+            sio::Sio::new(core, sio.clone(), pins.clone()).with_wake_signals(wake[core].clone(), event[core].clone());
         bus.attach(SIO_BASE, 0x1000, Box::new(sio) as Box<dyn Peripheral>);
         bus.attach_device(Box::new(shared.devices(core)));
         bus
