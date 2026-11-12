@@ -165,7 +165,13 @@ pub fn show(ui: &mut egui::Ui, pins: &PinsView) {
                 PinMode::Alternate => format!("{:X}", v.af),
                 PinMode::Analog => "~".to_owned(),
             };
-            let ink = if high { Color32::BLACK } else { Color32::from_gray(225) };
+            let ink = if high {
+                Color32::BLACK
+            } else if ui.visuals().dark_mode {
+                Color32::from_gray(225)
+            } else {
+                Color32::from_gray(245)
+            };
             let at = r.center() - Vec2::new(0.0, if high { 1.0 } else { 0.0 });
             painter.text(at, egui::Align2::CENTER_CENTER, letter, FontId::monospace(cell * 0.6), ink);
             let mut hover = format!("{name}{pin}: {mode}");

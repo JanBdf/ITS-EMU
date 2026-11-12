@@ -45,6 +45,16 @@ struct Args {
     #[arg(long)]
     no_idle_skip: bool,
 
+    /// Let the buttons S0–S7, USER and encoder contacts bounce when they
+    /// change, as on the real board (off: inputs change cleanly)
+    #[arg(long)]
+    bounce: bool,
+
+    /// After the run, print one line of JSON with the result (stop reason,
+    /// pc, virtual time, cycles, LEDs, ...) for scripts
+    #[arg(long)]
+    json: bool,
+
     /// Write the display content to this PNG file when the run ends
     #[arg(long)]
     screenshot: Option<PathBuf>,
@@ -283,6 +293,7 @@ fn main() -> Result<()> {
     }
     let mcu = board.mcu().clone();
     machine.system_mut().idle_skipping = !args.no_idle_skip;
+    board.set_bounce(args.bounce);
 
     let mut gdb = match &args.gdb {
         Some(addr) => {
@@ -418,10 +429,13 @@ fn main() -> Result<()> {
         }
     };
 
-    let what = match stop {
-        None => "time limit reached".to_owned(),
-        Some(StopReason::Breakpoint { pc }) => format!("BKPT at {}", describe(&image, pc)),
-        Some(StopReason::Lockup { pc, reason }) => format!("LOCKUP at {}: {reason}", describe(&image, pc)),
+    // exit status: 0 ran to the time limit, 2 stopped at a BKPT, 3 locked up
+    let (what, status, kind) = match stop {
+        None => ("time limit reached".to_owned(), 0, "time-limit"),
+        Some(StopReason::Breakpoint { pc }) => (format!("BKPT at {}", describe(&image, pc)), 2, "bkpt"),
+        Some(StopReason::Lockup { pc, reason }) => {
+            (format!("LOCKUP at {}: {reason}", describe(&image, pc)), 3, "lockup")
+        }
         Some(
             StopReason::Budget
             | StopReason::DebugBreakpoint { .. }
@@ -438,7 +452,58 @@ fn main() -> Result<()> {
         save_screenshot(&board, path, args.as_seen)?;
         println!("  display saved to {}", path.display());
     }
+    if args.json {
+        println!("{}", json_summary(&machine, &image, &board, start, kind, &what));
+    }
+    if status != 0 {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::process::exit(status);
+    }
     Ok(())
+}
+
+/// One line of JSON with the result of the run (for scripts and autograders).
+fn json_summary(
+    machine: &Machine,
+    image: &ElfImage,
+    board: &itsboard::ItsBoard,
+    start: Instant,
+    kind: &str,
+    what: &str,
+) -> String {
+    let clock = machine.clock();
+    let pc = machine.pc();
+    let symbol = image.symbolize(pc).map(|(s, off)| format!("{}+{off:#x}", s.name));
+    let quote = |s: &str| {
+        let mut out = String::from('"');
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    };
+    let [ld1, ld2, ld3] = board.nucleo_leds();
+    format!(
+        "{{\"stop\":{},\"detail\":{},\"pc\":{pc},\"symbol\":{},\"virtual_s\":{:.9},\"cycles\":{},\"wall_s\":{:.3},\
+         \"idle_skipped_cycles\":{},\"out\":{},\"nucleo_leds\":[{ld1},{ld2},{ld3}],\"backlight\":{:.3},\"core_hz\":{}}}",
+        quote(kind),
+        quote(what),
+        symbol.map_or("null".to_owned(), |s| quote(&s)),
+        clock.time_ns() as f64 / 1e9,
+        clock.cycles(),
+        start.elapsed().as_secs_f64(),
+        machine.system().idle_skipped_cycles(),
+        board.leds(),
+        board.backlight(),
+        board.mcu().clocks.get().hclk,
+    )
 }
 
 /// Prints the state of the ITS-Board LEDs and the Nucleo LEDs.

@@ -46,13 +46,18 @@ pub enum Command {
     SetUsb(bool),
     /// Load the firmware file again when it changes on disk (a new build).
     SetAutoReload(bool),
+    /// The pin inspector is shown: include the pins in the snapshot.
+    ShowPins(bool),
+    /// Contact bounce of the buttons and encoders.
+    SetBounce(bool),
     /// Connect a device to the header pins; it gets the next [`DeviceView::id`].
     AddDevice(DeviceSpec),
     RemoveDevice(u64),
     /// Switch a Pico off and on again (the firmware file is read again).
     RestartDevice(u64),
-    /// Turn an encoder by that many detents (negative: counter-clockwise).
-    Turn(u64, i32),
+    /// Turn an encoder by that many detents (negative: counter-clockwise),
+    /// with that many nanoseconds between two of its four transitions.
+    Turn(u64, i32, u64),
     /// Temperature at a DS18B20 (°C).
     Temperature(u64, f32),
     /// Bytes for a Pico's USB serial port.
@@ -158,8 +163,9 @@ pub struct Snapshot {
     pub core_mhz: u32,
     /// Virtual seconds per wall-clock second over the last measurement.
     pub speed: f64,
-    /// Serial output not yet taken by the UI.
-    pub serial: Vec<u8>,
+    /// Serial output not yet taken by the UI, with the virtual time (ns) it
+    /// was taken from the port at.
+    pub serial: Vec<(u64, Vec<u8>)>,
     /// GDB server address, or why it is not available.
     pub gdb: Result<String, String>,
     /// A debugger is connected.
@@ -291,6 +297,9 @@ struct Worker {
     /// Turns captured display frames into pixels (own thread).
     renderer: Renderer,
     ideal_colors: bool,
+    /// The UI shows the pin inspector.
+    want_pins: bool,
+    bounce: bool,
     /// External inputs, re-applied when new firmware is loaded.
     buttons: [bool; 8],
     ints: [Option<bool>; 6],
@@ -415,6 +424,8 @@ impl Worker {
             measured_speed: 0.0,
             published_generation: u64::MAX,
             ideal_colors: false,
+            want_pins: false,
+            bounce: false,
             buttons: [false; 8],
             ints: [None; 6],
             analog: [None; 8],
@@ -676,10 +687,10 @@ impl Worker {
                 self.start_pico(&mut d);
                 self.devices.insert(i, d);
             }
-            Command::Turn(id, detents) => {
+            Command::Turn(id, detents, transition_ns) => {
                 let index = self.device(id).and_then(|d| d.board_index);
                 if let (Some(n), Some(sim)) = (index, &self.sim) {
-                    let _ = sim.board.rotate_encoder(n, detents);
+                    let _ = sim.board.rotate_encoder_paced(n, detents, transition_ns);
                 }
             }
             Command::Temperature(id, celsius) => {
@@ -812,6 +823,11 @@ impl Worker {
                 self.file_stamp = self.firmware.as_deref().and_then(file_stamp);
                 self.file_changed = None;
             }
+            Command::ShowPins(on) => self.want_pins = on,
+            Command::SetBounce(on) => {
+                self.bounce = on;
+                self.with_board(|b| b.set_bounce(on));
+            }
             Command::Wake | Command::Quit => {}
         }
         self.publish(true);
@@ -939,6 +955,7 @@ impl Worker {
     /// Applies the inputs the user has set to a new board.
     fn restore_inputs(&self) {
         let Some(sim) = &self.sim else { return };
+        sim.board.set_bounce(self.bounce);
         for (n, &pressed) in self.buttons.iter().enumerate() {
             sim.board.set_button(n as u32, pressed);
         }
@@ -1116,10 +1133,14 @@ impl Worker {
             changed |= set(&mut snap.nucleo_leds, b.nucleo_leds());
             changed |= set(&mut snap.backlight, b.backlight());
             changed |= set(&mut snap.core_mhz, b.mcu().clocks.get().hclk / 1_000_000);
-            changed |= set(&mut snap.pins, crate::pins::view(&b.mcu().gpio.borrow().ports));
+            if self.want_pins {
+                changed |= set(&mut snap.pins, crate::pins::view(&b.mcu().gpio.borrow().ports));
+            }
             let out = b.mcu().usart3.borrow_mut().take_output();
-            changed |= !out.is_empty();
-            snap.serial.extend(out);
+            if !out.is_empty() {
+                changed = true;
+                snap.serial.push((virt, out));
+            }
         }
         drop(snap);
         if changed || force || now - self.last_repaint >= CLOCK_REPAINT_INTERVAL {

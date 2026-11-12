@@ -502,7 +502,8 @@ fn backing(size: u32, fill: u8) -> Backing {
 }
 
 pub struct Machine {
-    uc: Unicorn<'static, System>,
+    /// Boxed: the block hook keeps a pointer to it.
+    uc: Box<Unicorn<'static, System>>,
     /// Backing store for flash; mapped into Unicorn with `mem_map_ptr`.
     /// Declared after `uc` so it is dropped after the emulator.
     flash: Backing,
@@ -1108,6 +1109,15 @@ const EXCP_NOCP: u32 = 17;
 const EXCP_INVSTATE: u32 = 18;
 const EXCP_UNALIGNED: u32 = 22;
 
+/// The block hook (see where `Machine::with_memory` adds it); `user_data`
+/// is the machine's boxed `Unicorn`.
+unsafe extern "C" fn block_hook(_uc: *mut std::ffi::c_void, addr: u64, size: u32, user_data: *mut std::ffi::c_void) {
+    // SAFETY: see the registration; nothing else uses the `Unicorn` while
+    // the engine runs (the caller of `emu_start` waits for it).
+    let uc = unsafe { &mut *user_data.cast::<Unicorn<'static, System>>() };
+    Machine::on_block(uc, addr, size);
+}
+
 impl Machine {
     pub fn new(config: MachineConfig, bus: Bus) -> Result<Self, MachineError> {
         let mem = &config.memory;
@@ -1188,6 +1198,71 @@ impl Machine {
         }
     }
 
+    /// Time keeping at the start of every block: accounts for it and ends
+    /// the slice. This is the only place that calls `emu_stop`: at a block
+    /// boundary no instruction is half-done, so execution can resume at the
+    /// current PC.
+    #[inline]
+    fn on_block(uc: &mut Unicorn<'static, System>, addr: u64, size: u32) {
+        let sys = uc.get_data_mut();
+        if sys.stepping {
+            // `step` accounts for its single instruction. (With a branch the
+            // hook also fires for the next block before the step ends.)
+            sys.block = None;
+            return;
+        }
+        if sys.idle.poll_armed == Some(addr) {
+            // A polling loop: `Machine::fast_forward_poll` runs it from here.
+            sys.idle.poll_armed = None;
+            sys.idle.poll_ready = true;
+            let _ = uc.emu_stop();
+            return;
+        }
+        let entered_by_branch = sys.enter_block(addr);
+        if sys.end_run_signals.iter().flatten().any(|s| s.get()) {
+            // The other core may wake up: it has to run before this one goes on.
+            sys.ended_for_wake = true;
+            let _ = uc.emu_stop();
+            return;
+        }
+        if sys.clock.cycles() >= sys.slice_end && !sys.continue_after_events() {
+            let _ = uc.emu_stop();
+            return;
+        }
+        let slot = match sys.block_insns.find(addr, size) {
+            Some(slot) => slot,
+            None => match Self::analyze_new_block(uc, addr, size) {
+                Some(slot) => slot,
+                None => return,
+            },
+        };
+        let sys = uc.get_data_mut();
+        let charge = sys.block_charge(slot, addr, size, entered_by_branch);
+        if sys.idle_skipping
+            && let Some(until) = IdleDetector::on_block(uc, addr, charge.stores, charge.side_effects)
+        {
+            let sys = uc.get_data_mut();
+            let now = sys.clock.cycles();
+            if until >= sys.slice_end {
+                // Nothing can change before the next event: jump to it.
+                if sys.slice_end > now {
+                    sys.idle.skipped_cycles += sys.slice_end - now;
+                    sys.clock.advance(sys.slice_end - now);
+                }
+                if !sys.continue_after_events() {
+                    let _ = uc.emu_stop();
+                    return;
+                }
+            } else {
+                // A polled register changes before the slice ends: skip the
+                // iterations up to that point and continue with this block.
+                sys.idle.skipped_cycles += until - now;
+                sys.clock.advance(until - now);
+            }
+        }
+        uc.get_data_mut().commit_block(addr, size, &charge);
+    }
+
     fn with_memory(
         config: MachineConfig,
         bus: Bus,
@@ -1236,7 +1311,7 @@ impl Machine {
             stepping: false,
             watch_hit: None,
         };
-        let mut uc = Unicorn::new_with_data(Arch::ARM, Mode::THUMB | Mode::MCLASS, system)?;
+        let mut uc = Box::new(Unicorn::new_with_data(Arch::ARM, Mode::THUMB | Mode::MCLASS, system)?);
         let model = match config.cpu {
             CpuModel::CortexM4 => ArmCpuModel::CORTEX_M4,
             CpuModel::CortexM0Plus => ArmCpuModel::CORTEX_M0,
@@ -1371,67 +1446,28 @@ impl Machine {
         }
 
         // Time keeping: account for each executed block and end the slice.
-        // This is the only place that calls `emu_stop`: at a block boundary no
-        // instruction is half-done, so execution can resume at the current PC.
-        uc.add_block_hook(1, 0, |uc, addr, size| {
-            let sys = uc.get_data_mut();
-            if sys.stepping {
-                // `step` accounts for its single instruction. (With a branch the
-                // hook also fires for the next block before the step ends.)
-                sys.block = None;
-                return;
-            }
-            if sys.idle.poll_armed == Some(addr) {
-                // A polling loop: `Machine::fast_forward_poll` runs it from here.
-                sys.idle.poll_armed = None;
-                sys.idle.poll_ready = true;
-                let _ = uc.emu_stop();
-                return;
-            }
-            let entered_by_branch = sys.enter_block(addr);
-            if sys.end_run_signals.iter().flatten().any(|s| s.get()) {
-                // The other core may wake up: it has to run before this one goes on.
-                sys.ended_for_wake = true;
-                let _ = uc.emu_stop();
-                return;
-            }
-            if sys.clock.cycles() >= sys.slice_end && !sys.continue_after_events() {
-                let _ = uc.emu_stop();
-                return;
-            }
-            let slot = match sys.block_insns.find(addr, size) {
-                Some(slot) => slot,
-                None => match Self::analyze_new_block(uc, addr, size) {
-                    Some(slot) => slot,
-                    None => return,
-                },
-            };
-            let sys = uc.get_data_mut();
-            let charge = sys.block_charge(slot, addr, size, entered_by_branch);
-            if sys.idle_skipping
-                && let Some(until) = IdleDetector::on_block(uc, addr, charge.stores, charge.side_effects)
-            {
-                let sys = uc.get_data_mut();
-                let now = sys.clock.cycles();
-                if until >= sys.slice_end {
-                    // Nothing can change before the next event: jump to it.
-                    if sys.slice_end > now {
-                        sys.idle.skipped_cycles += sys.slice_end - now;
-                        sys.clock.advance(sys.slice_end - now);
-                    }
-                    if !sys.continue_after_events() {
-                        let _ = uc.emu_stop();
-                        return;
-                    }
-                } else {
-                    // A polled register changes before the slice ends: skip the
-                    // iterations up to that point and continue with this block.
-                    sys.idle.skipped_cycles += until - now;
-                    sys.clock.advance(until - now);
-                }
-            }
-            uc.get_data_mut().commit_block(addr, size, &charge);
-        })?;
+        // The hook is registered directly, not through the binding's
+        // `add_block_hook`: its proxy creates a `Unicorn` value from a `Weak`
+        // on every call, which was a quarter of the hook's time in busy code.
+        // SAFETY: `uc` is boxed and the box outlives the engine (`Machine`
+        // drops it after everything else and closes the engine with it), so
+        // the hook's pointer to it stays valid and never moves.
+        let uc_ptr: *mut Unicorn<'static, System> = &mut *uc;
+        let mut hook_id: unicorn_engine::uc_hook = 0;
+        let err = unsafe {
+            unicorn_engine::uc_hook_add(
+                uc.get_handle().cast(),
+                &raw mut hook_id,
+                HookType::BLOCK.0 as i32,
+                block_hook as *mut std::ffi::c_void,
+                uc_ptr.cast(),
+                1,
+                0,
+            )
+        };
+        if err != uc_error::OK {
+            return Err(err.into());
+        }
 
         uc.add_intr_hook(Self::on_cpu_exception)?;
 

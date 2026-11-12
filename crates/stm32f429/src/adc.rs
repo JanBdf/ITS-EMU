@@ -68,16 +68,22 @@ impl AnalogState {
             (0, 5) => self.dac[1],
             _ => None,
         };
-        match dac.or(self.pins[port][pin as usize]) {
-            Some(v) => ((v / VDDA).clamp(0.0, 1.0) * 4095.0).round() as u32,
-            None => {
-                // xorshift: open inputs pick up noise
-                self.noise ^= self.noise << 13;
-                self.noise ^= self.noise >> 17;
-                self.noise ^= self.noise << 5;
-                OPEN_COUNTS - OPEN_NOISE + self.noise % (2 * OPEN_NOISE)
-            }
+        let counts = |v: f32| ((v / VDDA).clamp(0.0, 1.0) * 4095.0).round() as u32;
+        match (dac, self.pins[port][pin as usize]) {
+            // the DAC's own output: exact, as measured on the board (HwCheck `adc`)
+            (Some(v), _) => counts(v),
+            // a voltage applied from outside: the converter's few LSB of noise
+            (None, Some(v)) => (counts(v) as i32 + (self.noise_bits() % 5) as i32 - 2).clamp(0, 4095) as u32,
+            (None, None) => OPEN_COUNTS - OPEN_NOISE + self.noise_bits() % (2 * OPEN_NOISE),
         }
+    }
+
+    /// Next value of the noise generator (xorshift).
+    fn noise_bits(&mut self) -> u32 {
+        self.noise ^= self.noise << 13;
+        self.noise ^= self.noise >> 17;
+        self.noise ^= self.noise << 5;
+        self.noise
     }
 }
 
