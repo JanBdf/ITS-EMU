@@ -2,7 +2,7 @@
 //! and the spinlocks and inter-core FIFOs both cores share. The
 //! interpolators keep their registers but do not compute.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
@@ -39,6 +39,10 @@ pub struct Sio {
     dirty: bool,
     interp: [u32; 32],
     warned_interp: bool,
+    /// Set when this core writes to its FIFO (the other core's RX FIFO).
+    wake: Option<Rc<Cell<bool>>>,
+    /// Set when this core releases a spinlock (the other may wait for it).
+    event: Option<Rc<Cell<bool>>>,
 }
 
 impl Sio {
@@ -55,7 +59,17 @@ impl Sio {
             dirty: false,
             interp: [0; 32],
             warned_interp: false,
+            wake: None,
+            event: None,
         }
+    }
+
+    /// Sets `wake` on FIFO writes and `event` on spinlock releases, which
+    /// may wake the other core.
+    pub fn with_wake_signals(mut self, wake: Rc<Cell<bool>>, event: Rc<Cell<bool>>) -> Self {
+        self.wake = Some(wake);
+        self.event = Some(event);
+        self
     }
 
     fn divide(&mut self, signed: bool) {
@@ -171,6 +185,9 @@ impl Peripheral for Sio {
                 }
                 drop(s);
                 self.update_irq(ctx);
+                if let Some(w) = &self.wake {
+                    w.set(true);
+                }
             }
             0x060 => {
                 self.dividend = value;
@@ -197,7 +214,12 @@ impl Peripheral for Sio {
                 self.dirty = true;
             }
             o @ 0x080..=0x0FC => self.interp[((o - 0x80) / 4) as usize] = value,
-            o @ 0x100..=0x17C => self.shared.borrow_mut().spinlocks &= !(1 << ((o - 0x100) / 4)),
+            o @ 0x100..=0x17C => {
+                self.shared.borrow_mut().spinlocks &= !(1 << ((o - 0x100) / 4));
+                if let Some(e) = &self.event {
+                    e.set(true);
+                }
+            }
             _ => {}
         }
     }
@@ -221,7 +243,9 @@ impl Peripheral for Sio {
 
     fn reset(&mut self) {
         *self.shared.borrow_mut() = SioShared::default();
+        let (wake, event) = (self.wake.take(), self.event.take());
         *self = Self::new(self.core, self.shared.clone(), self.pins.clone());
+        (self.wake, self.event) = (wake, event);
     }
 }
 

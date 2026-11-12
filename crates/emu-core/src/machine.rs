@@ -3,7 +3,7 @@
 //! Unicorn executes instructions. Everything around it — memory map, private
 //! peripheral bus, NVIC, exception entry/return, time keeping — lives here.
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
@@ -201,6 +201,16 @@ pub struct System {
     /// Another core shares the memory and peripherals: WFI/WFE sleep at most
     /// until the end of the run slice (the other core may wake this one).
     multicore: bool,
+    /// The last run ended with the core asleep in WFI/WFE (see [`Machine::is_asleep`]).
+    asleep: bool,
+    /// Set when the core executes SEV (see [`Machine::set_sev_signal`]).
+    sev_signal: Option<Rc<Cell<bool>>>,
+    /// The run ends at the next block boundary once one of these is set
+    /// (see [`Machine::set_end_run_signals`]).
+    end_run_signals: [Option<Rc<Cell<bool>>>; 2],
+    /// The run ended for `end_run_signals`: [`Machine::run`] returns
+    /// [`StopReason::Budget`] early.
+    ended_for_wake: bool,
     /// A BKPT without halting debug ends [`Machine::run`] with
     /// [`StopReason::Breakpoint`] (default; test programs end that way).
     /// Otherwise it escalates to HardFault (HFSR.DEBUGEVT) like on the chip,
@@ -420,6 +430,7 @@ impl System {
             continues,
             stores: info.stores,
             side_effects: info.side_effects,
+            sev: info.sev,
             branch_from,
             fell_through: branch_from.is_none().then_some((end, info.last_load_rt, info.last_fp_dst)),
         }
@@ -436,6 +447,11 @@ impl System {
         self.mmio_shift = if charge.continues { self.mmio_shift + charge.cycles } else { 0 };
         self.fell_through = charge.fell_through;
         self.branch_from = charge.branch_from;
+        if charge.sev
+            && let Some(signal) = &self.sev_signal
+        {
+            signal.set(true);
+        }
     }
 
     /// Cycles skipped by idle-loop fast-forwarding since reset.
@@ -473,6 +489,7 @@ struct BlockCharge {
     continues: bool,
     stores: bool,
     side_effects: bool,
+    sev: bool,
     branch_from: Option<(u64, bool)>,
     fell_through: Option<(u64, Option<u8>, Option<u8>)>,
 }
@@ -1120,6 +1137,57 @@ impl Machine {
         self.uc.get_data_mut().multicore = on;
     }
 
+    /// `signal` is set when the core executes SEV (it may wake another
+    /// core from WFE); the machine never clears it.
+    pub fn set_sev_signal(&mut self, signal: Rc<Cell<bool>>) {
+        self.uc.get_data_mut().sev_signal = Some(signal);
+    }
+
+    /// [`Self::run`] returns [`StopReason::Budget`] early, at the next block
+    /// boundary, once one of `signals` is set (by the core's SEV, by
+    /// peripherals): e.g. another core sleeps and has to run before this one
+    /// gets further ahead of it. `[None, None]`: runs end at their budget.
+    pub fn set_end_run_signals(&mut self, signals: [Option<Rc<Cell<bool>>>; 2]) {
+        self.uc.get_data_mut().end_run_signals = signals;
+    }
+
+    /// The last run ended with the core asleep in WFI/WFE, and nothing that
+    /// wakes it is pending (disabled interrupts do not): running it on only
+    /// executes its wait loop again, until an interrupt, its SysTick or
+    /// another core wakes it.
+    pub fn is_asleep(&self) -> bool {
+        let sys = self.uc.get_data();
+        sys.asleep && !sys.nvic.any_pending()
+    }
+
+    /// The cycle at which the core's own SysTick fires next (its peripherals'
+    /// events not included).
+    pub fn next_core_event(&self) -> Option<u64> {
+        self.uc.get_data().scs.systick.next_event()
+    }
+
+    /// Lets a sleeping core (see [`Self::is_asleep`]) sleep on until `cycle`,
+    /// as if a run had executed its wait loop until then. It wakes earlier
+    /// at its SysTick: then it stays there, awake, and has to run. Peripheral
+    /// events are not looked at: the caller makes sure that none can wake
+    /// the core before `cycle` (e.g. another core runs the peripherals they
+    /// share meanwhile and reports interrupt line changes as wake signals).
+    pub fn sleep_until(&mut self, cycle: u64) {
+        let sys = self.uc.get_data_mut();
+        if !sys.asleep {
+            return;
+        }
+        let systick = sys.scs.systick.next_event();
+        let to = systick.map_or(cycle, |t| t.min(cycle));
+        let now = sys.clock.cycles();
+        if to > now {
+            sys.clock.advance(to - now);
+        }
+        if systick.is_some_and(|t| t <= cycle) {
+            sys.asleep = false;
+        }
+    }
+
     fn with_memory(
         config: MachineConfig,
         bus: Bus,
@@ -1160,6 +1228,10 @@ impl Machine {
             idle_skipping: true,
             delay_skipping: false,
             multicore: false,
+            asleep: false,
+            sev_signal: None,
+            end_run_signals: [None, None],
+            ended_for_wake: false,
             bkpt_stops: true,
             stepping: false,
             watch_hit: None,
@@ -1317,6 +1389,12 @@ impl Machine {
                 return;
             }
             let entered_by_branch = sys.enter_block(addr);
+            if sys.end_run_signals.iter().flatten().any(|s| s.get()) {
+                // The other core may wake up: it has to run before this one goes on.
+                sys.ended_for_wake = true;
+                let _ = uc.emu_stop();
+                return;
+            }
             if sys.clock.cycles() >= sys.slice_end && !sys.continue_after_events() {
                 let _ = uc.emu_stop();
                 return;
@@ -1963,6 +2041,8 @@ impl Machine {
         sys.reset_requested = None;
         sys.last_invalid = None;
         sys.locked_up = false;
+        sys.asleep = false;
+        sys.ended_for_wake = false;
         sys.idle = IdleDetector::default();
         // Halts at the reset vector with reset vector catch.
         sys.debug.on_reset();
@@ -2106,6 +2186,7 @@ impl Machine {
     /// interrupts are not taken, like a debugger stepping with interrupts
     /// masked; exceptions caused by the instruction itself (SVC, faults) are.
     pub fn step(&mut self) -> StopReason {
+        self.uc.get_data_mut().asleep = false;
         self.sync_devices();
         if let Some(kind) = self.uc.get_data().reset_requested {
             self.reset_with(kind);
@@ -2180,6 +2261,9 @@ impl Machine {
             if let Some(stop) = self.take_watch_hit() {
                 return stop;
             }
+            if std::mem::take(&mut self.uc.get_data_mut().ended_for_wake) {
+                return StopReason::Budget;
+            }
             if self.is_halted() {
                 return StopReason::Halted { pc: self.pc() };
             }
@@ -2213,6 +2297,7 @@ impl Machine {
                 }
             }
             let result = loop {
+                self.uc.get_data_mut().asleep = false;
                 let result = self.uc.emu_start(u64::from(self.pc() | 1), u64::MAX, 0, 0);
                 self.uc.get_data_mut().debug.retired();
                 // A polling loop: run here, then Unicorn continues after it
@@ -2240,7 +2325,11 @@ impl Machine {
 
     fn stopped_on_purpose(&self) -> bool {
         let sys = self.uc.get_data();
-        sys.stop.is_some() || sys.watch_hit.is_some() || sys.reset_requested.is_some() || sys.nvic.any_pending()
+        sys.stop.is_some()
+            || sys.watch_hit.is_some()
+            || sys.reset_requested.is_some()
+            || sys.nvic.any_pending()
+            || sys.ended_for_wake
     }
 
     /// Unicorn returned early without an error: either we stopped it from a
@@ -2261,6 +2350,7 @@ impl Machine {
                 Some(t) => {
                     let now = sys.clock.cycles();
                     sys.clock.advance(t.saturating_sub(now).max(1));
+                    sys.asleep = true;
                 }
                 None => {
                     sys.stop = Some(StopReason::Lockup { pc, reason: "WFI with no wake-up source".into() });

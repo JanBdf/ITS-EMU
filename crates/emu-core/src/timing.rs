@@ -36,6 +36,8 @@ pub struct BlockTiming {
     /// The block may change state that idle detection does not compare
     /// (MSR, CPS, SVC, floating-point registers).
     pub side_effects: bool,
+    /// The block contains SEV (signals an event to the other cores).
+    pub sev: bool,
     /// The block ends with a conditional branch: one more cycle if it is taken.
     pub ends_with_branch: bool,
     /// The block ends with an unconditional branch (refill already counted).
@@ -407,6 +409,7 @@ pub fn analyze_block(code: &[u8], base: u32, divs: &mut Vec<DivSite>) -> BlockTi
         t.cycles += cycles;
         t.stores |= insn.store;
         t.side_effects |= insn.side_effects;
+        t.sev |= is_sev(&code[off..]);
         t.ends_with_branch = insn.branch;
         t.ends_with_jump = insn.jump;
         t.last_load_rt = match insn.kind {
@@ -419,6 +422,12 @@ pub fn analyze_block(code: &[u8], base: u32, divs: &mut Vec<DivSite>) -> BlockTi
         };
     });
     t
+}
+
+/// SEV or SEV.W at the start of `code`.
+fn is_sev(code: &[u8]) -> bool {
+    let hw = |i: usize| code.get(i..i + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+    hw(0) == Some(0xBF40) || (hw(0) == Some(0xF3AF) && hw(2) == Some(0x8004))
 }
 
 /// Address operand of a word load (LDR immediate or register offset).
@@ -635,6 +644,13 @@ mod tests {
         assert_eq!(analyze_block(&code, 0x0800_0002, &mut Vec::new()).entry_penalty, 1);
         assert_eq!(analyze_block(&code, 0x0800_0004, &mut Vec::new()).entry_penalty, 0);
         assert_eq!(block(&[0xBF00]).entry_penalty, 0);
+    }
+
+    #[test]
+    fn sev_is_found() {
+        assert!(block(&[0x2000, 0xBF40, 0x4770]).sev); // movs r0, #0; sev; bx lr
+        assert!(block(&[0xF3AF, 0x8004]).sev); // sev.w
+        assert!(!block(&[0xBF20, 0xBF30, 0xBF00]).sev); // wfe; wfi; nop
     }
 
     #[test]

@@ -52,9 +52,6 @@ impl Bits {
             })
         })
     }
-    fn any(&self) -> bool {
-        self.0.iter().any(|&w| w != 0)
-    }
 }
 
 /// Masking state of the core that influences the execution priority.
@@ -185,6 +182,11 @@ impl Nvic {
         (self.level.0[0] >> IRQ0) | (self.level.0[1] << (32 - IRQ0))
     }
 
+    /// Enabled external interrupts 0..32 (bit n: IRQ n).
+    pub fn irq_enabled_low(&self) -> u32 {
+        (self.enabled.0[0] >> IRQ0) | (self.enabled.0[1] << (32 - IRQ0))
+    }
+
     #[inline]
     pub fn set_irq_level(&mut self, irq: u32, high: bool) {
         if irq >= NUM_IRQS {
@@ -263,9 +265,13 @@ impl Nvic {
         (self.group_priority(exc) < self.execution_priority(masks)).then_some(exc)
     }
 
-    /// True if anything is pending (even if masked). Used to shorten time slices.
+    /// True if an enabled exception is pending (even if masked): it is taken
+    /// once the masks allow, and wakes the core from WFI. Used to shorten
+    /// time slices. A disabled one is not taken until it is enabled (an NVIC
+    /// write, which ends the slice): an interrupt line that stays high while
+    /// nobody uses its interrupt does not slow the core down.
     pub fn any_pending(&self) -> bool {
-        self.pending.any()
+        self.pending.iter().any(|e| self.is_enabled(e))
     }
 
     /// Number of active exceptions (RETTOBASE = active_count() <= 1).
