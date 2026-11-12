@@ -23,6 +23,9 @@ pub mod uart;
 pub mod uf2;
 pub mod usb;
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use emu_core::{Bus, CpuModel, MachineConfig, MemoryMap, Peripheral};
 
 pub use pico::{Pico, PicoError};
@@ -87,6 +90,11 @@ pub struct Rp2040 {
     pub analog: adc::SharedAnalog,
     /// The DMA (it needs the cores' memory once they exist).
     pub dma: dma::SharedDma,
+    /// Set when core n may have woken the other one: `wake` by a write to
+    /// its FIFO or an interrupt for the other core, `event` by SEV or a
+    /// spinlock release (that only WFE loops which look at memory wait for).
+    pub wake: [Rc<Cell<bool>>; 2],
+    pub event: [Rc<Cell<bool>>; 2],
 }
 
 fn attach<B: Block + 'static>(bus: &mut Bus, base: u32, block: B) {
@@ -152,6 +160,9 @@ pub fn build() -> ([Bus; 2], Rp2040) {
 
     let shared = shared::SharedBus::new(bus, sys::ROSC_HZ);
     shared.set_dma(dma.clone());
+    let wake: [Rc<Cell<bool>>; 2] = Default::default();
+    let event: [Rc<Cell<bool>>; 2] = Default::default();
+    shared.set_wake_signals(wake.clone());
     let sio = sio::SharedSio::default();
     let map = memory_map();
     let windows: Vec<_> = std::iter::once((map.periph_base, map.periph_size))
@@ -163,9 +174,10 @@ pub fn build() -> ([Bus; 2], Rp2040) {
         for &(base, size) in &windows {
             bus.attach(base, size, Box::new(shared.window(core, base)));
         }
-        bus.attach(SIO_BASE, 0x1000, Box::new(sio::Sio::new(core, sio.clone(), pins.clone())) as Box<dyn Peripheral>);
+        let sio = sio::Sio::new(core, sio.clone(), pins.clone()).with_wake_signals(wake[core].clone(), event[core].clone());
+        bus.attach(SIO_BASE, 0x1000, Box::new(sio) as Box<dyn Peripheral>);
         bus.attach_device(Box::new(shared.devices(core)));
         bus
     };
-    ([core_bus(0), core_bus(1)], Rp2040 { pins, serial, notices, analog, dma })
+    ([core_bus(0), core_bus(1)], Rp2040 { pins, serial, notices, analog, dma, wake, event })
 }

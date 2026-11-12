@@ -18,11 +18,22 @@ pub enum PicoError {
 /// How far one core runs ahead of the other (ps): a turn ends sooner when
 /// the core sleeps, and accesses to shared state take effect up to a turn late.
 const TURN_PS: u64 = 10_000_000;
+/// How far a core may run ahead of the other while that one sleeps (ps).
+/// Its turn ends sooner when it may wake the sleeping core (a FIFO write,
+/// an interrupt the sleeper has enabled, SEV, a spinlock release), so the
+/// sleeping core sees that as soon as it would on the chip.
+const SLEEP_TURN_PS: u64 = 1_000_000_000;
+/// End of the boot ROM. A core asleep in it waits to be launched, which
+/// only a write to its FIFO does: SEV and spinlocks (the SDK's mutexes use
+/// them all the time) do not wake it.
+const ROM_END: u32 = 0x4000;
 
 pub struct Pico {
     /// Core 0, which owns the flash and RAM, and core 1.
     cores: [Machine; 2],
     mcu: Rp2040,
+    /// The other core did something that may wake this one since it last ran.
+    woken: [bool; 2],
 }
 
 impl Pico {
@@ -38,8 +49,10 @@ impl Pico {
         }
         core0.set_multicore(true);
         mcu.dma.borrow_mut().set_memory(core0.memory_view());
-        let core1 = Machine::new_sharing_memory(crate::machine_config(1), bus1, &core0)?;
-        let mut pico = Self { cores: [core0, core1], mcu };
+        let mut core1 = Machine::new_sharing_memory(crate::machine_config(1), bus1, &core0)?;
+        core0.set_sev_signal(mcu.event[0].clone());
+        core1.set_sev_signal(mcu.event[1].clone());
+        let mut pico = Self { cores: [core0, core1], mcu, woken: [false; 2] };
         pico.reset();
         Ok(pico)
     }
@@ -71,15 +84,53 @@ impl Pico {
     pub fn run_until_ps(&mut self, ps: u64) -> Result<(), (usize, StopReason)> {
         loop {
             let t = [0, 1].map(|n| self.cores[n].clock().time_ps());
-            // the core behind, up to a turn past the other
-            let n = usize::from(t[1] < t[0]);
+            // asleep in WFI/WFE, and nothing has happened that may wake it
+            let sleeps = [0, 1].map(|n| self.cores[n].is_asleep() && !self.woken[n]);
+            // the core behind (at a tie the one awake)
+            let n = if t[0] == t[1] { usize::from(sleeps[0] && !sleeps[1]) } else { usize::from(t[1] < t[0]) };
             if t[n] >= ps {
                 break;
             }
-            let target = ps.min(t[1 - n] + TURN_PS);
-            let clock = self.cores[n].clock();
+            let o = 1 - n;
+            if sleeps[n] && !sleeps[o] {
+                // The other core got this far without waking this one: it
+                // slept all the while (running it would only repeat its wait).
+                let cycle = self.cores[n].clock().cycle_at_ps(t[o].min(ps));
+                self.cores[n].sleep_until(cycle);
+                if self.cores[n].is_asleep() {
+                    continue;
+                }
+                // its SysTick woke it: it runs from there
+            }
+            // up to a turn past the other core, or further while that one sleeps
+            let mut target = ps.min(t[o] + TURN_PS);
+            if sleeps[o] {
+                let mut until = ps.min(t[n] + SLEEP_TURN_PS);
+                if let Some(c) = self.cores[o].next_core_event() {
+                    until = until.min(self.cores[o].clock().ps_at_cycle(c));
+                }
+                target = target.max(until);
+            }
+            // what may wake the other core
+            let events_wake = self.cores[o].pc() >= ROM_END;
+            let (wake, event) = (&self.mcu.wake[n], &self.mcu.event[n]);
+            wake.set(false);
+            event.set(false);
+            let core = &mut self.cores[n];
+            core.set_end_run_signals(if sleeps[o] {
+                [Some(wake.clone()), events_wake.then(|| event.clone())]
+            } else {
+                [None, None]
+            });
+            let clock = core.clock();
             let budget = clock.cycle_at_ps(target).saturating_sub(clock.cycles()).max(1);
-            match self.cores[n].run(budget) {
+            let result = core.run(budget);
+            // it has run its code again after what the other core did
+            self.woken[n] = false;
+            if wake.get() || (events_wake && event.get()) {
+                self.woken[o] = true;
+            }
+            match result {
                 StopReason::Budget => {}
                 other => return Err((n, other)),
             }
@@ -121,6 +172,7 @@ impl Pico {
         for core in &mut self.cores {
             core.reset();
         }
+        self.woken = [false; 2];
         self.mcu.pins.borrow_mut().reset();
     }
 

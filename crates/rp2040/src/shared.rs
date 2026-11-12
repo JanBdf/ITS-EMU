@@ -5,7 +5,7 @@
 //! clock never goes back): an access of the core behind takes effect up to a
 //! turn late. Interrupt lines go to both cores' NVICs, as on the chip.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use emu_core::nvic::Nvic;
@@ -32,6 +32,11 @@ struct Shared {
     applied: [u32; 2],
     /// The DMA, whose transfers are made around every access and update.
     dma: Option<SharedDma>,
+    /// Interrupts each core's NVIC had enabled at its last access.
+    enabled: [u32; 2],
+    /// Each core's wake signal: set when its accesses or updates change
+    /// interrupt lines the other core has enabled but not seen yet.
+    wake: [Option<Rc<Cell<bool>>>; 2],
 }
 
 #[derive(Clone)]
@@ -47,7 +52,14 @@ impl SharedBus {
             next_event: None,
             applied: [0; 2],
             dma: None,
+            enabled: [0; 2],
+            wake: [None, None],
         })))
+    }
+
+    /// The cores' wake signals (index: core).
+    pub fn set_wake_signals(&self, signals: [Rc<Cell<bool>>; 2]) {
+        self.0.borrow_mut().wake = signals.map(Some);
     }
 
     /// The DMA that moves data on this bus.
@@ -94,6 +106,13 @@ impl SharedBus {
             changed &= changed - 1;
         }
         s.applied[core] = levels;
+        s.enabled[core] = ctx.nvic.irq_enabled_low();
+        if (levels ^ s.applied[1 - core]) & s.enabled[1 - core] != 0
+            && let Some(w) = &s.wake[core]
+        {
+            // an interrupt for the other core, which may sleep
+            w.set(true);
+        }
         if let Some(kind) = s.nvic.reset_request.take() {
             ctx.nvic.reset_request = Some(kind);
         }
