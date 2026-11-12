@@ -200,6 +200,29 @@ impl Layer {
     }
 }
 
+/// Zoom and pan of the board inside its panel.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Zoom {
+    /// Scale relative to fitting the panel (1: fits).
+    pub factor: f32,
+    /// Offset of the board's centre from the panel's centre (points).
+    pub pan: Vec2,
+}
+
+impl Default for Zoom {
+    fn default() -> Self {
+        Self { factor: 1.0, pan: Vec2::ZERO }
+    }
+}
+
+impl Zoom {
+    pub const MAX: f32 = 4.0;
+}
+
+/// Widest rendering of the drawing (pixels); zoomed in further it is
+/// stretched (three layers of RGBA at this width take 150 MB).
+const MAX_RENDER_W: f32 = 3600.0;
+
 /// How the board is shown.
 #[derive(Clone, Copy, PartialEq)]
 pub struct View {
@@ -402,23 +425,55 @@ fn glass_pixel(x: f32, y: f32) -> (f32, f32) {
     (u * 480.0, v * 320.0)
 }
 
-pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &View) -> BoardInput {
-    let avail = ui.available_size();
-    let s = (avail.x / BOARD_W).min(avail.y / BOARD_H).max(0.4);
-    let (outer, _) = ui.allocate_exact_size(Vec2::new(BOARD_W, BOARD_H) * s, Sense::hover());
+pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &View, zoom: &mut Zoom) -> BoardInput {
+    let panel = ui.available_rect_before_wrap();
+    let (panel_rect, bench) = ui.allocate_exact_size(panel.size(), Sense::click_and_drag());
+    // Ctrl + wheel zooms at the pointer, the middle button or Shift + drag pans
+    let (wheel, ctrl, shift, middle) = ui.input(|i| {
+        let wheel: f32 = i
+            .raw
+            .events
+            .iter()
+            .map(|e| if let egui::Event::MouseWheel { delta, .. } = e { delta.y } else { 0.0 })
+            .sum();
+        (wheel, i.modifiers.command, i.modifiers.shift, i.pointer.middle_down())
+    });
+    let fit_s = (panel_rect.width() / BOARD_W).min(panel_rect.height() / BOARD_H).max(0.2);
+    if ctrl && wheel != 0.0 && bench.contains_pointer() {
+        let old = zoom.factor;
+        zoom.factor = (zoom.factor * 1.15_f32.powf(wheel.signum())).clamp(1.0, Zoom::MAX);
+        if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
+            // keep the point under the pointer where it is
+            let centre = panel_rect.center() + zoom.pan;
+            zoom.pan += (p - centre) * (1.0 - zoom.factor / old);
+        }
+    }
+    if bench.dragged() && (middle || shift) {
+        zoom.pan += bench.drag_delta();
+    }
+    if zoom.factor <= 1.0 {
+        *zoom = Zoom::default();
+    } else {
+        // not further than half the board out of the panel
+        let half = Vec2::new(BOARD_W, BOARD_H) * fit_s * zoom.factor / 2.0;
+        zoom.pan = zoom.pan.clamp(-half, half);
+    }
+    let s = fit_s * zoom.factor;
+    let outer = Rect::from_center_size(panel_rect.center() + zoom.pan, Vec2::new(BOARD_W, BOARD_H) * s);
     // the drawing is rendered in physical pixels: place it on whole pixels, so
     // that it is not resampled
     let ppp = ui.ctx().pixels_per_point();
-    let max = ui.ctx().input(|i| i.max_texture_side) as f32;
+    let max = (ui.ctx().input(|i| i.max_texture_side) as f32).min(MAX_RENDER_W);
     let px = (outer.size() * ppp).round();
     let fit = (max / px.x.max(px.y)).min(1.0);
     let size = [(px.x * fit).max(1.0) as u32, (px.y * fit).max(1.0) as u32];
     let outer = Rect::from_min_size((outer.min.to_vec2() * ppp).round().to_pos2() / ppp, px / ppp);
     let s = outer.width() / BOARD_W;
-    let painter = ui.painter_at(outer);
+    let painter = ui.painter_at(panel_rect);
     let pcb = Pcb { painter: &painter, origin: outer.min, s };
     let mut input = BoardInput::default();
 
+    ui.set_clip_rect(panel_rect);
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
     for (n, (id, at)) in tex.layers(ui.ctx(), size).into_iter().enumerate() {
         let alpha = match n {
@@ -427,7 +482,9 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
             _ => 1.0,
         };
         if alpha > 0.0 {
-            let at = Rect::from_min_max(outer.min + at.min.to_vec2() / ppp, outer.min + at.max.to_vec2() / ppp);
+            // the rendering may be smaller than the drawing (MAX_RENDER_W)
+            let k = outer.width() / size[0] as f32;
+            let at = Rect::from_min_max(outer.min + at.min.to_vec2() * k, outer.min + at.max.to_vec2() * k);
             painter.image(id, at, uv, Color32::WHITE.gamma_multiply(alpha));
         }
     }

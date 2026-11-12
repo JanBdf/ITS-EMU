@@ -2,7 +2,8 @@
 //! flash interface ([`crate::flash`]) everything `SystemClock_Config()`
 //! waits on.
 //!
-//! Oscillators and PLLs become ready immediately. The RCC computes the
+//! Oscillators and PLLs report ready after their start-up / lock time (the
+//! datasheet's typical values, see `READY_NS`). The RCC computes the
 //! resulting bus clocks, publishes them in [`Clocks`] and sets the core clock
 //! of the virtual time base.
 
@@ -93,6 +94,14 @@ const CR_PLLON: u32 = 1 << 24;
 const CR_PLLI2SON: u32 = 1 << 26;
 const CR_PLLSAION: u32 = 1 << 28;
 const CR_WRITABLE: u32 = 0x150D_00F9; // ON bits, HSITRIM, HSEBYP, CSSON
+const CR_HSEBYP: u32 = 1 << 18;
+/// ON bits of CR whose ready flag is the bit above, in `ready_at` order.
+const CR_ON: [u32; 5] = [CR_HSION, CR_HSEON, CR_PLLON, CR_PLLI2SON, CR_PLLSAION];
+/// Time from switching on to ready (ns): HSI start-up 2.2 µs typ (4 max),
+/// HSE in bypass a few input clocks, a crystal 2 ms typ, PLL lock 100 µs
+/// (datasheet: 75 min, 200 max; not measured on the board).
+const READY_NS: [u64; 5] = [3_000, 2_000, 100_000, 100_000, 100_000];
+const HSE_CRYSTAL_NS: u64 = 2_000_000;
 
 pub struct Rcc {
     clocks: SharedClocks,
@@ -110,6 +119,8 @@ pub struct Rcc {
     plli2scfgr: u32,
     pllsaicfgr: u32,
     dckcfgr: u32,
+    /// Cycle at which each of `CR_ON` is ready (while it is on).
+    ready_at: [u64; 5],
 }
 
 impl Rcc {
@@ -129,6 +140,7 @@ impl Rcc {
             plli2scfgr: 0,
             pllsaicfgr: 0,
             dckcfgr: 0,
+            ready_at: [0; 5],
         };
         r.reset_regs();
         r
@@ -148,17 +160,31 @@ impl Rcc {
         self.plli2scfgr = 0x2000_3000;
         self.pllsaicfgr = 0x2400_3000;
         self.dckcfgr = 0;
+        self.ready_at = [0; 5];
     }
 
-    /// CR with the ready flags derived from the enable bits.
-    fn cr_value(&self) -> u32 {
+    /// CR with the ready flags: set once the source has been on for its
+    /// start-up time.
+    fn cr_value(&self, now: u64) -> u32 {
         let mut v = self.cr & !(0x2A02_0002);
-        for on in [CR_HSION, CR_HSEON, CR_PLLON, CR_PLLI2SON, CR_PLLSAION] {
-            if self.cr & on != 0 {
+        for (i, on) in CR_ON.into_iter().enumerate() {
+            if self.cr & on != 0 && now >= self.ready_at[i] {
                 v |= on << 1; // xxxRDY is the bit above xxxON
             }
         }
         v | (0x80 << 8) // HSICAL
+    }
+
+    /// Starts the start-up time of sources switched on by a CR write.
+    fn write_cr(&mut self, v: u32, clock: &Clock) {
+        let was = self.cr;
+        self.cr = v & CR_WRITABLE;
+        for (i, on) in CR_ON.into_iter().enumerate() {
+            if self.cr & on != 0 && was & on == 0 {
+                let ns = if on == CR_HSEON && self.cr & CR_HSEBYP == 0 { HSE_CRYSTAL_NS } else { READY_NS[i] };
+                self.ready_at[i] = clock.cycles() + clock.ns_to_cycles(ns);
+            }
+        }
     }
 
     fn pll_out(&self) -> u32 {
@@ -205,9 +231,9 @@ impl Rcc {
         ctx.clock.set_cpu_hz(hclk.max(1));
     }
 
-    fn reg(&self, off: u32) -> u32 {
+    fn reg(&self, off: u32, now: u64) -> u32 {
         match off {
-            0x00 => self.cr_value(),
+            0x00 => self.cr_value(now),
             0x04 => self.pllcfgr,
             // SWS mirrors SW: the switch happens immediately.
             0x08 => (self.cfgr & !0xC) | ((self.cfgr & 3) << 2),
@@ -245,19 +271,30 @@ impl Peripheral for Rcc {
         "RCC"
     }
 
-    fn read_stable_until(&self, _offset: u32, _clock: &Clock) -> u64 {
-        u64::MAX
+    fn read_stable_until(&self, offset: u32, clock: &Clock) -> u64 {
+        if offset & !3 != 0 {
+            return u64::MAX;
+        }
+        // CR changes when a source becomes ready
+        let now = clock.cycles();
+        CR_ON
+            .into_iter()
+            .zip(self.ready_at)
+            .filter(|&(on, at)| self.cr & on != 0 && at > now)
+            .map(|(_, at)| at)
+            .min()
+            .unwrap_or(u64::MAX)
     }
 
-    fn read(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
-        extract_read(self.reg(off & !3), off, size)
+    fn read(&mut self, ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
+        extract_read(self.reg(off & !3, ctx.now()), off, size)
     }
 
     fn write(&mut self, ctx: &mut DeviceCtx, off: u32, size: u32, value: u32) {
         let aligned = off & !3;
-        let v = merge_write(self.reg(aligned), off, size, value);
+        let v = merge_write(self.reg(aligned, ctx.now()), off, size, value);
         match aligned {
-            0x00 => self.cr = v & CR_WRITABLE,
+            0x00 => self.write_cr(v, ctx.clock),
             0x04 => self.pllcfgr = v & 0x0F43_7FFF,
             0x08 => self.cfgr = v & !0xC,
             0x0C => self.cir = v & 0x3F00 & !(v >> 16), // interrupt enables; flags never set
@@ -385,10 +422,16 @@ mod tests {
         let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
         // HSE bypass + on, wait for ready
         rcc.write(&mut ctx, 0x00, 4, 0x0005_0083);
+        assert_eq!(rcc.read(&mut ctx, 0x00, 4) & (1 << 17), 0, "HSE not ready at once");
+        let us = ctx.clock.ns_to_cycles(1_000);
+        ctx.clock.advance(3 * us);
         assert_ne!(rcc.read(&mut ctx, 0x00, 4) & (1 << 17), 0, "HSERDY");
         // PLLM=8 PLLN=360 PLLP=2 PLLQ=7 from HSE
         rcc.write(&mut ctx, 0x04, 4, 8 | (360 << 6) | (1 << 22) | (7 << 24));
         rcc.write(&mut ctx, 0x00, 4, 0x0105_0083);
+        assert_eq!(rcc.read(&mut ctx, 0x00, 4) & (1 << 25), 0, "PLL locks later");
+        assert_eq!(rcc.read_stable_until(0, ctx.clock), ctx.now() + 100 * us, "until the lock");
+        ctx.clock.advance(100 * us);
         assert_ne!(rcc.read(&mut ctx, 0x00, 4) & (1 << 25), 0, "PLLRDY");
         // HPRE=1, PPRE1=/4, PPRE2=/2, SW=PLL
         rcc.write(&mut ctx, 0x08, 4, (5 << 10) | (4 << 13) | 2);

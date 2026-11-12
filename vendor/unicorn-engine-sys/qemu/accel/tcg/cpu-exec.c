@@ -285,9 +285,9 @@ static inline TranslationBlock *tb_find(CPUState *cpu,
      * system emulation. So it's not safe to make a direct jump to a TB
      * spanning two pages because the mapping for the second page can change.
      */
-    if (tb->page_addr[1] != -1) {
-        last_tb = NULL;
-    }
+    /* ITS-EMU: blocks that span two pages are jump targets as well (see
+     * use_goto_tb in target/arm/translate.c: no MMU, so no mapping that
+     * could change under the second page). */
     /* See if we can patch the calling TB. */
     if (last_tb) {
         tb_exec_unlock(cpu->uc);

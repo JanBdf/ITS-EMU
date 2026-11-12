@@ -7,7 +7,8 @@
 //!
 //! The panel is modelled physically: GRAM has 320 columns (sources) and 480
 //! rows (gates). MADCTL (0x36) controls how CASET/PASET addresses map onto
-//! GRAM, the SS/GS bits of Display Function Control (0xB6) mirror the scan.
+//! GRAM, the SS/GS bits of Display Function Control (0xB6) mirror the scan,
+//! Vertical Scrolling (0x33, 0x37) rotates the gate lines of the scroll area.
 
 pub const GRAM_COLS: usize = 320;
 pub const GRAM_ROWS: usize = 480;
@@ -32,10 +33,12 @@ pub struct Ili9486 {
     sleeping: bool,
     display_on: bool,
     inverted: bool,
+    /// Vertical scrolling: top fixed area, scroll area height, start line.
+    scroll: Scroll,
     /// Current command and the index of its next parameter word.
     cmd: u8,
     param_idx: usize,
-    params: [u8; 4],
+    params: [u8; 6],
     /// First byte of a data word that is still incomplete.
     pending_byte: Option<u8>,
     /// Incremented whenever the visible image may have changed.
@@ -63,9 +66,10 @@ impl Ili9486 {
             sleeping: true,
             display_on: false,
             inverted: false,
+            scroll: Scroll::default(),
             cmd: 0,
             param_idx: 0,
-            params: [0; 4],
+            params: [0; 6],
             pending_byte: None,
             generation: 0,
         };
@@ -86,6 +90,7 @@ impl Ili9486 {
         self.sleeping = true;
         self.display_on = false;
         self.inverted = false;
+        self.scroll = Scroll::default();
         self.cmd = 0;
         self.param_idx = 0;
         self.pending_byte = None;
@@ -158,6 +163,15 @@ impl Ili9486 {
                 self.page_start = u16::from_be_bytes([self.params[0], self.params[1]]);
                 self.page_end = u16::from_be_bytes([self.params[2], self.params[3]]);
             }
+            (0x33, 5) => {
+                let word = |i: usize| u16::from_be_bytes([self.params[i], self.params[i + 1]]);
+                let (tfa, vsa) = (word(0), word(2));
+                self.set_state(|d| d.scroll = Scroll { tfa, vsa, vsp: d.scroll.vsp });
+            }
+            (0x37, 1) => {
+                let vsp = u16::from_be_bytes([self.params[0], self.params[1]]);
+                self.set_state(|d| d.scroll.vsp = vsp);
+            }
             (0x36, 0) => self.set_state(|d| d.madctl = p),
             (0xB6, 0..=2) => {
                 self.dfc[idx] = p;
@@ -213,7 +227,7 @@ impl Ili9486 {
         }
         let gc = if self.dfc[1] & DFC_SS != 0 { GRAM_COLS - 1 - px } else { px };
         let gr = if self.dfc[1] & DFC_GS != 0 { GRAM_ROWS - 1 - py } else { py };
-        let mut v = self.gram[gr * GRAM_COLS + gc];
+        let mut v = self.gram[self.scroll.source(gr) * GRAM_COLS + gc];
         if self.inverted {
             v = !v;
         }
@@ -235,6 +249,35 @@ impl Ili9486 {
         frame.inverted = self.inverted;
         frame.bgr = self.madctl & MADCTL_BGR != 0;
         frame.dark = self.is_dark();
+        frame.scroll = self.scroll;
+    }
+}
+
+/// Vertical scrolling (gate lines): the lines `tfa..tfa + vsa` show memory
+/// lines starting at `vsp`, wrapping within the area.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Scroll {
+    tfa: u16,
+    vsa: u16,
+    vsp: u16,
+}
+
+impl Default for Scroll {
+    fn default() -> Self {
+        Self { tfa: 0, vsa: GRAM_ROWS as u16, vsp: 0 }
+    }
+}
+
+impl Scroll {
+    /// Memory line shown at gate line `gr`.
+    #[inline]
+    fn source(&self, gr: usize) -> usize {
+        let (tfa, vsa, vsp) = (usize::from(self.tfa), usize::from(self.vsa), usize::from(self.vsp));
+        if vsa == 0 || gr < tfa || gr >= tfa + vsa || tfa + vsa > GRAM_ROWS {
+            return gr;
+        }
+        let line = tfa + (gr - tfa + vsp.saturating_sub(tfa)) % vsa;
+        line.min(GRAM_ROWS - 1)
     }
 }
 
@@ -247,6 +290,7 @@ pub struct PanelFrame {
     inverted: bool,
     bgr: bool,
     dark: bool,
+    scroll: Scroll,
 }
 
 impl PanelFrame {
@@ -263,7 +307,7 @@ impl PanelFrame {
         for (px, py) in at {
             let gc = if self.flip_cols { GRAM_COLS - 1 - px } else { px };
             let gr = if self.flip_rows { GRAM_ROWS - 1 - py } else { py };
-            let v = self.gram[gr * GRAM_COLS + gc] ^ invert;
+            let v = self.gram[self.scroll.source(gr) * GRAM_COLS + gc] ^ invert;
             let (r, g, b) = (v >> 11, (v >> 5) & 0x3F, v & 0x1F);
             // The panel's colour filter is BGR; without the BGR bit red and blue swap.
             if self.bgr { f(r, g, b) } else { f(b, g, r) }
@@ -335,6 +379,37 @@ mod tests {
             });
             let want: Vec<u32> = at.iter().map(|&(x, y)| d.panel_pixel(x, y)).collect();
             assert_eq!(got, want, "madctl {madctl:#x} dfc {dfc1:#x}");
+        }
+    }
+
+    #[test]
+    fn vertical_scroll_rotates_the_area() {
+        let mut d = Ili9486::new();
+        for (i, v) in d.gram.iter_mut().enumerate() {
+            *v = (i / GRAM_COLS) as u16 * 37; // each line holds its own colour
+        }
+        d.sleeping = false;
+        d.display_on = true;
+        // top fixed 10 lines, scroll area 100 lines, start at line 30
+        cmd(&mut d, 0x33, &[0, 10, 0, 100, 1, 0x6E]);
+        cmd(&mut d, 0x37, &[0, 30]);
+        // what memory line `line` looks like without scrolling
+        let plain = |d: &mut Ili9486, line: usize| {
+            let s = d.scroll;
+            d.scroll = Scroll::default();
+            let v = d.panel_pixel(0, line);
+            d.scroll = s;
+            v
+        };
+        for (gate, line) in [(5, 5), (10, 30), (109, 10 + (99 + 20) % 100), (200, 200)] {
+            let want = plain(&mut d, line);
+            assert_eq!(d.panel_pixel(0, gate), want, "gate line {gate} shows memory line {line}");
+            let mut frame = PanelFrame::default();
+            d.capture(&mut frame);
+            let mut got = Vec::new();
+            frame.for_each_rgb565([(0, gate)].into_iter(), |r, g, b| got.push((r, g, b)));
+            let v = d.gram[line * GRAM_COLS];
+            assert_eq!(got, [(v & 0x1F, (v >> 5) & 0x3F, v >> 11)], "captured frame, gate line {gate}");
         }
     }
 

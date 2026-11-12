@@ -514,14 +514,37 @@ impl Drop for DevicesPanel {
 fn show_encoder(ui: &mut egui::Ui, id: u64, emu: &EmuHandle) {
     ui.horizontal(|ui| {
         ui.label("Turn:");
-        for (label, detents, hover) in [
-            ("⟲ 10", -10, "10 detents counter-clockwise"),
-            ("⟲ 1", -1, "one detent counter-clockwise"),
-            ("⟳ 1", 1, "one detent clockwise"),
-            ("⟳ 10", 10, "10 detents clockwise"),
+        // a hand turns one detent in about 25 ms, a quick spin takes 8 ms per detent
+        for (label, detents, ns, hover) in [
+            ("⟲ 10", -10, 2_000_000, "10 detents counter-clockwise (a quick spin)"),
+            ("⟲ 1", -1, 6_000_000, "one detent counter-clockwise"),
+            ("⟳ 1", 1, 6_000_000, "one detent clockwise"),
+            ("⟳ 10", 10, 2_000_000, "10 detents clockwise (a quick spin)"),
         ] {
             if ui.button(label).on_hover_text(hover).clicked() {
-                emu.send(Command::Turn(id, detents));
+                emu.send(Command::Turn(id, detents, ns));
+            }
+        }
+        // the mouse wheel over the knob turns it one detent per notch
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+        let p = ui.painter();
+        p.circle_filled(rect.center(), 12.0, ui.visuals().widgets.inactive.bg_fill);
+        p.circle_stroke(rect.center(), 12.0, egui::Stroke::new(1.0, ui.visuals().widgets.inactive.fg_stroke.color));
+        p.line_segment(
+            [rect.center(), rect.center() + egui::vec2(0.0, -10.0)],
+            egui::Stroke::new(2.0, ui.visuals().widgets.inactive.fg_stroke.color),
+        );
+        let resp = resp.on_hover_text("Scroll here to turn the knob (one detent per notch)");
+        if resp.hovered() {
+            let scroll: f32 = ui.input(|i| {
+                i.raw
+                    .events
+                    .iter()
+                    .map(|e| if let egui::Event::MouseWheel { delta, .. } = e { delta.y } else { 0.0 })
+                    .sum()
+            });
+            if scroll != 0.0 {
+                emu.send(Command::Turn(id, -scroll.signum() as i32, 6_000_000));
             }
         }
     });

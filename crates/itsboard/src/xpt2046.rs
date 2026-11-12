@@ -16,16 +16,31 @@ pub struct RawTouch {
     pub z2: u16,
 }
 
-#[derive(Default)]
 pub struct Xpt2046 {
     touch: Option<RawTouch>,
     readout: [u8; 2],
     readout_left: usize,
+    /// Noise generator: a finger is not a point and the plates are not
+    /// quiet, so the readings jitter by a few counts.
+    noise: u32,
+}
+
+impl Default for Xpt2046 {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Xpt2046 {
     pub fn new() -> Self {
-        Self::default()
+        Self { touch: None, readout: [0; 2], readout_left: 0, noise: 0x2545_F491 }
+    }
+
+    fn jitter(&mut self, span: u32) -> i32 {
+        self.noise ^= self.noise << 13;
+        self.noise ^= self.noise >> 17;
+        self.noise ^= self.noise << 5;
+        (self.noise % (2 * span + 1)) as i32 - span as i32
     }
 
     pub fn set_touch(&mut self, touch: Option<RawTouch>) {
@@ -56,13 +71,14 @@ impl Xpt2046 {
         0
     }
 
-    fn convert(&self, channel: u8, eight_bit: bool) -> u16 {
+    fn convert(&mut self, channel: u8, eight_bit: bool) -> u16 {
         let t = self.touch;
+        let noisy = |me: &mut Self, v: u16, span: u32| (i32::from(v) + me.jitter(span)).clamp(0, 4095) as u16;
         let v = match (channel, t) {
-            (5, Some(t)) => t.x,
-            (1, Some(t)) => t.y,
-            (3, Some(t)) => t.z1,
-            (4, Some(t)) => t.z2,
+            (5, Some(t)) => noisy(self, t.x, 2),
+            (1, Some(t)) => noisy(self, t.y, 2),
+            (3, Some(t)) => noisy(self, t.z1, 20),
+            (4, Some(t)) => noisy(self, t.z2, 50),
             (3, None) => 0,
             (4, None) => 4095,
             (2 | 6, _) => 2048, // VBAT, AUX
@@ -93,8 +109,8 @@ mod tests {
         let mut t = Xpt2046::new();
         t.set_touch(Some(RawTouch { x: 3000, y: 1234, z1: 400, z2: 3000 }));
         assert!(!t.pen_irq());
-        assert_eq!(read_adc(&mut t, 0xD0), 3000);
-        assert_eq!(read_adc(&mut t, 0x90), 1234);
+        assert!((2998..=3002).contains(&read_adc(&mut t, 0xD0)), "x within the jitter");
+        assert!((1232..=1236).contains(&read_adc(&mut t, 0x90)), "y within the jitter");
         t.set_touch(None);
         assert!(t.pen_irq());
     }

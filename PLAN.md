@@ -81,8 +81,10 @@ Known gaps:
 
 Speed (Unicorn is vendored with patches, `vendor/README.md`):
 
-- Remaining cost in busy programs: per-block hook (~20–30 %), next-block
-  lookup after indirect branches (up to 25 %), MMIO through QEMU's memory
+- Remaining cost in busy programs: per-block hook (~45–50 %; registered
+  directly with Unicorn, `block_hook` in `machine.rs`, as the binding's
+  proxy cost a quarter of it), next-block lookup after function returns
+  (~15 %; direct branches now chain across pages), MMIO through QEMU's memory
   API (~20 % when polling), and the sweep over all ~55 peripherals at every
   event (`update`/`next_event`, ~15 % while drawing). A per-peripheral
   next-event cache would cut the sweeps, but `update` re-asserts IRQ levels

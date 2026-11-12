@@ -30,6 +30,34 @@ pub struct Settings {
     pub line_ending: LineEnding,
     /// The serial console shows what was sent.
     pub echo: bool,
+    /// The serial console shows the virtual time of each line.
+    pub timestamps: bool,
+    /// Light, dark or the system's theme.
+    pub theme: Theme,
+    /// Emulation speed (virtual seconds per second; 0: as fast as possible).
+    pub speed: f64,
+    /// Contact bounce of the buttons and encoders.
+    pub bounce: bool,
+    /// Window size and position of the last run (logical points).
+    pub window: Option<WindowState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowState {
+    pub size: [f32; 2],
+    pub pos: Option<[f32; 2]>,
+    pub maximized: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Theme {
+    System,
+    Dark,
+    Light,
+}
+
+impl Theme {
+    pub const ALL: [(Self, &str); 3] = [(Self::System, "system"), (Self::Dark, "dark"), (Self::Light, "light")];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -100,6 +128,12 @@ impl Default for Settings {
             console_side: ConsoleSide::Auto,
             line_ending: LineEnding::Lf,
             echo: false,
+            timestamps: false,
+            theme: Theme::System,
+            speed: 1.0,
+            // like the real board: students debounce
+            bounce: true,
+            window: None,
         }
     }
 }
@@ -131,6 +165,22 @@ impl Settings {
                 "auto_reload" => self.auto_reload = on,
                 "console" => self.console = on,
                 "echo" => self.echo = on,
+                "timestamps" => self.timestamps = on,
+                "bounce" => self.bounce = on,
+                "theme" => self.theme = by_name(&Theme::ALL, value).unwrap_or(self.theme),
+                "speed" => self.speed = value.parse().unwrap_or(self.speed),
+                "window" => {
+                    // w h [x y] [max]
+                    let v: Vec<&str> = value.split_whitespace().collect();
+                    let f = |i: usize| v.get(i).and_then(|t| t.parse::<f32>().ok());
+                    if let (Some(w), Some(h)) = (f(0), f(1)) {
+                        let pos = match (f(2), f(3)) {
+                            (Some(x), Some(y)) => Some([x, y]),
+                            _ => None,
+                        };
+                        self.window = Some(WindowState { size: [w, h], pos, maximized: v.contains(&"max") });
+                    }
+                }
                 "console_side" => self.console_side = by_name(&ConsoleSide::ALL, value).unwrap_or(self.console_side),
                 "line_ending" => self.line_ending = by_name(&LineEnding::ALL, value).unwrap_or(self.line_ending),
                 "recent" if self.recent.len() < MAX_RECENT => self.recent.push(PathBuf::from(value.trim())),
@@ -158,14 +208,28 @@ impl Settings {
         let Some(path) = Self::path() else { return };
         let mut text = format!(
             "# ITS-Board emulator (GUI)\nusb = {}\nauto_reload = {}\nconsole = {}\nconsole_side = {}\n\
-             line_ending = {}\necho = {}\n",
+             line_ending = {}\necho = {}\ntimestamps = {}\ntheme = {}\nspeed = {}\nbounce = {}\n",
             self.usb,
             self.auto_reload,
             self.console,
             name(&ConsoleSide::ALL, self.console_side),
             name(&LineEnding::ALL, self.line_ending),
             self.echo,
+            self.timestamps,
+            name(&Theme::ALL, self.theme),
+            self.speed,
+            self.bounce,
         );
+        if let Some(w) = &self.window {
+            text += &format!("window = {:.0} {:.0}", w.size[0], w.size[1]);
+            if let Some([x, y]) = w.pos {
+                text += &format!(" {x:.0} {y:.0}");
+            }
+            if w.maximized {
+                text += " max";
+            }
+            text += "\n";
+        }
         for p in &self.recent {
             text += &format!("recent = {}\n", p.display());
         }
@@ -207,6 +271,11 @@ mod tests {
         assert_eq!(s.recent, [PathBuf::from("/d.axf"), PathBuf::from("/a/b c.axf")]);
         s.parse("usb=on");
         assert!(s.usb);
+        s.parse("theme = light\nspeed = 10\nbounce = off\nwindow = 1200 900 10 20 max\n");
+        assert_eq!(s.theme, Theme::Light);
+        assert_eq!(s.speed, 10.0);
+        assert!(!s.bounce);
+        assert_eq!(s.window, Some(WindowState { size: [1200.0, 900.0], pos: Some([10.0, 20.0]), maximized: true }));
     }
 
     #[test]

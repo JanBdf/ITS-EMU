@@ -10,7 +10,7 @@ use crate::board::{self, BoardState, NUCLEO_BLUE, NUCLEO_GREEN, NUCLEO_RED};
 use crate::console::Console;
 use crate::emu::{self, Command, EmuHandle, RunState, Speed, UsbStatus};
 use crate::files::FilePicker;
-use crate::settings::{ConsoleSide, Settings};
+use crate::settings::{ConsoleSide, Settings, Theme, WindowState};
 
 const OK_GREEN: Color32 = Color32::from_rgb(0x34, 0xD3, 0x59);
 const ERR_RED: Color32 = Color32::from_rgb(0xFF, 0x5B, 0x50);
@@ -26,6 +26,7 @@ const DEVICES: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key:
 const CONSOLE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::L);
 const QUIT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Q);
 const RUN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Space);
+const ZOOM_RESET: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Home);
 const HELP: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F1);
 
 const SPEEDS: [(&str, Speed); 4] =
@@ -91,6 +92,22 @@ pub struct App {
     /// drops the focus on Esc before the frame, so this tells an Esc that
     /// left the field from one meant for the board).
     text_was_focused: bool,
+    /// Zoom and pan of the board drawing.
+    board_view: board::Zoom,
+    /// The window state last saved.
+    saved_window: Option<WindowState>,
+}
+
+/// Speed as the settings keep it.
+fn speed_value(speed: Speed) -> f64 {
+    match speed {
+        Speed::Factor(f) => f,
+        Speed::Max => 0.0,
+    }
+}
+
+fn speed_from(value: f64) -> Speed {
+    SPEEDS.iter().map(|(_, s)| *s).find(|s| speed_value(*s) == value).unwrap_or(Speed::Factor(1.0))
 }
 
 const SEE_THROUGH_DEFAULT: f32 = 0.25;
@@ -215,6 +232,7 @@ impl App {
         ideal_colors: bool,
     ) -> Self {
         let ctx = cc.egui_ctx.clone();
+        apply_theme(&ctx, settings.theme);
         let usb_on = usb.enabled;
         let bootrom = bootrom_override.clone().or_else(|| settings.pico_bootrom.clone());
         let emu = emu::spawn(move || ctx.request_repaint(), gdb_addr, usb, settings.devices.clone(), bootrom);
@@ -223,6 +241,14 @@ impl App {
         }
         if !settings.auto_reload {
             emu.send(Command::SetAutoReload(false));
+        }
+        emu.send(Command::SetBounce(settings.bounce));
+        let speed = speed_from(settings.speed);
+        if speed != Speed::Factor(1.0) {
+            emu.send(Command::SetSpeed(speed));
+        }
+        if start_view("pins") {
+            emu.send(Command::ShowPins(true));
         }
         // the file dialog starts in the folder of the last opened file
         let files = FilePicker::new(settings.recent.first().and_then(|p| p.parent()).map(PathBuf::from));
@@ -236,8 +262,8 @@ impl App {
             sent_buttons: [false; 8],
             sent_user: false,
             sent_touch: None,
-            speed: Speed::Factor(1.0),
-            console: Console::new(settings.line_ending, settings.echo),
+            speed,
+            console: Console::new(settings.line_ending, settings.echo, settings.timestamps),
             console_right: false,
             ints: [None; 6],
             analog: [None; 8],
@@ -259,6 +285,8 @@ impl App {
             notice: None,
             files,
             text_was_focused: false,
+            board_view: board::Zoom::default(),
+            saved_window: None,
         };
         if let Some(path) = firmware {
             app.load(path);
@@ -312,6 +340,33 @@ impl App {
     fn set_speed(&mut self, speed: Speed) {
         self.speed = speed;
         self.emu.send(Command::SetSpeed(speed));
+        self.settings.speed = speed_value(speed);
+        self.settings.save();
+    }
+
+    fn set_pins(&mut self, on: bool) {
+        self.show_pins = on;
+        self.emu.send(Command::ShowPins(on));
+    }
+
+    /// Remembers the window's size and position when they change.
+    fn save_window(&mut self, ctx: &egui::Context) {
+        let state = ctx.input(|i| {
+            let v = i.viewport();
+            let size = v.inner_rect.map(|r| [r.width(), r.height()])?;
+            let pos = v.outer_rect.map(|r| [r.min.x, r.min.y]);
+            Some(WindowState { size, pos, maximized: v.maximized.unwrap_or(false) })
+        });
+        if let Some(state) = state
+            && Some(state) != self.saved_window
+        {
+            // the first frames of a window may still be resized by the window manager
+            if self.saved_window.is_some() || ctx.cumulative_frame_nr() > 10 {
+                self.saved_window = Some(state);
+                self.settings.window = Some(state);
+                self.settings.save();
+            }
+        }
     }
 
     fn set_usb(&mut self, on: bool) {
@@ -410,6 +465,19 @@ impl App {
                 if ui.checkbox(&mut on, "USB ST-LINK plugged in").changed() {
                     self.set_usb(on);
                 }
+                let mut bounce = self.settings.bounce;
+                if ui
+                    .checkbox(&mut bounce, "Contact bounce of the buttons")
+                    .on_hover_text(
+                        "The buttons S0–S7, USER and the encoder contacts bounce for a moment when pressed \
+                         or released, as on the real board: a program without debouncing sees several edges",
+                    )
+                    .changed()
+                {
+                    self.settings.bounce = bounce;
+                    self.settings.save();
+                    self.emu.send(Command::SetBounce(bounce));
+                }
                 let mut auto = self.settings.auto_reload;
                 if ui
                     .checkbox(&mut auto, "Reload the firmware when it is rebuilt")
@@ -433,7 +501,10 @@ impl App {
                 {
                     self.set_see_through(see);
                 }
-                menu_toggle(ui, &mut self.show_pins, "Pins", Some(&PINS));
+                let mut pins = self.show_pins;
+                if menu_toggle(ui, &mut pins, "Pins", Some(&PINS)) {
+                    self.set_pins(pins);
+                }
                 menu_toggle(ui, &mut self.show_devices, "Devices", Some(&DEVICES));
                 let mut console = self.settings.console;
                 if menu_toggle(ui, &mut console, "Serial console", Some(&CONSOLE)) {
@@ -465,6 +536,22 @@ impl App {
                     self.emu.send(Command::IdealColors(self.ideal_colors));
                 }
                 ui.separator();
+                ui.menu_button("Theme", |ui| {
+                    for (theme, label) in [(Theme::System, "System"), (Theme::Dark, "Dark"), (Theme::Light, "Light")] {
+                        if ui.radio(self.settings.theme == theme, label).clicked() {
+                            self.settings.theme = theme;
+                            self.settings.save();
+                            apply_theme(ctx, theme);
+                        }
+                    }
+                });
+                if ui
+                    .add(egui::Button::new("Board zoom: fit").shortcut_text(ctx.format_shortcut(&ZOOM_RESET)))
+                    .on_hover_text("Ctrl + mouse wheel zooms the board at the pointer, dragging with the middle button or Shift pans it")
+                    .clicked()
+                {
+                    self.board_view = board::Zoom::default();
+                }
                 egui::gui_zoom::zoom_menu_buttons(ui);
             });
             ui.menu_button("Help", |ui| {
@@ -552,8 +639,14 @@ impl App {
             {
                 *o = opacity;
             }
-            ui.toggle_value(&mut self.show_pins, "Pins")
-                .on_hover_text(format!("Mode and level of every pin of ports A–G · {}", ctx.format_shortcut(&PINS)));
+            let mut pins = self.show_pins;
+            if ui
+                .toggle_value(&mut pins, "Pins")
+                .on_hover_text(format!("Mode and level of every pin of ports A–G · {}", ctx.format_shortcut(&PINS)))
+                .changed()
+            {
+                self.set_pins(pins);
+            }
             let label = match devices {
                 0 => "Devices".to_owned(),
                 n => format!("Devices ({n})"),
@@ -724,6 +817,10 @@ impl App {
                         "See-through · pins · devices · console",
                         format!("{} · {} · {} · {}", key(&SEE_THROUGH), key(&PINS), key(&DEVICES), key(&CONSOLE)),
                     );
+                    row(
+                        "Zoom the board · pan · back to fit",
+                        format!("Ctrl + wheel · middle button or Shift + drag · {}", key(&ZOOM_RESET)),
+                    );
                     row("Zoom the whole window", "Ctrl + / Ctrl − / Ctrl 0".into());
                     row("Keys back from the console to the board", "Esc".into());
                 });
@@ -747,17 +844,31 @@ impl eframe::App for App {
 
         // ---- take the latest snapshot
         let mut new_frame = false;
-        let (state, firmware, led_duty, inputs, nucleo_duty, virtual_ns, core_mhz, speed, gdb, usb, dac1) = {
+        let (
+            state,
+            firmware,
+            led_duty,
+            inputs,
+            nucleo_duty,
+            virtual_ns,
+            core_mhz,
+            speed,
+            gdb,
+            usb,
+            dac1,
+            pins,
+            devices,
+        ) = {
             let mut snap = self.emu.snapshot.lock().unwrap();
             if snap.display_generation != self.display_generation {
                 self.display_generation = snap.display_generation;
                 std::mem::swap(&mut snap.display, &mut self.display_frame);
                 new_frame = true;
             }
-            if !snap.serial.is_empty() {
-                self.console.received(&String::from_utf8_lossy(&snap.serial));
-                snap.serial.clear();
+            for (at_ns, bytes) in std::mem::take(&mut snap.serial) {
+                self.console.received_bytes(&bytes, at_ns);
             }
+            self.devices.take_output(std::mem::take(&mut snap.pico_output));
             (
                 snap.state.clone(),
                 snap.firmware.clone(),
@@ -770,13 +881,9 @@ impl eframe::App for App {
                 (snap.gdb.clone(), snap.gdb_attached),
                 snap.usb.clone(),
                 snap.dac1,
+                self.show_pins.then_some(snap.pins),
+                snap.devices.clone(),
             )
-        };
-        let pins = if self.show_pins { Some(self.emu.snapshot.lock().unwrap().pins) } else { None };
-        let devices = {
-            let mut snap = self.emu.snapshot.lock().unwrap();
-            self.devices.take_output(std::mem::take(&mut snap.pico_output));
-            snap.devices.clone()
         };
 
         // shown alone and enlarged, the display's pixels stay sharp
@@ -816,7 +923,10 @@ impl eframe::App for App {
             self.lcd_focus = !self.lcd_focus;
         }
         if shortcut(&PINS) {
-            self.show_pins = !self.show_pins;
+            self.set_pins(!self.show_pins);
+        }
+        if shortcut(&ZOOM_RESET) {
+            self.board_view = board::Zoom::default();
         }
         if shortcut(&SEE_THROUGH) {
             self.set_see_through(self.see_through.is_none());
@@ -867,6 +977,7 @@ impl eframe::App for App {
             if action.options_changed {
                 self.settings.line_ending = self.console.line_ending;
                 self.settings.echo = self.console.echo;
+                self.settings.timestamps = self.console.timestamps;
                 self.settings.save();
             }
         }
@@ -909,17 +1020,15 @@ impl eframe::App for App {
             Some(opacity) => board::View { nucleo_opacity: opacity, shield_opacity: opacity },
             None => board::View::default(),
         };
-        let central = egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(Color32::from_gray(28)).inner_margin(10.0))
-            .show(ui, |ui| {
+        // the bench the board lies on: dark in the dark theme, light grey in the light one
+        let bench = if ctx.theme() == egui::Theme::Dark { Color32::from_gray(28) } else { Color32::from_gray(190) };
+        let central =
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(bench).inner_margin(10.0)).show(ui, |ui| {
                 if self.lcd_focus {
                     board::show_lcd(ui, &board_state)
                 } else {
-                    ui.centered_and_justified(|ui| {
-                        let tex = self.board.get_or_insert_with(|| board::Textures::load(ui.ctx()));
-                        board::show(ui, tex, &board_state, &view)
-                    })
-                    .inner
+                    let tex = self.board.get_or_insert_with(|| board::Textures::load(ui.ctx()));
+                    board::show(ui, tex, &board_state, &view, &mut self.board_view)
                 }
             });
         let input = central.inner;
@@ -1016,9 +1125,19 @@ impl eframe::App for App {
             None => "ITS-Board Emulator".to_owned(),
         };
         self.text_was_focused = ctx.text_edit_focused();
+        self.save_window(&ctx);
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
         }
     }
+}
+
+/// Switches egui to the chosen theme.
+fn apply_theme(ctx: &egui::Context, theme: Theme) {
+    ctx.set_theme(match theme {
+        Theme::System => egui::ThemePreference::System,
+        Theme::Dark => egui::ThemePreference::Dark,
+        Theme::Light => egui::ThemePreference::Light,
+    });
 }

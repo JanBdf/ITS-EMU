@@ -50,6 +50,11 @@ crates.io (GPL-2.0, see `unicorn-engine-sys/COPYING`), used through
 - WFE and YIELD (QEMU's EXCP_YIELD) stop emulation as an invalid
   instruction, like an undefined one (EXCP_UDEF); `uc_its_stop_exception`
   tells which of the two it was.
+- Direct jumps (`goto_tb`) to any page, and to blocks that span two pages:
+  QEMU keeps them inside the block's page because an MMU could remap the
+  other page; the M-profile guest has no MMU and the memory map never
+  changes while code runs (`use_goto_tb`, `tb_find`). Fewer lookups of
+  the next block (`helper_lookup_tb_ptr`) in busy code.
 - `cpu_get_tb_cpu_state` is inline (`target/arm/cpu.h`): every lookup of the
   next translation block after an indirect branch (function returns) calls it.
 - Only the Arm guest: the other targets' sources are removed (`uc.c` still

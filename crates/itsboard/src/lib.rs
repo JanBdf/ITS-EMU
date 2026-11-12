@@ -27,7 +27,7 @@ pub use sim::Simulator;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use devices::{DeviceHub, Ds18b20, OneWireBus, RotaryEncoder, SharedDevices};
+use devices::{Contacts, DeviceHub, Ds18b20, OneWireBus, RotaryEncoder, SharedContacts, SharedDevices};
 use emu_core::Bus;
 use stm32f429::Stm32f429;
 use stm32f429::gpio::{PinMode, SharedGpio, port};
@@ -158,6 +158,8 @@ pub struct ItsBoard {
     lcd: Rc<RefCell<Ili9486>>,
     touch: Rc<RefCell<Xpt2046>>,
     devices: SharedDevices,
+    /// The buttons' (and encoders') contacts, bouncing when asked to.
+    contacts: SharedContacts,
     encoders: RefCell<Vec<Rc<RefCell<RotaryEncoder>>>>,
     /// Temperature sensors, numbered for [`Self::set_temperature`].
     sensors: RefCell<Vec<Sensor>>,
@@ -181,11 +183,14 @@ impl ItsBoard {
             tp_cs_rises: 0,
             rst_rises: 0,
         }));
+        let contacts = Rc::new(RefCell::new(Contacts::new(mcu.gpio.clone())));
+        devices.borrow_mut().push(contacts.clone());
         let board = Self {
             mcu: mcu.clone(),
             lcd,
             touch,
             devices,
+            contacts,
             encoders: RefCell::default(),
             sensors: RefCell::default(),
             device_pins: RefCell::default(),
@@ -213,7 +218,8 @@ impl ItsBoard {
     /// Connects a rotary encoder (contacts A, B to GND, pull-ups on the
     /// module) to two pins; returns its number for [`Self::rotate_encoder`].
     pub fn add_encoder(&self, a: (char, u32), b: (char, u32)) -> usize {
-        let enc = Rc::new(RefCell::new(RotaryEncoder::new(self.mcu.gpio.clone(), a, b)));
+        let enc = RotaryEncoder::new(self.mcu.gpio.clone(), a, b).with_contacts(self.contacts.clone());
+        let enc = Rc::new(RefCell::new(enc));
         self.devices.borrow_mut().push(enc.clone());
         self.device_pins.borrow_mut().extend([a, b]);
         let mut encoders = self.encoders.borrow_mut();
@@ -286,7 +292,8 @@ impl ItsBoard {
     /// Disconnects all devices (encoders, sensors, plugins): their pins
     /// return to what the board does with them (buttons released, INT open).
     pub fn remove_devices(&self) {
-        self.devices.borrow_mut().clear();
+        let contacts: *const RefCell<Contacts> = Rc::as_ptr(&self.contacts);
+        self.devices.borrow_mut().retain(|d| std::ptr::addr_eq(Rc::as_ptr(d), contacts));
         self.encoders.borrow_mut().clear();
         self.sensors.borrow_mut().clear();
         self.mcu.i2c1.borrow_mut().clear();
@@ -318,12 +325,28 @@ impl ItsBoard {
     }
 
     /// Turns encoder `n` by `detents` (negative: counter-clockwise), one
-    /// detent every few milliseconds of virtual time.
+    /// detent every 4 ms of virtual time (a quick spin).
     pub fn rotate_encoder(&self, n: usize, detents: i32) -> Result<(), String> {
+        self.rotate_encoder_paced(n, detents, 1_000_000)
+    }
+
+    /// Turns encoder `n` by `detents` with `transition_ns` between the four
+    /// transitions of a detent.
+    pub fn rotate_encoder_paced(&self, n: usize, detents: i32, transition_ns: u64) -> Result<(), String> {
         let encoders = self.encoders.borrow();
         let enc = encoders.get(n).ok_or_else(|| format!("there is no encoder {n}"))?;
-        enc.borrow_mut().rotate(detents);
+        enc.borrow_mut().rotate_paced(detents, transition_ns);
         Ok(())
+    }
+
+    /// Contact bounce of the buttons and encoders (off at first: inputs
+    /// change cleanly, as scripts and tests expect).
+    pub fn set_bounce(&self, on: bool) {
+        self.contacts.borrow_mut().bounce = on;
+    }
+
+    pub fn bounce(&self) -> bool {
+        self.contacts.borrow().bounce
     }
 
     /// Presses (`true`) or releases button S0–S7.
@@ -331,7 +354,7 @@ impl ItsBoard {
         assert!(n < 8, "the ITS-Board has buttons S0..S7");
         // Pressed buttons pull the pin to GND; released ones are pulled up on
         // the carrier board (high even with the MCU's pull-down enabled).
-        self.mcu.gpio.borrow_mut().drive(port('F'), n, Some(!pressed));
+        self.contacts.borrow_mut().set(port('F'), n, !pressed);
     }
 
     /// Drives one of the INT0–5 inputs (PG0–5); `None` leaves it open.
@@ -354,7 +377,12 @@ impl ItsBoard {
 
     pub fn set_user_button(&self, pressed: bool) {
         // Released: only a weak pull-down on the Nucleo (the MCU's pull-up wins).
-        self.mcu.gpio.borrow_mut().drive(port(USER_BUTTON.0), USER_BUTTON.1, pressed.then_some(true));
+        let (p, pin) = (port(USER_BUTTON.0), USER_BUTTON.1);
+        if pressed {
+            self.contacts.borrow_mut().set(p, pin, true);
+        } else {
+            self.contacts.borrow_mut().open(p, pin);
+        }
     }
 
     /// OUT15..OUT0 as a bit mask (bit n = OUTn lit).
@@ -561,6 +589,33 @@ mod tests {
         assert_eq!(mcu.gpio.borrow().ports[port('G')].ext_mask & 2, 0, "INT1 open");
         assert!(board.rotate_encoder(0, 1).is_err());
         assert_eq!(board.add_encoder(('C', 6), ('C', 7)), 0, "numbered from 0 again");
+    }
+
+    #[test]
+    fn bouncing_button_settles_at_the_new_level() {
+        let (mut bus, mcu) = stm32f429::build();
+        let board = ItsBoard::attach(&mcu, &mut bus);
+        let mut clock = emu_core::Clock::new(16_000_000);
+        let mut nvic = emu_core::nvic::Nvic::new();
+        board.set_bounce(true);
+        board.set_button(3, true);
+        assert!(mcu.gpio.borrow().level(port('F'), 3), "nothing happens before the devices run");
+        let mut ctx = emu_core::DeviceCtx { clock: &mut clock, nvic: &mut nvic };
+        assert_eq!(bus.next_event(), Some(0), "the devices want to run");
+        bus.update(&mut ctx);
+        assert!(!mcu.gpio.borrow().level(port('F'), 3), "pressed at once");
+        let rises0 = mcu.gpio.borrow().rises(port('F'), 3);
+        // run through the whole bounce
+        while let Some(at) = bus.next_event() {
+            ctx.clock.advance(at.saturating_sub(ctx.now()).max(1));
+            bus.update(&mut ctx);
+        }
+        assert!(ctx.now() < ctx.clock.ns_to_cycles(3_000_000), "settled within 3 ms");
+        assert!(!mcu.gpio.borrow().level(port('F'), 3), "still pressed");
+        assert!(mcu.gpio.borrow().rises(port('F'), 3) >= rises0, "edges were logged");
+        board.set_bounce(false);
+        board.set_button(3, false);
+        assert!(mcu.gpio.borrow().level(port('F'), 3), "without bounce the pin changes at once");
     }
 
     #[test]

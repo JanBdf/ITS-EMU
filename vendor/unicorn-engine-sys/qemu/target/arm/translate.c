@@ -2709,9 +2709,11 @@ static void gen_neon_dup_high16(TCGContext *tcg_ctx, TCGv_i32 var)
 
 static inline bool use_goto_tb(DisasContext *s, target_ulong dest)
 {
-    struct uc_struct *uc = s->uc;
-    return (s->base.tb->pc & TARGET_PAGE_MASK) == (dest & TARGET_PAGE_MASK) ||
-           ((s->base.pc_next - 1) & TARGET_PAGE_MASK) == (dest & TARGET_PAGE_MASK);
+    /* ITS-EMU: direct jumps to any page. QEMU keeps them within the page of
+     * the block because the mapping of another page may change under an MMU;
+     * the M-profile guest here has none (addresses are physical), and a
+     * change of the memory map or of the code flushes the translations. */
+    return true;
 }
 
 static void gen_goto_ptr(TCGContext *tcg_ctx)
