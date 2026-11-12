@@ -1,15 +1,14 @@
 //! ADC1–3 and the DAC, with the analog levels of the pins.
 //!
-//! Conversions take (sampling time + resolution) ADC clocks, after a start
-//! latency of one ADC clock and four APB2 clocks; regular
-//! (single, scan, continuous) and injected groups, EOC/JEOC/OVR/STRT flags,
-//! the analog watchdog, the interrupt, DMA requests and the external triggers
-//! by a timer's TRGO (regular group: TIM2/TIM3/TIM8, injected group:
-//! TIM1/TIM2/TIM4/TIM5) are modelled; not the CCx and EXTI triggers. The
-//! DAC: software and timer triggers, noise/triangle waves, DMA and underrun
-//! (HwCheck `dacwave`). Readings of the internal channels, of open pins and the
-//! transfer function of the buffered DAC were measured on the board
-//! (HwCheck `adc`).
+//! - ADC: a conversion takes sampling time + resolution ADC clocks, after a
+//!   start latency of one ADC clock and four APB2 clocks. Regular (single,
+//!   scan, continuous) and injected groups, EOC/JEOC/OVR/STRT, analog
+//!   watchdog, interrupt, DMA, and TRGO triggers (regular: TIM2/3/8,
+//!   injected: TIM1/2/4/5); not the CCx and EXTI triggers.
+//! - DAC: software and timer triggers, noise/triangle waves, DMA, underrun
+//!   (HwCheck `dacwave`).
+//! - Internal channels, open pins and the buffered DAC's transfer function
+//!   are as measured on the board (HwCheck `adc`).
 
 use std::cell::RefCell;
 use std::rc::Rc;

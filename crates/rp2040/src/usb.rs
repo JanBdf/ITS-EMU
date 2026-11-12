@@ -323,8 +323,7 @@ impl UsbCore {
                     return;
                 }
             }
-            Host::Configured => {}
-            Host::Control { .. } => {}
+            Host::Configured | Host::Control { .. } => {}
         }
         if !self.connected() {
             self.host = Host::Detached;

@@ -270,7 +270,13 @@ impl Pty {
         let mut name = [0 as libc::c_char; 128];
         // SAFETY: valid out pointers; `name` is large enough (macOS: 128)
         let r = unsafe {
-            libc::openpty(&mut master, &mut slave, name.as_mut_ptr(), std::ptr::null_mut(), std::ptr::null_mut())
+            libc::openpty(
+                &raw mut master,
+                &raw mut slave,
+                name.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
         };
         if r != 0 {
             return Err(std::io::Error::last_os_error());
@@ -318,11 +324,11 @@ fn set_raw(f: &std::fs::File) -> std::io::Result<()> {
     // SAFETY: plain termios calls on an open descriptor
     unsafe {
         let mut t: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(f.as_raw_fd(), &mut t) != 0 {
+        if libc::tcgetattr(f.as_raw_fd(), &raw mut t) != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        libc::cfmakeraw(&mut t);
-        if libc::tcsetattr(f.as_raw_fd(), libc::TCSANOW, &t) != 0 {
+        libc::cfmakeraw(&raw mut t);
+        if libc::tcsetattr(f.as_raw_fd(), libc::TCSANOW, &raw const t) != 0 {
             return Err(std::io::Error::last_os_error());
         }
     }

@@ -65,11 +65,10 @@ impl Xpt2046 {
             (4, Some(t)) => t.z2,
             (3, None) => 0,
             (4, None) => 4095,
-            (2, _) => 2048, // VBAT
-            (6, _) => 2048, // AUX
-            (0, _) => 1000, // TEMP0
-            (7, _) => 1100, // TEMP1
-            _ => 0,         // no touch: plates not connected
+            (2 | 6, _) => 2048, // VBAT, AUX
+            (0, _) => 1000,     // TEMP0
+            (7, _) => 1100,     // TEMP1
+            _ => 0,             // no touch: plates not connected
         };
         let v = v.min(4095);
         if eight_bit { (v >> 4) << 4 } else { v }

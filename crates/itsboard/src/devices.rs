@@ -89,11 +89,6 @@ impl RotaryEncoder {
         }
     }
 
-    /// Detents still to turn.
-    pub fn turning(&self) -> bool {
-        self.pending != 0
-    }
-
     fn drive(&mut self, cycle: u64) {
         let (a, b) = QUADRATURE[self.state];
         let mut g = self.gpio.borrow_mut();
@@ -622,21 +617,21 @@ mod tests {
                 for bit in 1..=64usize {
                     let (b, c) = (self.read_bit(), self.read_bit());
                     assert!(!(b && c), "no device answered");
-                    let dir = if b != c {
-                        b
-                    } else {
+                    let dir = if b == c {
                         let prev = rom[(bit - 1) / 8] >> ((bit - 1) % 8) & 1 != 0;
                         let dir = if bit < last_discrepancy { prev } else { bit == last_discrepancy };
                         if !dir {
                             discrepancy = bit;
                         }
                         dir
+                    } else {
+                        b
                     };
                     let (byte, mask) = ((bit - 1) / 8, 1 << ((bit - 1) % 8));
                     if dir {
-                        rom[byte] |= mask
+                        rom[byte] |= mask;
                     } else {
-                        rom[byte] &= !mask
+                        rom[byte] &= !mask;
                     }
                     self.write_bit(dir);
                 }
@@ -654,8 +649,8 @@ mod tests {
         let mut m = Master::new(2);
         let mut roms: Vec<[u8; 8]> = m.bus.sensors.iter().map(Ds18b20::rom).collect();
         let mut found = m.search();
-        roms.sort();
-        found.sort();
+        roms.sort_unstable();
+        found.sort_unstable();
         assert_eq!(found, roms);
         for rom in &found {
             assert_eq!(crc8(&rom[..7]), rom[7]);

@@ -91,12 +91,9 @@ impl Phy {
                     0
                 }
             }
-            6 => 0x0002,
-            17 => 0x0002,
+            6 | 17 => 0x0002,
             18 => 0x60E0, // mode: all capable, PHY address 0
             27 => 0x000B,
-            29 => 0x0000,
-            30 => 0x0000,
             // special control/status: auto-negotiation done, 100BASE-TX full duplex
             31 => 0x0040 | if link { 0x1018 } else { 0 },
             _ => 0,

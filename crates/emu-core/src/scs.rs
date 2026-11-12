@@ -116,11 +116,6 @@ impl Scs {
         self.ccr & 0x200 != 0
     }
 
-    /// MPU region `n` as (RBAR, RASR).
-    pub fn mpu_region(&self, n: usize) -> (u32, u32) {
-        (self.mpu_rbar[n], self.mpu_rasr[n])
-    }
-
     fn icsr(&self, nvic: &Nvic, ipsr: u32) -> u32 {
         let mut v = ipsr & 0x1FF;
         if nvic.active_count() <= 1 {

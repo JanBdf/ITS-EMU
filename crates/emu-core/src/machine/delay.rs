@@ -1,22 +1,19 @@
 //! Skipping counting delay loops (`for (i = n; i > 0; i--);`).
 //!
-//! Idle detection skips loops whose state repeats; a counting loop changes
-//! its counter in every iteration. Here a small interpreter runs one
-//! iteration of the loop at a time: from the head with the registers and the
-//! memory of the head, back to the head. It knows only instructions whose
-//! results are sums and differences of their inputs (add, sub, mov, loads and
-//! stores at fixed addresses, compares, branches), so every value in an
-//! iteration is affine in the iteration number. With exactly one conditional
-//! branch in the loop, the first iteration that leaves it follows from its
-//! operands, two lines in the iteration number: the core jumps to the head of
-//! an iteration before it (and before the next event), with the registers,
-//! the stored words and the cycles that running the iterations would give.
+//! Idle detection needs a repeating state; a counting loop changes its
+//! counter every iteration. A small interpreter runs one iteration at a time
+//! from the loop head. It only knows instructions whose results are sums and
+//! differences of their inputs (add, sub, mov, compares, branches, loads and
+//! stores at fixed addresses), so every value is affine in the iteration
+//! number. With exactly one conditional branch, its operands give the first
+//! iteration that leaves the loop; the core then jumps to the iteration
+//! before it (or before the next event) with the registers, stored words and
+//! cycles that running it would give.
 //!
-//! The interpreter is checked against Unicorn first: at three visits of the
-//! head in a row, the state Unicorn reached must be the one the interpreter
-//! predicted, and the period in cycles the same. The jump interprets the last
-//! skipped iteration again, from the extrapolated state, for the flags and
-//! as a final check.
+//! Safety checks: on three consecutive head visits, Unicorn's state and
+//! period must match the interpreter's prediction; the jump re-interprets the
+//! last skipped iteration from the extrapolated state (for the flags and as a
+//! final check).
 
 use std::collections::HashMap;
 
@@ -309,7 +306,7 @@ impl<M: Memory> Cpu<'_, M> {
                 let a = self.r[rn as usize];
                 let (saved, setter, written) = (self.nzcv, self.setter, self.written);
                 self.set_flags(Setter::Sub(a, 0));
-                let to = self.cond_branch(pc, if h & 0x800 != 0 { 1 } else { 0 }, pc + 4 + off, next);
+                let to = self.cond_branch(pc, u8::from(h & 0x800 != 0), pc + 4 + off, next);
                 // CBZ/CBNZ leave the flags alone
                 (self.nzcv, self.setter, self.written) = (saved, setter, written);
                 return to;

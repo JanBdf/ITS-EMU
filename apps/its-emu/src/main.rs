@@ -388,9 +388,9 @@ fn main() -> Result<()> {
             continue;
         }
         match result {
-            StopReason::Budget => {}
-            // Left over from a detached debugger; halted by the debug probe.
-            StopReason::DebugBreakpoint { .. }
+            // Budget; or left over from a detached debugger, halted by the debug probe.
+            StopReason::Budget
+            | StopReason::DebugBreakpoint { .. }
             | StopReason::Step
             | StopReason::Watchpoint { .. }
             | StopReason::Halted { .. } => {}

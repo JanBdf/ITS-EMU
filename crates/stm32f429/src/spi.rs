@@ -17,8 +17,7 @@ use emu_core::bus::{extract_read, merge_write};
 use emu_core::{Clock, DeviceCtx, Peripheral};
 
 use crate::dma::{DmaLine, SharedDma};
-use crate::rcc::SharedClocks;
-use crate::timer::ApbBus;
+use crate::rcc::{ApbBus, SharedClocks};
 
 /// Something on the other side of the SPI bus (usually a board-level router
 /// that looks at chip-select pins).
@@ -112,11 +111,7 @@ impl Spi {
     }
 
     fn pclk(&self) -> u32 {
-        let c = self.clocks.get();
-        match self.bus {
-            ApbBus::Apb1 => c.pclk1,
-            ApbBus::Apb2 => c.pclk2,
-        }
+        self.bus.pclk(&self.clocks.get())
     }
 
     /// Duration of one frame in CPU cycles.
@@ -128,12 +123,7 @@ impl Spi {
     }
 
     fn clock_enabled(&self) -> bool {
-        let c = self.clocks.get();
-        let enr = match self.bus {
-            ApbBus::Apb1 => c.apb1enr,
-            ApbBus::Apb2 => c.apb2enr,
-        };
-        enr & (1 << self.enable_bit) != 0
+        self.bus.enabled(&self.clocks.get(), self.enable_bit)
     }
 
     fn sync_irq(&self, ctx: &mut DeviceCtx) {

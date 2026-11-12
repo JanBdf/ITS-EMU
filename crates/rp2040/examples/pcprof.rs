@@ -1,3 +1,6 @@
+//! PC histogram of both Pico cores: `pcprof BOOTROM UF2 [SECONDS]`.
+//! `NOIDLE=1` disables idle skipping, `TRACE=FILE` logs every sample.
+
 use std::collections::HashMap;
 
 fn main() {
@@ -16,8 +19,8 @@ fn main() {
     while t < end {
         t += step;
         pico.run_until_ps(t).unwrap();
-        for n in 0..2 {
-            *h[n].entry(pico.pc(n)).or_default() += 1;
+        for (n, h) in h.iter_mut().enumerate() {
+            *h.entry(pico.pc(n)).or_default() += 1;
             if let Some(w) = trace.as_mut() {
                 use std::io::Write;
                 writeln!(w, "{t} {n} {:08x} {}", pico.pc(n), pico.core(n).clock().cycles()).unwrap();
@@ -26,8 +29,8 @@ fn main() {
     }
     let wall = t0.elapsed().as_secs_f64();
     println!("virtual {secs} s wall {wall:.3} s ({:.2}x)", secs / wall);
-    for n in 0..2 {
-        let mut v: Vec<_> = h[n].iter().collect();
+    for (n, h) in h.iter().enumerate() {
+        let mut v: Vec<_> = h.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));
         println!("core {n}:");
         for (pc, c) in v.iter().take(15) {

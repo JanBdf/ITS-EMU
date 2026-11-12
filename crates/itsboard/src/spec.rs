@@ -56,8 +56,7 @@ impl DeviceSpec {
         match self {
             Self::Encoder(a, b) => vec![*a, *b],
             Self::Ds18b20(pin) => vec![*pin],
-            Self::Lm75(_) => Vec::new(), // the I2C lines are shared
-            Self::Network(_) => Vec::new(),
+            Self::Lm75(_) | Self::Network(_) => Vec::new(), // LM75: the I2C lines are shared
             Self::Pico(spec) => spec.wiring.iter().map(|&(_, pin)| pin).collect(),
         }
     }

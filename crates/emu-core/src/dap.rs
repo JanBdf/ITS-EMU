@@ -137,7 +137,7 @@ impl Dap {
                 self.increment();
             }
             r @ 0x10..=0x1C => {
-                m.debug_write((self.tar & !0xF) + u32::from(r - 0x10), 4, value).map_err(|f| self.fault(f))?
+                m.debug_write((self.tar & !0xF) + u32::from(r - 0x10), 4, value).map_err(|f| self.fault(f))?;
             }
             _ => {}
         }
