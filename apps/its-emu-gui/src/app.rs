@@ -713,6 +713,7 @@ impl App {
         speed: f64,
         gdb: &(Result<String, String>, bool),
         usb: &UsbStatus,
+        otg: Option<&(String, bool)>,
     ) {
         ui.horizontal_wrapped(|ui| {
             let (text, color) = match state {
@@ -768,6 +769,17 @@ impl App {
             if let Some(text) = text {
                 ui.separator();
                 ui.label(RichText::new(text).color(color)).on_hover_text(usb_hover(usb));
+            }
+            // the firmware's own USB device on CN13 (USB OTG FS)
+            if let Some((busid, attached)) = otg {
+                ui.separator();
+                if *attached {
+                    ui.label(RichText::new("CN13 plugged in").color(OK_GREEN))
+                        .on_hover_text(format!("The firmware's USB device (USB OTG FS), bus id {busid}"));
+                } else {
+                    ui.label(RichText::new("CN13: waiting for usbip attach").color(WARN_YELLOW))
+                        .on_hover_text(format!("sudo usbip attach -r 127.0.0.1 -b {busid}"));
+                }
             }
             let now = ui.input(|i| i.time);
             if let Some((text, error, until)) = self.notice.clone() {
@@ -854,7 +866,7 @@ impl eframe::App for App {
             core_mhz,
             speed,
             gdb,
-            usb,
+            (usb, otg),
             dac1,
             pins,
             devices,
@@ -879,7 +891,7 @@ impl eframe::App for App {
                 snap.core_mhz,
                 snap.speed,
                 (snap.gdb.clone(), snap.gdb_attached),
-                snap.usb.clone(),
+                (snap.usb.clone(), snap.otg.clone()),
                 snap.dac1,
                 self.show_pins.then_some(snap.pins),
                 snap.devices.clone(),
@@ -953,7 +965,7 @@ impl eframe::App for App {
 
         // ---- status bar
         egui::Panel::bottom("status").show(ui, |ui| {
-            self.status_bar(ui, &state, &firmware, virtual_ns, core_mhz, speed, &gdb, &usb);
+            self.status_bar(ui, &state, &firmware, virtual_ns, core_mhz, speed, &gdb, &usb, otg.as_ref());
         });
 
         // ---- serial console, below the board or right of it

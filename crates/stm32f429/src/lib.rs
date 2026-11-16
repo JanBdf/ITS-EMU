@@ -9,6 +9,7 @@ pub mod flash;
 pub mod gpio;
 pub mod i2c;
 pub mod iwdg;
+pub mod otg_fs;
 pub mod rcc;
 pub mod spi;
 pub mod timer;
@@ -115,6 +116,8 @@ pub struct Stm32f429 {
     pub eth_link: eth::SharedEthLink,
     /// State of the flash interface (registers and programming side).
     pub flash: flash::SharedFlash,
+    /// USB OTG FS (CN13): its cable and the computer's host.
+    pub otg: otg_fs::SharedOtgPort,
 }
 
 /// What an SPI master receives with no device on the bus: the idle level of
@@ -433,8 +436,10 @@ pub fn build() -> (Bus, Stm32f429) {
     let eth_link = eth::SharedEthLink::default();
     let eth = eth::Eth::new(eth_link.clone());
     bus.attach(0x4002_8000, 0x1400, Box::new(eth::EthRegs::new(eth.clone(), clocks.clone())));
+    let otg = otg_fs::SharedOtgPort::default();
+    bus.attach(otg_fs::OTG_FS_BASE, otg_fs::OTG_FS_SIZE, Box::new(otg_fs::OtgFs::new(clocks.clone(), otg.clone())));
     bus.set_wait_states(Box::new(bus_wait_states(clocks.clone())));
 
     let tim_pwm: [SharedPwm; 4] = tim_pwm.try_into().unwrap_or_else(|_| unreachable!());
-    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3, analog, i2c1, dma, eth, eth_link, flash })
+    (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3, analog, i2c1, dma, eth, eth_link, flash, otg })
 }

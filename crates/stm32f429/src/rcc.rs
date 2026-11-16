@@ -65,6 +65,9 @@ pub struct Clocks {
     pub ahb2enr: u32,
     pub apb1enr: u32,
     pub apb2enr: u32,
+    /// The PLL's Q output (USB OTG FS, SDIO, RNG; USB needs 48 MHz), 0 while
+    /// the PLL is off.
+    pub pll48: u32,
 }
 
 impl Default for Clocks {
@@ -80,6 +83,7 @@ impl Default for Clocks {
             ahb2enr: 0,
             apb1enr: 0,
             apb2enr: 0,
+            pll48: 0,
         }
     }
 }
@@ -195,6 +199,18 @@ impl Rcc {
         (u64::from(src) * u64::from(n) / u64::from(m) / u64::from(p)) as u32
     }
 
+    /// The PLL's Q output, 0 while the PLL is off.
+    fn pll_q_out(&self) -> u32 {
+        if self.cr & CR_PLLON == 0 {
+            return 0;
+        }
+        let src = if self.pllcfgr & (1 << 22) != 0 { HSE_HZ } else { HSI_HZ };
+        let m = (self.pllcfgr & 0x3F).max(2);
+        let n = (self.pllcfgr >> 6) & 0x1FF;
+        let q = ((self.pllcfgr >> 24) & 0xF).max(2);
+        (u64::from(src) * u64::from(n) / u64::from(m) / u64::from(q)) as u32
+    }
+
     fn sysclk(&self) -> u32 {
         match self.cfgr & 3 {
             1 => HSE_HZ,
@@ -223,6 +239,7 @@ impl Rcc {
             ahb2enr: self.enr[1],
             apb1enr: self.enr[3],
             apb2enr: self.enr[4],
+            pll48: self.pll_q_out(),
         };
         if clocks.hclk != self.clocks.get().hclk {
             log::info!("core clock {} MHz", f64::from(clocks.hclk) / 1e6);

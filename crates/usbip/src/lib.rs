@@ -12,6 +12,7 @@
 
 pub mod attach;
 pub mod descriptors;
+pub mod forward;
 
 use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
@@ -95,6 +96,23 @@ pub trait UsbDevice<C: ?Sized> {
     fn input(&mut self, ctx: &mut C, ep: u8, max_len: usize) -> Reply;
     /// A host attached (`true`) or detached the device.
     fn attached(&mut self, _ctx: &mut C, _attached: bool) {}
+    /// A device that queues transfers (see [`Queued`]) instead of answering
+    /// [`Self::control`], [`Self::out`] and [`Self::input`].
+    fn queued(&mut self) -> Option<&mut dyn Queued> {
+        None
+    }
+}
+
+/// A device that takes each transfer once and finishes it later, in order
+/// per endpoint, like a controller working through the transfers the host
+/// has queued: several can be under way on one endpoint.
+pub trait Queued {
+    /// A new transfer, `seq` names it (`data`: OUT data or the data stage).
+    fn submit(&mut self, seq: u32, ep: u8, dir_in: bool, setup: [u8; 8], data: &[u8], max_len: usize);
+    /// The host cancelled a transfer it submitted.
+    fn cancel(&mut self, seq: u32);
+    /// Transfers finished since the last call ([`Reply::Done`] or [`Reply::Stall`]).
+    fn completions(&mut self) -> Vec<(u32, Reply)>;
 }
 
 /// A transfer request from the host.
@@ -106,6 +124,8 @@ struct Urb {
     length: usize,
     setup: [u8; 8],
     data: Vec<u8>,
+    /// Handed to a [`Queued`] device.
+    submitted: bool,
 }
 
 enum Event {
@@ -122,6 +142,8 @@ struct Attached {
     stream: TcpStream,
     peer: Option<SocketAddr>,
     pending: VecDeque<Urb>,
+    /// Submitted transfers the host has cancelled since (to tell the device).
+    cancelled: Vec<u32>,
 }
 
 /// One exported device.
@@ -260,7 +282,8 @@ impl UsbipServer {
                     }
                     let peer = stream.peer_addr().ok();
                     log::info!("usbip: device {busid} attached by {}", fmt_peer(peer));
-                    port.attached = Some(Attached { id, stream, peer, pending: VecDeque::new() });
+                    port.attached =
+                        Some(Attached { id, stream, peer, pending: VecDeque::new(), cancelled: Vec::new() });
                     port.notify.push_back(true);
                 }
             }
@@ -275,7 +298,9 @@ impl UsbipServer {
                 // has completed already.
                 let status = match a.pending.iter().position(|u| u.seqnum == victim) {
                     Some(i) => {
-                        a.pending.remove(i);
+                        if a.pending.remove(i).is_some_and(|u| u.submitted) {
+                            a.cancelled.push(victim);
+                        }
                         -ECONNRESET
                     }
                     None => 0,
@@ -314,6 +339,9 @@ impl Port {
     /// ones on the same endpoint.
     fn service<C: ?Sized, D: UsbDevice<C> + ?Sized>(&mut self, dev: &mut D, ctx: &mut C) -> bool {
         let Some(a) = self.attached.as_mut() else { return false };
+        if let Some(q) = dev.queued() {
+            return Self::service_queued(a, q);
+        }
         let mut progress = false;
         let mut blocked: Vec<(u8, bool)> = Vec::new();
         let mut i = 0;
@@ -345,20 +373,50 @@ impl Port {
                 }
             };
             let urb = a.pending.remove(i).unwrap();
-            let actual = if urb.dir_in { data.len() } else { urb.data.len() };
-            let mut msg = urb_header(RET_SUBMIT, urb.seqnum);
-            for v in [status, actual as i32, 0, 0, 0] {
-                msg.extend_from_slice(&v.to_be_bytes());
-            }
-            msg.extend_from_slice(&[0; 8]);
-            if urb.dir_in && status == 0 {
-                msg.extend_from_slice(&data);
-            }
-            send_attached(a, &msg);
+            ret_submit(a, &urb, status, data);
             progress = true;
         }
         progress
     }
+
+    /// Hands new transfers and cancellations to a queued device and returns
+    /// what it finished.
+    fn service_queued(a: &mut Attached, q: &mut dyn Queued) -> bool {
+        let mut progress = false;
+        for seq in a.cancelled.drain(..) {
+            q.cancel(seq);
+        }
+        for urb in a.pending.iter_mut().filter(|u| !u.submitted) {
+            q.submit(urb.seqnum, urb.ep, urb.dir_in, urb.setup, &urb.data, urb.length);
+            urb.submitted = true;
+        }
+        for (seq, reply) in q.completions() {
+            let Some(i) = a.pending.iter().position(|u| u.seqnum == seq) else { continue };
+            let urb = a.pending.remove(i).unwrap();
+            let (status, mut data) = match reply {
+                Reply::Done(d) => (0, d),
+                Reply::Stall | Reply::Nak => (-EPIPE, Vec::new()),
+            };
+            data.truncate(urb.length);
+            ret_submit(a, &urb, status, data);
+            progress = true;
+        }
+        progress
+    }
+}
+
+/// USBIP_RET_SUBMIT for `urb`.
+fn ret_submit(a: &mut Attached, urb: &Urb, status: i32, data: Vec<u8>) {
+    let actual = if urb.dir_in { data.len() } else { urb.data.len() };
+    let mut msg = urb_header(RET_SUBMIT, urb.seqnum);
+    for v in [status, actual as i32, 0, 0, 0] {
+        msg.extend_from_slice(&v.to_be_bytes());
+    }
+    msg.extend_from_slice(&[0; 8]);
+    if urb.dir_in && status == 0 {
+        msg.extend_from_slice(&data);
+    }
+    send_attached(a, &msg);
 }
 
 fn send_attached(a: &mut Attached, msg: &[u8]) {
@@ -481,7 +539,7 @@ fn read_loop(id: u64, mut r: TcpStream, tx: &Sender<Event>, wake: &dyn Fn()) -> 
                     let mut iso = vec![0u8; packets as usize * 16];
                     r.read_exact(&mut iso)?;
                 }
-                send(Event::Submit(id, Urb { seqnum, ep, dir_in, length, setup, data }))?;
+                send(Event::Submit(id, Urb { seqnum, ep, dir_in, length, setup, data, submitted: false }))?;
             }
             CMD_UNLINK => send(Event::Unlink { conn: id, seqnum, victim: be32(&h, 20) })?,
             other => {

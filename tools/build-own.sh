@@ -48,6 +48,30 @@ for name in "$@"; do
             }' "$work/$name.cproject.yml" > "$work/cproject.tmp"
         mv "$work/cproject.tmp" "$work/$name.cproject.yml"
     fi
+    # further sources and include paths (relative to ITS-BRD-VSC) and defines
+    # (one per line); headers next to main.c go to Inc
+    if [ -f "$src/extra-src" ] || [ -f "$src/extra-inc" ] || [ -f "$src/extra-defines" ]; then
+        touch "$work/extra-src" "$work/extra-inc" "$work/extra-defines"
+        for f in extra-src extra-inc extra-defines; do
+            [ -f "$src/$f" ] && cp "$src/$f" "$work/$f"
+        done
+        awk -v brd="$brd" -v srcs="$work/extra-src" -v incs="$work/extra-inc" -v defs="$work/extra-defines" '
+            function insert(list, prefix, indent,   line) {
+                while ((getline line < list) > 0)
+                    if (line != "") print indent prefix line
+                close(list)
+            }
+            { print }
+            /^ *- Inc$/ { match($0, /^ */); insert(incs, brd "/", substr($0, 1, RLENGTH) "- ") }
+            /^ *- USE_HAL_DRIVER$/ { match($0, /^ */); insert(defs, "", substr($0, 1, RLENGTH) "- ") }
+            /^ *- file: Src\/main\.c$/ { match($0, /^ */); insert(srcs, brd "/", substr($0, 1, RLENGTH) "- file: ") }
+        ' "$work/$name.cproject.yml" > "$work/cproject.tmp"
+        mv "$work/cproject.tmp" "$work/$name.cproject.yml"
+        rm -f "$work/extra-src" "$work/extra-inc" "$work/extra-defines"
+    fi
+    for h in "$src"/*.h; do
+        [ -f "$h" ] && cp "$h" "$work/Inc/"
+    done
     cp "$template/${tname}_ITSboard.sct" "$work/${name}_ITSboard.sct"
     cp "$template/vcpkg-configuration.json" "$work/"
     (cd "$work" && cbuild "$name.csolution.yml" --context .Debug --packs >build.log 2>&1) ||

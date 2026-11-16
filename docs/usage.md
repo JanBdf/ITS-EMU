@@ -76,6 +76,27 @@ net@tcp:8080=80,udp:5000`). No NAT: the board reaches no other hosts.
 its-emu NetEcho.axf --forward tcp:7007=7   # then: nc localhost 7007
 ```
 
+## USB on CN13 (Linux)
+
+A firmware that uses USB OTG FS (the Nucleo's second USB jack, CN13) as a
+USB device, such as the BITMAP task's USB-CDC transfer (S7), appears on the
+computer like the real board with a second cable. While the USB switch is
+on (`its-emu --usb`), the firmware's device is exported over USB/IP once it
+connects, with the descriptors it reports (e.g. `0483:5740` "STM32 Virtual
+ComPort in FS Mode"), and the GUI (or `--usb-attach`) plugs it in; the
+status bar shows *CN13 plugged in*. Programs then use its `/dev/ttyACM*`
+port, e.g. the BITMAP task's Python GUI:
+
+```sh
+its-emu-gui BITMAP.axf     # press S7 on the board, then connect the Python GUI to the new port
+```
+
+The bus runs at full speed's bit rate (12 Mbit/s); how fast data goes
+through is up to the firmware (the BITMAP demo takes about 460 KB/s).
+USB needs the 48 MHz clock: with another PLL Q output the log warns (on
+the board USB would not work). Not modelled: host mode, isochronous
+endpoints, suspend/resume, SOF interrupts, DMA mode of the core.
+
 ## Raspberry Pi Pico
 
 `--device pico=FIRMWARE.uf2@GP0=PF0,GP5=PF1` (or the Devices panel) runs a

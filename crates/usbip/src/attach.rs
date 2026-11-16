@@ -59,9 +59,11 @@ pub fn spawn_attach(addr: SocketAddr, busid: &str, what: &str) -> Receiver<Resul
         let shown = argv.join(" ");
         let result = match std::process::Command::new(&argv[0]).args(&argv[1..]).output() {
             Ok(out) if out.status.success() => {
+                // usbip reports the port it uses; the helper warns about cdc_acm
                 let err = String::from_utf8_lossy(&out.stderr);
-                if !err.trim().is_empty() {
-                    log::warn!("{what}: {}", err.trim());
+                let warnings: Vec<&str> = err.lines().filter(|l| l.contains("warning")).collect();
+                if !warnings.is_empty() {
+                    log::warn!("{what}: {}", warnings.join("; "));
                 } else if serial_needs_restart() {
                     log::warn!(
                         "{what}: the kernel was updated since the last start: its serial port \

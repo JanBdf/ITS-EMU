@@ -8,3 +8,6 @@ SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="374b", TAG+="uacce
 # Raspberry Pi Pico running a pico-sdk USB serial port (2e8a:000a), the
 # emulated one (USB/IP, from bus id 1-2) as well as a real one.
 SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a", TAG+="uaccess"
+# A firmware's USB serial port on CN13 (USB OTG FS) with ST's virtual COM
+# port IDs (0483:5740), the emulated one (USB/IP) as well as a real one.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", TAG+="uaccess"
