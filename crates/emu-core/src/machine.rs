@@ -186,6 +186,10 @@ pub struct System {
     slice_end: u64,
     /// Unicorn is stopped once the cycle counter reaches this value.
     slice_limit: u64,
+    /// The cycle at which the current [`Machine::run`] ends, and whether it
+    /// has breakpoints or watchpoints: for `Machine::renew_slice`.
+    run_end: u64,
+    run_points: bool,
     /// Instruction count per translated block (direct-mapped cache).
     block_insns: BlockCache,
     /// Last invalid memory access reported by Unicorn (address, is_write, is_fetch).
@@ -238,8 +242,82 @@ pub struct System {
     cyccnt_sites: Option<((u64, u32), Vec<timing::LoadSite>)>,
     /// Division instructions that have a timing hook.
     hooked_divs: std::collections::HashSet<u32>,
-    /// Code has run from the RAM region (index into `config.memory.ram`).
-    ram_exec: Vec<bool>,
+    /// Pages (of `RAM_PAGE` bytes) of each RAM region (index into
+    /// `config.memory.ram`) that code has run from.
+    ram_exec: Vec<Vec<bool>>,
+    /// What translated blocks that account for themselves read and write.
+    fast: FastAccount,
+    /// How the translated code accounts at the moment (see [`FastMode`]).
+    fast_mode: FastMode,
+}
+
+/// Blocks that account for themselves (`uc_its_account` of the vendored
+/// Unicorn): most blocks add their cycles to the clock in translated code and
+/// call the block hook only when that is not enough. The hook stays the
+/// reference: a block takes the short way only where the hook would do
+/// nothing else than charge it.
+struct FastAccount {
+    /// The hook runs once the clock reaches this cycle: `slice_end`, or 0
+    /// while every block needs the hook (see `System::refresh_fast_limit`).
+    limit: u64,
+    /// How the previous block ended, for the next one: [`EDGE_SLOW`] (ask
+    /// the hook; `limit` is 0 then), or the address after it (bit 0 set after an unconditional
+    /// branch), [`EDGE_COND`] after a conditional one and the block's size
+    /// from bit 48 on. Translated code adds [`EDGE_FRESH`]: the hook's state
+    /// (`block`, `branch_from`, ...) is not up to date, see `System::sync_fast`.
+    edge: u64,
+}
+
+const EDGE_SLOW: u64 = u64::MAX;
+const EDGE_COND: u64 = 1 << 32;
+const EDGE_FRESH: u64 = 1 << 33;
+const EDGE_SIZE_SHIFT: u32 = 48;
+
+/// The edge a block of `size` bytes leaves that ended as `branch_from` says.
+fn edge_after(branch_from: Option<(u64, bool)>, size: u32) -> u64 {
+    match branch_from {
+        Some((end, conditional)) if size <= 0xFFFF && end <= u64::from(u32::MAX) => {
+            let low = if conditional { end | EDGE_COND } else { end | 1 };
+            low | u64::from(size) << EDGE_SIZE_SHIFT
+        }
+        _ => EDGE_SLOW,
+    }
+}
+
+/// How translated code accounts for blocks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FastMode {
+    /// Every block calls the hook.
+    Hook,
+    /// Blocks charge themselves.
+    Charge,
+    /// And do the idle detector's bookkeeping.
+    ChargeIdle,
+}
+
+/// `struct uc_its_layout` of the vendored Unicorn.
+#[repr(C)]
+struct ItsLayout {
+    base: *mut std::ffi::c_void,
+    clock: i32,
+    limit: i32,
+    edge: i32,
+    idle: i32,
+    idle_head: i32,
+    idle_blocks: i32,
+    idle_stored: i32,
+    idle_clean: i32,
+    idle_delay_clean: i32,
+}
+
+/// `struct uc_its_block` of the vendored Unicorn.
+#[repr(C)]
+struct ItsBlock {
+    post: u64,
+    cycles: u32,
+    penalty: u32,
+    stores: u8,
+    side_effects: u8,
 }
 
 impl System {
@@ -247,8 +325,85 @@ impl System {
     /// from MMIO callbacks (unlike `emu_stop`, which would re-execute the
     /// current instruction).
     pub fn request_stop(&mut self) {
-        self.slice_end = 0;
+        self.set_slice_end(0);
         self.slice_limit = 0;
+    }
+
+    /// The only way to change `slice_end`: translated code compares the
+    /// clock with `fast.limit`.
+    #[inline]
+    fn set_slice_end(&mut self, cycle: u64) {
+        self.slice_end = cycle;
+        self.refresh_fast_limit();
+    }
+
+    /// Translated blocks account for themselves until the slice ends, and
+    /// not at all while the hook has more to do than that at every block.
+    /// To be called when `slice_end`, the edge or one of the conditions
+    /// changes outside the block hook (which calls it when it returns).
+    #[inline]
+    fn refresh_fast_limit(&mut self) {
+        let hook_only =
+            self.fast.edge == EDGE_SLOW || self.stepping || self.idle.poll_armed.is_some() || self.end_run_signalled();
+        self.fast.limit = if hook_only { 0 } else { self.slice_end };
+    }
+
+    /// One of `end_run_signals` is set: the hook ends the run at the next block.
+    #[inline]
+    fn end_run_signalled(&self) -> bool {
+        self.end_run_signals.iter().flatten().any(|s| s.get())
+    }
+
+    /// After a peripheral access or update, which may have set one of
+    /// `end_run_signals`: the next block has to ask the hook then.
+    #[inline]
+    fn note_end_run_signals(&mut self) {
+        if self.end_run_signalled() {
+            self.fast.limit = 0;
+        }
+    }
+
+    /// How translated code should account for blocks (`Machine::set_fast_mode`).
+    fn wanted_fast_mode(&self) -> FastMode {
+        if self.idle_skipping { FastMode::ChargeIdle } else { FastMode::Charge }
+    }
+
+    /// The slice a run starts at `now`: shorter while an enabled interrupt
+    /// is pending (it is masked, or it would have been taken), to notice
+    /// when the firmware unmasks it.
+    fn start_slice(&mut self, now: u64) -> u64 {
+        let mut slice_limit = self.run_end.min(now + self.config.quantum);
+        if self.nvic.any_pending() {
+            slice_limit = slice_limit.min(now + self.config.masked_quantum);
+        }
+        self.slice_limit = slice_limit;
+        self.set_slice_end(self.next_slice_end());
+        self.delay_skipping = self.idle_skipping && !self.run_points && !self.debug.enabled();
+        slice_limit
+    }
+
+    /// Brings the hook's state up to date after translated code entered a
+    /// block on its own (`EDGE_FRESH`): what `commit_block` would have set.
+    /// Needed before anything reads or writes `block`, `cyccnt_reads`,
+    /// `mmio_shift`, `branch_from` or `fell_through`.
+    #[inline]
+    fn sync_fast(&mut self) {
+        let edge = self.fast.edge;
+        if edge == EDGE_SLOW || edge & EDGE_FRESH == 0 {
+            return;
+        }
+        self.fast.edge = edge & !EDGE_FRESH;
+        let size = edge >> EDGE_SIZE_SHIFT;
+        let end = edge & 0xFFFF_FFFE;
+        let addr = end - size;
+        self.block = Some((addr, size as u32));
+        self.cyccnt_reads = 0;
+        self.mmio_shift = 0;
+        self.branch_from = Some((end, edge & EDGE_COND != 0));
+        self.fell_through = None;
+        if self.idle_skipping {
+            self.idle.prev_block = addr;
+        }
     }
 
     /// Brings SysTick and the peripherals up to the current cycle.
@@ -273,6 +428,7 @@ impl System {
         bus.update(&mut ctx);
         self.service_master();
         self.take_reset_request();
+        self.note_end_run_signals();
     }
 
     /// Lets the DMA make the transfers that peripherals request.
@@ -353,14 +509,14 @@ impl System {
                 return false;
             }
             let next_event = [systick, bus].into_iter().flatten().min();
-            self.slice_end = next_event.map_or(self.slice_limit, |ev| self.slice_limit.min(ev));
+            self.set_slice_end(next_event.map_or(self.slice_limit, |ev| self.slice_limit.min(ev)));
             return true;
         }
         self.sync_devices_with(bus);
         if self.nvic.any_pending() || self.reset_requested.is_some() {
             return false;
         }
-        self.slice_end = self.next_slice_end();
+        self.set_slice_end(self.next_slice_end());
         true
     }
 
@@ -371,12 +527,13 @@ impl System {
         if let Some(ev) = self.bus.take_access_event()
             && ev < self.slice_end
         {
-            self.slice_end = ev;
+            self.set_slice_end(ev);
         }
     }
 
     /// A peripheral read by the core (the MMIO callback).
     fn mmio_read(&mut self, addr: u32, size: u32) -> u32 {
+        self.sync_fast();
         let ws = self.bus.wait_states(addr, false, self.clock.cycles() - self.mmio_shift);
         self.clock.advance(ws);
         let (mut ctx, bus) = self.ctx();
@@ -386,6 +543,7 @@ impl System {
         let until = self.bus.read_stable_until(addr, &self.clock);
         self.idle.note_read(until, now);
         self.clip_slice_to_events();
+        self.note_end_run_signals();
         value
     }
 
@@ -447,6 +605,7 @@ impl System {
         self.mmio_shift = if charge.continues { self.mmio_shift + charge.cycles } else { 0 };
         self.fell_through = charge.fell_through;
         self.branch_from = charge.branch_from;
+        self.fast.edge = edge_after(charge.branch_from, size);
         if charge.sev
             && let Some(signal) = &self.sev_signal
         {
@@ -467,16 +626,25 @@ impl System {
         self.config.memory.ram.iter().position(|&(base, size)| addr.wrapping_sub(base) < size)
     }
 
+    /// The RAM page at `addr` (region, page in it), and whether code has run
+    /// from it.
+    fn ram_page(&self, addr: u32) -> Option<(usize, usize, bool)> {
+        let i = self.ram_region(addr)?;
+        let page = (addr - self.config.memory.ram[i].0) as usize / RAM_PAGE;
+        Some((i, page, self.ram_exec[i][page]))
+    }
+
     /// Access rights of the page at `addr` for the TLB: those of the
     /// Cortex-M default memory map (execute-never for peripherals, devices
-    /// and the system region), but RAM only executable once code runs from it.
-    /// Unicorn sends every store to a page with execute rights through its
-    /// slow path (check for self-modifying code), which costs more than the
-    /// translated code itself.
+    /// and the system region), but a RAM page only executable once code runs
+    /// from it. Unicorn sends every store to a page with execute rights
+    /// through its slow path (check for self-modifying code), which costs
+    /// more than the translated code itself: firmware with a few functions
+    /// in RAM (the Pico SDK's) would pay that for its stack and data too.
     fn page_perms(&self, addr: u32) -> Prot {
         let execute_never = matches!(addr, 0x4000_0000..=0x5FFF_FFFF | 0xA000_0000..=0xFFFF_FFFF);
-        match self.ram_region(addr) {
-            Some(i) if !self.ram_exec[i] => Prot::READ | Prot::WRITE,
+        match self.ram_page(addr) {
+            Some((_, _, false)) => Prot::READ | Prot::WRITE,
             None if execute_never => Prot::READ | Prot::WRITE,
             _ => Prot::ALL,
         }
@@ -583,7 +751,8 @@ impl CoreAccess for UcCore<'_, '_> {
         // Through Unicorn into RAM that code runs from: it drops translations.
         let sys = self.0.get_data_mut();
         sys.idle.dirty();
-        if sys.ram_region(addr).is_some_and(|i| !sys.ram_exec[i]) && sys.ram.write(addr, 4, v) {
+        let no_code = |a| sys.ram_page(a).is_some_and(|(_, _, exec)| !exec);
+        if no_code(addr) && no_code(addr.wrapping_add(3)) && sys.ram.write(addr, 4, v) {
             return Ok(());
         }
         self.0.mem_write(u64::from(addr), &v.to_le_bytes()).map_err(|_| AccessError::Bus(addr))
@@ -633,7 +802,8 @@ impl BlockCache {
 struct SysMemory<'a> {
     ram: &'a Ram,
     regions: &'a [(u32, u32)],
-    exec: &'a [bool],
+    /// Per region, the pages (`RAM_PAGE`) that hold code.
+    exec: &'a [Vec<bool>],
 }
 
 impl delay::Memory for SysMemory<'_> {
@@ -642,10 +812,10 @@ impl delay::Memory for SysMemory<'_> {
     }
 
     fn storable(&self, addr: u32) -> bool {
-        self.regions
-            .iter()
-            .zip(self.exec)
-            .any(|(&(base, size), &exec)| !exec && addr >= base && addr - base <= size.saturating_sub(4))
+        self.regions.iter().zip(self.exec).any(|(&(base, size), exec)| {
+            let page = |a: u32| (a - base) as usize / RAM_PAGE;
+            addr >= base && addr - base <= size.saturating_sub(4) && !exec[page(addr)] && !exec[page(addr + 3)]
+        })
     }
 }
 
@@ -723,6 +893,13 @@ unsafe extern "C" {
     fn uc_its_core_regs(uc: *mut std::ffi::c_void, out: *mut u32);
     // sets R0..R15 and the NZCV flags (code the emulator ran in its place)
     fn uc_its_set_core_regs(uc: *mut std::ffi::c_void, regs: *const u32, nzcv: u32);
+    // blocks translated from now on account for themselves (null: all call the hook)
+    fn uc_its_account(
+        uc: *mut std::ffi::c_void,
+        layout: *const ItsLayout,
+        block: Option<unsafe extern "C" fn(*mut std::ffi::c_void, u64, u32, *mut ItsBlock) -> bool>,
+        opaque: *mut std::ffi::c_void,
+    );
 }
 
 /// QEMU's EXCP_YIELD: the core stopped at WFE or YIELD.
@@ -1115,7 +1292,29 @@ unsafe extern "C" fn block_hook(_uc: *mut std::ffi::c_void, addr: u64, size: u32
     // SAFETY: see the registration; nothing else uses the `Unicorn` while
     // the engine runs (the caller of `emu_start` waits for it).
     let uc = unsafe { &mut *user_data.cast::<Unicorn<'static, System>>() };
+    let sys = uc.get_data_mut();
+    sys.sync_fast();
+    // Whatever the hook does: the next block asks it again, unless this one
+    // is committed (`commit_block`).
+    sys.fast.edge = EDGE_SLOW;
     Machine::on_block(uc, addr, size);
+    uc.get_data_mut().refresh_fast_limit();
+}
+
+/// Tells Unicorn's translator about the block it has just translated (see
+/// `uc_its_account`); `opaque` is the machine's boxed `Unicorn`.
+unsafe extern "C" fn fast_block(opaque: *mut std::ffi::c_void, addr: u64, size: u32, out: *mut ItsBlock) -> bool {
+    // SAFETY: as for `block_hook`; the translator runs inside `emu_start`,
+    // outside every other callback.
+    let uc = unsafe { &mut *opaque.cast::<Unicorn<'static, System>>() };
+    match Machine::fast_block(uc, addr, size) {
+        Some(block) => {
+            // SAFETY: the translator's struct for the answer
+            unsafe { out.write(block) };
+            true
+        }
+        None => false,
+    }
 }
 
 impl Machine {
@@ -1158,7 +1357,9 @@ impl Machine {
     /// peripherals): e.g. another core sleeps and has to run before this one
     /// gets further ahead of it. `[None, None]`: runs end at their budget.
     pub fn set_end_run_signals(&mut self, signals: [Option<Rc<Cell<bool>>>; 2]) {
-        self.uc.get_data_mut().end_run_signals = signals;
+        let sys = self.uc.get_data_mut();
+        sys.end_run_signals = signals;
+        sys.refresh_fast_limit();
     }
 
     /// The last run ended with the core asleep in WFI/WFE, and nothing that
@@ -1204,36 +1405,88 @@ impl Machine {
     /// current PC.
     #[inline]
     fn on_block(uc: &mut Unicorn<'static, System>, addr: u64, size: u32) {
+        // At the end of a slice: as if Unicorn had stopped and `run` had
+        // started it again at this block, which calls the hook once more.
+        while !Self::enter(uc, addr, size) {
+            if !Self::renew_slice(uc) {
+                let _ = uc.emu_stop();
+                return;
+            }
+        }
+    }
+
+    /// What [`Machine::run`] does between two slices, done from the block
+    /// hook when that is no more than looking at the devices and choosing
+    /// the next slice: most of all while an interrupt is pending but masked,
+    /// where slices are short (`masked_quantum`). False: the run loop has
+    /// more to do (it repeats what this did, to no effect at the same cycle).
+    fn renew_slice(uc: &mut Unicorn<'static, System>) -> bool {
+        let sys = uc.get_data_mut();
+        sys.debug.retired();
+        if sys.clock.cycles() != sys.synced_at {
+            sys.sync_devices();
+        }
+        if !sys.new_divs.is_empty()
+            || sys.flash_dirty.is_some()
+            || sys.points_dirty
+            || sys.run_points
+            || sys.reset_requested.is_some()
+            || sys.stop.is_some()
+            || sys.watch_hit.is_some()
+            || sys.ended_for_wake
+            || sys.debug.halted()
+            || sys.reset_held
+            || sys.wanted_fast_mode() != sys.fast_mode
+            || sys.clock.cycles() >= sys.run_end
+        {
+            return false;
+        }
+        if sys.nvic.any_pending() {
+            let masks = UcCore(uc).masks();
+            if uc.get_data().nvic.pending_to_take(masks).is_some() {
+                return false;
+            }
+        }
+        let sys = uc.get_data_mut();
+        let now = sys.clock.cycles();
+        sys.start_slice(now);
+        // otherwise this would not end (a quantum of 0)
+        sys.slice_end > now
+    }
+
+    /// [`Self::on_block`] for one entry into the block. False: the slice
+    /// has ended, the block is not accounted for and must not run yet.
+    #[inline]
+    fn enter(uc: &mut Unicorn<'static, System>, addr: u64, size: u32) -> bool {
         let sys = uc.get_data_mut();
         if sys.stepping {
             // `step` accounts for its single instruction. (With a branch the
             // hook also fires for the next block before the step ends.)
             sys.block = None;
-            return;
+            return true;
         }
         if sys.idle.poll_armed == Some(addr) {
             // A polling loop: `Machine::fast_forward_poll` runs it from here.
             sys.idle.poll_armed = None;
             sys.idle.poll_ready = true;
             let _ = uc.emu_stop();
-            return;
+            return true;
         }
         let entered_by_branch = sys.enter_block(addr);
-        if sys.end_run_signals.iter().flatten().any(|s| s.get()) {
+        if sys.end_run_signalled() {
             // The other core may wake up: it has to run before this one goes on.
             sys.ended_for_wake = true;
             let _ = uc.emu_stop();
-            return;
+            return true;
         }
         if sys.clock.cycles() >= sys.slice_end && !sys.continue_after_events() {
-            let _ = uc.emu_stop();
-            return;
+            return false;
         }
         let slot = match sys.block_insns.find(addr, size) {
             Some(slot) => slot,
             None => match Self::analyze_new_block(uc, addr, size) {
                 Some(slot) => slot,
-                None => return,
+                None => return true,
             },
         };
         let sys = uc.get_data_mut();
@@ -1250,8 +1503,7 @@ impl Machine {
                     sys.clock.advance(sys.slice_end - now);
                 }
                 if !sys.continue_after_events() {
-                    let _ = uc.emu_stop();
-                    return;
+                    return false;
                 }
             } else {
                 // A polled register changes before the slice ends: skip the
@@ -1261,6 +1513,7 @@ impl Machine {
             }
         }
         uc.get_data_mut().commit_block(addr, size, &charge);
+        true
     }
 
     fn with_memory(
@@ -1287,6 +1540,8 @@ impl Machine {
             config: config.clone(),
             slice_end: 0,
             slice_limit: 0,
+            run_end: 0,
+            run_points: false,
             branch_from: None,
             fell_through: None,
             new_divs: Vec::new(),
@@ -1294,7 +1549,14 @@ impl Machine {
             cyccnt_reads: 0,
             cyccnt_sites: None,
             hooked_divs: std::collections::HashSet::new(),
-            ram_exec: vec![false; config.memory.ram.len()],
+            ram_exec: config
+                .memory
+                .ram
+                .iter()
+                .map(|&(_, size)| vec![false; (size as usize).div_ceil(RAM_PAGE)])
+                .collect(),
+            fast: FastAccount { limit: 0, edge: EDGE_SLOW },
+            fast_mode: FastMode::Hook,
             block_insns: BlockCache::new(),
             last_invalid: None,
             stop: None,
@@ -1362,6 +1624,7 @@ impl Machine {
                 }),
                 Some(move |uc: &mut Unicorn<System>, off: u64, size: usize, value: u64| {
                     let sys = uc.get_data_mut();
+                    sys.sync_fast();
                     let addr = base + off as u32;
                     if !sys.bus.write_is_inert(addr) {
                         sys.idle.dirty();
@@ -1378,6 +1641,7 @@ impl Machine {
                     }
                     sys.take_reset_request();
                     sys.clip_slice_to_events();
+                    sys.note_end_run_signals();
                 }),
             )?;
         }
@@ -1562,6 +1826,83 @@ impl Machine {
             return None;
         }
         Some(slot)
+    }
+
+    /// What a block that accounts for itself needs to know; `None` if the
+    /// hook has more to do for it than to charge it: a block that runs on
+    /// into the next one (load and FP pipelining across the split), one with
+    /// divisions (timing hooks) or SEV, and code in RAM (it may change).
+    fn fast_block(uc: &mut Unicorn<System>, addr: u64, size: u32) -> Option<ItsBlock> {
+        if size == 0 || size > 0xFFFF || uc.get_data().ram_region(addr as u32).is_some() {
+            return None;
+        }
+        let mut code = vec![0u8; size as usize];
+        uc.mem_read(addr, &mut code).ok()?;
+        let mut divs = Vec::new();
+        let info = timing::analyze_block(&code, addr as u32, &mut divs);
+        if !divs.is_empty() || info.sev || info.entry_penalty > 1 {
+            return None;
+        }
+        let end = addr + u64::from(size);
+        let branch_from = if info.ends_with_branch {
+            Some((end, true))
+        } else if info.ends_with_jump {
+            Some((end, false))
+        } else {
+            return None;
+        };
+        let post = edge_after(branch_from, size);
+        (post != EDGE_SLOW).then_some(ItsBlock {
+            post: post | EDGE_FRESH,
+            cycles: info.cycles,
+            penalty: info.entry_penalty,
+            stores: info.stores.into(),
+            side_effects: info.side_effects.into(),
+        })
+    }
+
+    /// Chooses how translated code accounts for blocks and, when that
+    /// changes, drops the code translated for the previous way.
+    fn set_fast_mode(&mut self) {
+        let sys = self.uc.get_data();
+        let mode = sys.wanted_fast_mode();
+        if mode == sys.fast_mode {
+            return;
+        }
+        let sys = self.uc.get_data_mut();
+        sys.sync_fast();
+        sys.fast.edge = EDGE_SLOW;
+        sys.refresh_fast_limit();
+        sys.fast_mode = mode;
+        let base: *mut System = sys;
+        // Offsets within `System`, which the translated code addresses.
+        let off = |p: *const u8| (p as isize - base as isize) as i32;
+        let layout = ItsLayout {
+            base: base.cast(),
+            clock: off(sys.clock.cycles_ptr().cast()),
+            limit: off((&raw const sys.fast.limit).cast()),
+            edge: off((&raw const sys.fast.edge).cast()),
+            idle: (mode == FastMode::ChargeIdle).into(),
+            idle_head: off((&raw const sys.idle.head).cast()),
+            idle_blocks: off((&raw const sys.idle.blocks_since_head).cast()),
+            idle_stored: off((&raw const sys.idle.stored).cast()),
+            idle_clean: off((&raw const sys.idle.clean).cast()),
+            idle_delay_clean: off((&raw const sys.idle.delay.clean).cast()),
+        };
+        let uc_ptr: *mut Unicorn<'static, System> = &mut *self.uc;
+        // SAFETY: `System` lives in the engine's heap allocation as long as
+        // the engine and never moves; translated code reads and writes these
+        // fields only while the engine runs, when nothing else does (as the
+        // hooks); `fast_block` gets the boxed `Unicorn` like `block_hook`.
+        unsafe {
+            let handle = self.uc.get_handle().cast();
+            if mode == FastMode::Hook {
+                uc_its_account(handle, std::ptr::null(), None, std::ptr::null_mut());
+            } else {
+                uc_its_account(handle, &raw const layout, Some(fast_block), uc_ptr.cast());
+            }
+        }
+        let _ = self.uc.ctl_flush_tb();
     }
 
     pub fn flash_writes(&self) -> u64 {
@@ -1978,6 +2319,7 @@ impl Machine {
     /// too; the error stays within the block, as without placing.)
     fn cyccnt_now(uc: &mut Unicorn<System>) -> u64 {
         let sys = uc.get_data_mut();
+        sys.sync_fast();
         let now = sys.clock.cycles();
         let Some(block) = sys.block else {
             return now;
@@ -2232,7 +2574,7 @@ impl Machine {
         let sys = self.uc.get_data_mut();
         sys.debug.retired();
         sys.stepping = true;
-        sys.slice_end = u64::MAX;
+        sys.set_slice_end(u64::MAX);
         sys.slice_limit = u64::MAX;
         // Unicorn counts instructions with a code hook that only blocks
         // translated after it was added call: cached code (a polling loop)
@@ -2247,6 +2589,7 @@ impl Machine {
         }
         let sys = self.uc.get_data_mut();
         sys.stepping = false;
+        sys.refresh_fast_limit();
         sys.clock.advance(1);
         if at_breakpoint {
             self.add_breakpoint(pc);
@@ -2267,6 +2610,7 @@ impl Machine {
     /// A breakpoint at the current PC is stepped over (resuming from it).
     pub fn run(&mut self, budget: u64) -> StopReason {
         let end = self.clock().cycles().saturating_add(budget);
+        self.uc.get_data_mut().run_end = end;
         let resume_pc = self.is_exit(self.pc()).then(|| self.pc());
         let mut first = true;
         // Inputs may have changed since the last call.
@@ -2308,16 +2652,12 @@ impl Machine {
             if now >= end {
                 return StopReason::Budget;
             }
-            let mut slice_limit = end.min(now + sys.config.quantum);
-            if sys.nvic.any_pending() {
-                slice_limit = slice_limit.min(now + sys.config.masked_quantum);
-            }
             let points =
                 !self.breakpoints.is_empty() || !self.hw_breakpoints.is_empty() || !self.watchpoints.is_empty();
             let sys = self.uc.get_data_mut();
-            sys.slice_limit = slice_limit;
-            sys.slice_end = sys.next_slice_end();
-            sys.delay_skipping = sys.idle_skipping && !points && !sys.debug.enabled();
+            sys.run_points = points;
+            let slice_limit = sys.start_slice(now);
+            self.set_fast_mode();
 
             let pc = self.pc();
             if std::mem::take(&mut first) && resume_pc == Some(pc) {
@@ -2429,7 +2769,10 @@ impl Machine {
         let sys = uc.get_data_mut();
         sys.idle.dirty();
         sys.clock.advance(latency);
+        sys.sync_fast();
         sys.branch_from = None;
+        sys.fast.edge = EDGE_SLOW;
+        sys.refresh_fast_limit();
         let (vtor, stkalign) = {
             let s = &uc.get_data().scs;
             (s.vtor, s.stkalign())
@@ -2488,7 +2831,11 @@ impl Machine {
                 uc.get_data_mut().nvic = nvic;
                 match res {
                     Ok(()) => {
-                        uc.get_data_mut().branch_from = None;
+                        let sys = uc.get_data_mut();
+                        sys.sync_fast();
+                        sys.branch_from = None;
+                        sys.fast.edge = EDGE_SLOW;
+                        sys.refresh_fast_limit();
                         let masks = UcCore(uc).masks();
                         match uc.get_data().nvic.pending_to_take(masks) {
                             Some(exc) => {
@@ -2554,20 +2901,24 @@ impl Machine {
         }
     }
 
-    /// Code is fetched from a RAM region for the first time: makes it executable
-    /// (the fetch is retried). Returns false if `pc` is not in RAM that is
-    /// still non-executable.
+    /// Code is fetched from a RAM page for the first time: makes it executable
+    /// (the fetch is retried). Returns false if the instruction at `pc` is
+    /// not in RAM that is still non-executable.
     fn make_ram_executable(&mut self, pc: u32) -> bool {
         let sys = self.uc.get_data_mut();
-        let Some(i) = sys.ram_region(pc) else { return false };
-        if sys.ram_exec[i] {
-            return false;
-        }
-        sys.ram_exec[i] = true;
+        // the page of the instruction, or the next one if it reaches into it
+        let fetched = [pc, pc.wrapping_add(2)].into_iter().find_map(|a| match sys.ram_page(a) {
+            Some((i, page, false)) => Some((i, page)),
+            _ => None,
+        });
+        let Some((i, page)) = fetched else { return false };
+        let first = !sys.ram_exec[i].contains(&true);
+        sys.ram_exec[i][page] = true;
         let (base, size) = sys.config.memory.ram[i];
-        log::debug!("code in RAM at {pc:#010x}: region {base:#010x} made executable");
-        // Executable regions get Unicorn's checks for self-modifying code.
-        let ok = self.uc.mem_protect(u64::from(base), u64::from(size), Prot::ALL).is_ok();
+        log::debug!("code in RAM at {pc:#010x}: page {page} of region {base:#010x} made executable");
+        // Unicorn checks stores for self-modifying code in regions with
+        // execute rights, on the pages the TLB has them for (`page_perms`).
+        let ok = !first || self.uc.mem_protect(u64::from(base), u64::from(size), Prot::ALL).is_ok();
         ok && self.uc.ctl_flush_tlb().is_ok()
     }
 

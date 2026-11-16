@@ -234,7 +234,21 @@ typedef struct CPUTLB {
  * This structure must be placed in ArchCPU immediately
  * before CPUArchState, as a field named "neg".
  */
+/*
+ * ITS-EMU: the targets of indirect jumps, per jump site (see
+ * its_gen_goto_ptr in target/arm/translate.c): the code of the block at
+ * `key`'s pc (low half) for the site with the number in its high half.
+ * Emptied whenever a block is invalidated (its_jc_clear).
+ */
+#define ITS_JC_BITS 8
+typedef struct ItsJumpCacheEntry {
+    uint64_t key;
+    void *host;
+} ItsJumpCacheEntry;
+
 typedef struct CPUNegativeOffsetState {
+    /* first: the backends want the TLB right before the CPU state */
+    ItsJumpCacheEntry its_jc[1 << ITS_JC_BITS];
     CPUTLB tlb;
     IcountDecr icount_decr;
 } CPUNegativeOffsetState;

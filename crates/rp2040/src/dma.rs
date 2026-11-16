@@ -435,10 +435,13 @@ fn dreq(bus: &mut Bus, ctx: &mut DeviceCtx, treq: u8, pwm: &PwmDreq) -> bool {
 
 /// Makes the transfers that are due (see the module comment); returns
 /// whether anything happened.
+#[inline]
 pub fn pump(dma: &SharedDma, bus: &mut Bus, ctx: &mut DeviceCtx) -> bool {
-    if !dma.borrow().any_busy() {
-        return false;
-    }
+    // every access to a shared peripheral asks, mostly with no channel busy
+    dma.borrow().any_busy() && pump_busy(dma, bus, ctx)
+}
+
+fn pump_busy(dma: &SharedDma, bus: &mut Bus, ctx: &mut DeviceCtx) -> bool {
     let ram = dma.borrow().ram.clone();
     let mut skip = 0u16;
     let mut moved = false;

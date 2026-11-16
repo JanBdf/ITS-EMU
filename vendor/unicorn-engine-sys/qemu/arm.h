@@ -1125,6 +1125,7 @@
 #define helper_ctpop_i32 helper_ctpop_i32_arm
 #define helper_ctpop_i64 helper_ctpop_i64_arm
 #define helper_lookup_tb_ptr helper_lookup_tb_ptr_arm
+#define helper_its_lookup_tb_ptr helper_its_lookup_tb_ptr_arm
 #define helper_exit_atomic helper_exit_atomic_arm
 #define helper_gvec_add8 helper_gvec_add8_arm
 #define helper_gvec_add16 helper_gvec_add16_arm

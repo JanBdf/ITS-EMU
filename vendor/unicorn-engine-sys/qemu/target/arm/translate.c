@@ -2721,6 +2721,70 @@ static void gen_goto_ptr(TCGContext *tcg_ctx)
     tcg_gen_lookup_and_goto_ptr(tcg_ctx);
 }
 
+/*
+ * ITS-EMU: the indirect jump at the end of a block (DISAS_JUMP: function
+ * returns, calls through pointers, table branches). lookup_tb_ptr works out
+ * the CPU state the next block has to be translated for (about 80 host
+ * instructions with its jump cache) on every jump. But only the pc and the
+ * Thumb bit are dynamic here: everything else in that state is the same
+ * each time this code runs, as for a direct jump, which QEMU chains to its
+ * target once and for all. So the pc alone tells the target of this jump:
+ * its_jc holds the block for (jump site, pc), checked inline; the helper
+ * fills it. A pc in ARM state (bit 0 set in the key) is never found.
+ */
+static void its_gen_goto_ptr(DisasContext *s)
+{
+    struct uc_struct *uc = s->uc;
+    TCGContext *tcg_ctx = uc->tcg_ctx;
+    const intptr_t table = (intptr_t)offsetof(ArchCPU, neg.its_jc) -
+                           (intptr_t)offsetof(ArchCPU, env);
+    TCGLabel *miss;
+    TCGv_i64 pc, key, t;
+    TCGv_ptr entry, host;
+    TCGv_i32 site;
+
+    if (uc->its_jump_sites == UINT32_MAX) {
+        /* out of site numbers */
+        tcg_gen_lookup_and_goto_ptr(tcg_ctx);
+        return;
+    }
+    uc->its_jump_sites++;
+
+    miss = gen_new_label(tcg_ctx);
+    pc = tcg_temp_new_i64(tcg_ctx);
+    key = tcg_temp_new_i64(tcg_ctx);
+    t = tcg_temp_new_i64(tcg_ctx);
+    entry = tcg_temp_new_ptr(tcg_ctx);
+    host = tcg_temp_local_new_ptr(tcg_ctx);
+
+    tcg_gen_extu_i32_i64(tcg_ctx, pc, tcg_ctx->cpu_R[15]);
+    tcg_gen_andi_i64(tcg_ctx, t, pc, ((1 << ITS_JC_BITS) - 1) << 1);
+    tcg_gen_shli_i64(tcg_ctx, t, t, 3);
+    QEMU_BUILD_BUG_ON(sizeof(ItsJumpCacheEntry) != 16);
+    tcg_gen_add_ptr(tcg_ctx, entry, tcg_ctx->cpu_env, (TCGv_ptr)t);
+    tcg_gen_addi_ptr(tcg_ctx, entry, entry, table);
+    tcg_gen_ld_i64(tcg_ctx, key, entry, offsetof(ItsJumpCacheEntry, key));
+    tcg_gen_ld_ptr(tcg_ctx, host, entry, offsetof(ItsJumpCacheEntry, host));
+    tcg_gen_ld32u_i64(tcg_ctx, t, tcg_ctx->cpu_env, offsetof(CPUARMState, thumb));
+    tcg_gen_xori_i64(tcg_ctx, t, t, 1);
+    tcg_gen_or_i64(tcg_ctx, pc, pc, t);
+    tcg_gen_ori_i64(tcg_ctx, pc, pc, (uint64_t)uc->its_jump_sites << 32);
+    tcg_gen_brcond_i64(tcg_ctx, TCG_COND_NE, key, pc, miss);
+    tcg_gen_op1i(tcg_ctx, INDEX_op_goto_ptr, tcgv_ptr_arg(tcg_ctx, host));
+
+    gen_set_label(tcg_ctx, miss);
+    site = tcg_const_i32(tcg_ctx, uc->its_jump_sites);
+    gen_helper_its_lookup_tb_ptr(tcg_ctx, host, tcg_ctx->cpu_env, site);
+    tcg_gen_op1i(tcg_ctx, INDEX_op_goto_ptr, tcgv_ptr_arg(tcg_ctx, host));
+
+    tcg_temp_free_i32(tcg_ctx, site);
+    tcg_temp_free_ptr(tcg_ctx, host);
+    tcg_temp_free_ptr(tcg_ctx, entry);
+    tcg_temp_free_i64(tcg_ctx, t);
+    tcg_temp_free_i64(tcg_ctx, key);
+    tcg_temp_free_i64(tcg_ctx, pc);
+}
+
 /* This will end the TB but doesn't guarantee we'll return to
  * cpu_loop_exec. Any live exit_requests will be processed as we
  * enter the next TB.
@@ -11712,7 +11776,7 @@ static void arm_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
             gen_goto_tb(dc, 1, dc->base.pc_next);
             break;
         case DISAS_JUMP:
-            gen_goto_ptr(tcg_ctx);
+            its_gen_goto_ptr(dc);
             break;
         case DISAS_UPDATE:
             gen_set_pc_im(dc, dc->base.pc_next);

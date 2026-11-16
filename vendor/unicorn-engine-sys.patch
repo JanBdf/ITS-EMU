@@ -20,7 +20,39 @@
          "cargo:rerun-if-changed={}",
 --- a/include/uc_priv.h
 +++ b/include/uc_priv.h
-@@ -394,6 +394,22 @@
+@@ -268,6 +268,31 @@
+ 
+ typedef struct TargetPageBits TargetPageBits;
+ typedef struct TCGContext TCGContext;
++
++// ITS-EMU: inline cycle accounting (uc_its_account). The emulator's
++// variables, as offsets from `base`: the cycle counter, the cycle at which
++// the block hook has to run (0: at every block) and how the previous block
++// ended (the "edge"). With `idle`, also the idle detector's loop head, its
++// block counter and its flags (bytes).
++struct uc_its_layout {
++    void *base;
++    int32_t clock, limit, edge;
++    int32_t idle;
++    int32_t idle_head, idle_blocks, idle_stored, idle_clean, idle_delay_clean;
++};
++
++// What the emulator says about a translated block that accounts for itself:
++// its cycles, the extra cycles when a branch enters it, the edge it leaves,
++// and whether it stores or has side effects (idle detection).
++struct uc_its_block {
++    uint64_t post;
++    uint32_t cycles, penalty;
++    uint8_t stores, side_effects;
++};
++
++// false: the block always calls the block hook.
++typedef bool (*uc_its_block_cb)(void *opaque, uint64_t pc, uint32_t size,
++                                struct uc_its_block *out);
+ 
+ struct uc_struct {
+     uc_arch arch;
+@@ -394,6 +419,29 @@
      int thumb; // thumb mode for ARM
      MemoryRegion **mapped_blocks;
      uint32_t mapped_block_count;
@@ -33,6 +65,13 @@
 +    // ITS-EMU: the CPU exception that stopped emulation as an invalid
 +    // instruction (uc_its_stop_exception)
 +    int its_stop_excp;
++    // ITS-EMU: inline cycle accounting at the start of translated blocks
++    // (uc_its_account); its_block == NULL: off
++    struct uc_its_layout its_acct;
++    uc_its_block_cb its_block;
++    void *its_block_opaque;
++    // ITS-EMU: number of the last indirect jump site (its_gen_goto_ptr)
++    uint32_t its_jump_sites;
 +    // ITS-EMU: find_memory_mapping results per 1 KiB page, valid while
 +    // address_space_memory.generation is unchanged.
 +    struct uc_mapping_cache_entry {
@@ -45,10 +84,21 @@
                              // (qemu-thread-win32.c)
 --- a/qemu/accel/tcg/cputlb.c
 +++ b/qemu/accel/tcg/cputlb.c
-@@ -718,6 +718,34 @@
+@@ -301,6 +301,7 @@
      }
- }
  
+     cpu_tb_jmp_cache_clear(cpu);
++    its_jc_clear(cpu);
+ 
+     if (to_clean == ALL_MMUIDX_BITS) {
+         env_tlb(env)->c.full_flush_count = env_tlb(env)->c.full_flush_count + 1;
+@@ -715,7 +716,35 @@
+             tlb_reset_dirty_range_locked(uc, &env_tlb(env)->d[mmu_idx].vtable[i],
+                                          start1, length);
+         }
++    }
++}
++
 +/* ITS-EMU: the next store to each RAM page in the TLB of the current MMU
 + * index goes through notdirty_write again (uc_its_rearm_writes). Within one
 + * observation period of the idle detection the index does not change
@@ -69,18 +119,16 @@
 +    for (i = 0; i < CPU_VTLB_SIZE; i++) {
 +        tlb_reset_dirty_range_locked(uc, &env_tlb(env)->d[mmu_idx].vtable[i],
 +                                     0, UINTPTR_MAX);
-+    }
+     }
 +}
 +
 +void its_init_write_tracking(struct uc_struct *uc)
 +{
 +    uc->its_rearm_writes = its_rearm_writes;
-+}
-+
+ }
+ 
  void tlb_reset_dirty_by_vaddr(CPUState *cpu, target_ulong start1, target_ulong length)
- {
-     struct uc_struct *uc = cpu->uc;
-@@ -1013,19 +1041,19 @@
+@@ -1013,19 +1042,19 @@
  #endif
  }
  
@@ -105,7 +153,7 @@
      mr = section->mr;
      mr_offset = (iotlbentry->addr & TARGET_PAGE_MASK) + addr;
      cpu->mem_io_pc = retaddr;
-@@ -1033,6 +1061,9 @@
+@@ -1033,6 +1062,9 @@
          cpu_io_recompile(cpu, retaddr);
      }
  
@@ -115,7 +163,7 @@
      r = memory_region_dispatch_read(uc, mr, mr_offset, &val, op, iotlbentry->attrs);
      if (r != MEMTX_OK) {
  #if 0
-@@ -1048,18 +1079,28 @@
+@@ -1048,18 +1080,28 @@
      return val;
  }
  
@@ -125,7 +173,7 @@
 +static uint64_t io_readx(CPUArchState *env, CPUIOTLBEntry *iotlbentry,
 +                         int mmu_idx, target_ulong addr, uintptr_t retaddr,
 +                         MMUAccessType access_type, MemOp op)
-+{
+ {
 +    MemoryRegionSection *section =
 +        iotlb_to_section(env_cpu(env), iotlbentry->addr, iotlbentry->attrs);
 +    return io_readx_section(env, iotlbentry, section, mmu_idx, addr, retaddr,
@@ -137,7 +185,7 @@
 +                              MemoryRegionSection *section,
 +                              int mmu_idx, uint64_t val, target_ulong addr,
 +                              uintptr_t retaddr, MemOp op)
- {
++{
      CPUState *cpu = env_cpu(env);
      struct uc_struct *uc = env->uc;
      hwaddr mr_offset;
@@ -149,7 +197,7 @@
      mr = section->mr;
      mr_offset = (iotlbentry->addr & TARGET_PAGE_MASK) + addr;
      if (!cpu->can_do_io) {
-@@ -1067,6 +1108,9 @@
+@@ -1067,6 +1109,9 @@
      }
      cpu->mem_io_pc = retaddr;
  
@@ -159,7 +207,7 @@
      r = memory_region_dispatch_write(uc, mr, mr_offset, val, op, iotlbentry->attrs);
      if (r != MEMTX_OK) {
  #if 0
-@@ -1081,6 +1125,15 @@
+@@ -1081,6 +1126,15 @@
      }
  }
  
@@ -175,20 +223,20 @@
  static inline target_ulong tlb_read_ofs(CPUTLBEntry *entry, size_t ofs)
  {
  #if TCG_OVERSIZED_GUEST
-@@ -1196,6 +1249,12 @@
+@@ -1195,6 +1249,12 @@
+ #endif
      ram_addr_t ram_addr = mem_vaddr + iotlbentry->addr;
      MemoryRegion *mr = cpu->uc->memory_mapping(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK));
- 
++
 +    /* ITS-EMU: before the store changes the page (see uc_its_track_writes) */
 +    if (cpu->uc->its_first_write) {
 +        cpu->uc->its_first_write(cpu->uc->its_first_write_opaque,
 +                                 tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK));
 +    }
-+
+ 
      if (mr && (mr->perms & UC_PROT_EXEC) != 0) {
          struct page_collection *pages
-             = page_collection_lock(cpu->uc, ram_addr, ram_addr + size);
-@@ -1552,6 +1611,22 @@
+@@ -1552,6 +1612,22 @@
          tlb_addr &= ~TLB_INVALID_MASK;
      }
  
@@ -211,10 +259,12 @@
      paddr = entry->paddr | (addr & ~TARGET_PAGE_MASK);
      mr = uc->memory_mapping(uc, paddr);
  
-@@ -2190,6 +2265,20 @@
+@@ -2188,6 +2264,20 @@
+             entry = tlb_entry(env, mmu_idx, addr);
+         }
          tlb_addr = tlb_addr_write(entry) & ~TLB_INVALID_MASK;
-     }
- 
++    }
++
 +    /* ITS-EMU: likewise for an aligned write to a writable MMIO region
 +     * (see load_helper). */
 +    if ((tlb_addr & (TLB_MMIO | TLB_WATCHPOINT | TLB_BSWAP)) == TLB_MMIO &&
@@ -227,12 +277,10 @@
 +                              retaddr, op);
 +            return;
 +        }
-+    }
-+
+     }
+ 
      // Load the latest memory mapping.
-     paddr = entry->paddr | (addr & ~TARGET_PAGE_MASK);
-     mr = uc->memory_mapping(uc, paddr);
-@@ -2240,6 +2329,9 @@
+@@ -2240,6 +2330,9 @@
              uc->invalid_error = UC_ERR_WRITE_UNMAPPED;
              // printf("***** Invalid memory write at " TARGET_FMT_lx "\n", addr);
              cpu_exit(uc->cpu);
@@ -242,7 +290,7 @@
              return;
          } else {
              uc->invalid_error = UC_ERR_OK;
-@@ -2259,6 +2351,9 @@
+@@ -2259,6 +2352,9 @@
              if (mr == NULL) {
                  uc->invalid_error = UC_ERR_MAP;
                  cpu_exit(uc->cpu);
@@ -252,7 +300,7 @@
                  return;
              }
          }
-@@ -2305,6 +2400,9 @@
+@@ -2305,6 +2401,9 @@
              uc->invalid_error = UC_ERR_WRITE_PROT;
              // printf("***** Invalid memory write (ro) at " TARGET_FMT_lx "\n", addr);
              cpu_exit(uc->cpu);
@@ -262,7 +310,7 @@
              return;
          }
      }
-@@ -2315,6 +2413,9 @@
+@@ -2315,6 +2414,9 @@
              uc->invalid_addr = paddr;
              uc->invalid_error = UC_ERR_NOMEM;
              cpu_exit(uc->cpu);
@@ -303,6 +351,19 @@
  #else
  #define TARGET_PAGE_BITS   uc->init_target_page->bits
  #define TARGET_PAGE_MASK   uc->init_target_page->mask
+@@ -431,6 +437,12 @@
+     return &arch_cpu->neg;
+ }
+ 
++/* ITS-EMU: forgets the targets of indirect jumps (see ItsJumpCacheEntry) */
++static inline void its_jc_clear(CPUState *cpu)
++{
++    memset(cpu_neg(cpu)->its_jc, 0, sizeof(cpu_neg(cpu)->its_jc));
++}
++
+ /**
+  * env_tlb(env)
+  * @env: The architecture environment
 --- a/qemu/include/exec/cpu-defs.h
 +++ b/qemu/include/exec/cpu-defs.h
 @@ -85,6 +85,18 @@
@@ -324,6 +385,28 @@
  # if HOST_LONG_BITS == 32
  /* Make sure we do not require a double-word shift for the TLB load */
  #  define CPU_TLB_DYN_MAX_BITS (32 - TARGET_PAGE_BITS)
+@@ -222,7 +234,21 @@
+  * This structure must be placed in ArchCPU immediately
+  * before CPUArchState, as a field named "neg".
+  */
++/*
++ * ITS-EMU: the targets of indirect jumps, per jump site (see
++ * its_gen_goto_ptr in target/arm/translate.c): the code of the block at
++ * `key`'s pc (low half) for the site with the number in its high half.
++ * Emptied whenever a block is invalidated (its_jc_clear).
++ */
++#define ITS_JC_BITS 8
++typedef struct ItsJumpCacheEntry {
++    uint64_t key;
++    void *host;
++} ItsJumpCacheEntry;
++
+ typedef struct CPUNegativeOffsetState {
++    /* first: the backends want the TLB right before the CPU state */
++    ItsJumpCacheEntry its_jc[1 << ITS_JC_BITS];
+     CPUTLB tlb;
+     IcountDecr icount_decr;
+ } CPUNegativeOffsetState;
 --- a/qemu/include/exec/cpu_ldst.h
 +++ b/qemu/include/exec/cpu_ldst.h
 @@ -103,6 +103,10 @@
@@ -862,7 +945,7 @@
          return NULL;
 --- a/uc.c
 +++ b/uc.c
-@@ -681,6 +681,35 @@
+@@ -681,9 +681,56 @@
  
      restore_jit_state(uc);
      return UC_ERR_OK;
@@ -897,8 +980,29 @@
 +    return uc->its_stop_excp;
  }
  
++// ITS-EMU: inline cycle accounting. Blocks translated from now on charge
++// their cycles themselves and call the block hook only when `block` says
++// they cannot or when the cycle counter reaches the limit (see
++// its_gen_account in accel/tcg/translator.c). The
++// caller flushes the translation cache. block == NULL switches it off.
  UNICORN_EXPORT
-@@ -1081,6 +1110,7 @@
++void uc_its_account(uc_engine *uc, const struct uc_its_layout *layout,
++                    uc_its_block_cb block, void *opaque)
++{
++    if (layout && block) {
++        uc->its_acct = *layout;
++        uc->its_block = block;
++        uc->its_block_opaque = opaque;
++    } else {
++        uc->its_block = NULL;
++    }
++}
++
++UNICORN_EXPORT
+ uc_err uc_reg_read(uc_engine *uc, int regid, void *value)
+ {
+     UC_INIT(uc);
+@@ -1081,6 +1128,7 @@
      // reset the counter
      uc->emu_counter = 0;
      uc->invalid_error = UC_ERR_OK;
@@ -908,7 +1012,25 @@
      uc->timed_out = false;
 --- a/qemu/accel/tcg/cpu-exec.c
 +++ b/qemu/accel/tcg/cpu-exec.c
-@@ -75,7 +75,9 @@
+@@ -58,10 +58,13 @@
+     UC_TRACE_START(UC_TRACE_TB_EXEC);
+     tb_exec_lock(cpu->uc);
+     ret = tcg_qemu_tb_exec(env, tb_ptr);
+-    if (cpu->uc->nested_level == 1) {
+-        // Only unlock (allow writing to JIT area) if we are the outmost uc_emu_start
+-        tb_exec_unlock(cpu->uc);
+-    }
++    /* ITS-EMU: the JIT area stays executable between blocks. Unicorn made
++     * it writable after each run of translated code and executable again
++     * before the next one (two pthread_jit_write_protect_np calls on Apple
++     * Silicon, a quarter of the time of firmware that leaves the translated
++     * code often). What writes to the area switches by itself: tb_gen_code,
++     * tb_add_jump (tb_find), do_tb_phys_invalidate, uc_tb_flush; and
++     * uc_emu_start restores the thread's state when it returns. */
+     UC_TRACE_END(UC_TRACE_TB_EXEC, "[uc] exec tb 0x%" PRIx64 ": ", itb->pc);
+ 
+     cpu->can_do_io = 1;
+@@ -75,7 +78,9 @@
           * of the start of the TB.
           */
          CPUClass *cc = CPU_GET_CLASS(cpu);
@@ -919,7 +1041,7 @@
              // We should sync pc for R/W error.
              switch (env->uc->invalid_error) {
                  case UC_ERR_WRITE_PROT:
-@@ -283,9 +285,9 @@
+@@ -283,9 +288,9 @@
       * system emulation. So it's not safe to make a direct jump to a TB
       * spanning two pages because the mapping for the second page can change.
       */
@@ -934,7 +1056,7 @@
          tb_exec_unlock(cpu->uc);
 --- a/qemu/target/arm/translate.c
 +++ b/qemu/target/arm/translate.c
-@@ -2709,9 +2709,11 @@
+@@ -2709,14 +2709,80 @@
  
  static inline bool use_goto_tb(DisasContext *s, target_ulong dest)
  {
@@ -949,3 +1071,466 @@
  }
  
  static void gen_goto_ptr(TCGContext *tcg_ctx)
+ {
+     tcg_gen_lookup_and_goto_ptr(tcg_ctx);
++}
++
++/*
++ * ITS-EMU: the indirect jump at the end of a block (DISAS_JUMP: function
++ * returns, calls through pointers, table branches). lookup_tb_ptr works out
++ * the CPU state the next block has to be translated for (about 80 host
++ * instructions with its jump cache) on every jump. But only the pc and the
++ * Thumb bit are dynamic here: everything else in that state is the same
++ * each time this code runs, as for a direct jump, which QEMU chains to its
++ * target once and for all. So the pc alone tells the target of this jump:
++ * its_jc holds the block for (jump site, pc), checked inline; the helper
++ * fills it. A pc in ARM state (bit 0 set in the key) is never found.
++ */
++static void its_gen_goto_ptr(DisasContext *s)
++{
++    struct uc_struct *uc = s->uc;
++    TCGContext *tcg_ctx = uc->tcg_ctx;
++    const intptr_t table = (intptr_t)offsetof(ArchCPU, neg.its_jc) -
++                           (intptr_t)offsetof(ArchCPU, env);
++    TCGLabel *miss;
++    TCGv_i64 pc, key, t;
++    TCGv_ptr entry, host;
++    TCGv_i32 site;
++
++    if (uc->its_jump_sites == UINT32_MAX) {
++        /* out of site numbers */
++        tcg_gen_lookup_and_goto_ptr(tcg_ctx);
++        return;
++    }
++    uc->its_jump_sites++;
++
++    miss = gen_new_label(tcg_ctx);
++    pc = tcg_temp_new_i64(tcg_ctx);
++    key = tcg_temp_new_i64(tcg_ctx);
++    t = tcg_temp_new_i64(tcg_ctx);
++    entry = tcg_temp_new_ptr(tcg_ctx);
++    host = tcg_temp_local_new_ptr(tcg_ctx);
++
++    tcg_gen_extu_i32_i64(tcg_ctx, pc, tcg_ctx->cpu_R[15]);
++    tcg_gen_andi_i64(tcg_ctx, t, pc, ((1 << ITS_JC_BITS) - 1) << 1);
++    tcg_gen_shli_i64(tcg_ctx, t, t, 3);
++    QEMU_BUILD_BUG_ON(sizeof(ItsJumpCacheEntry) != 16);
++    tcg_gen_add_ptr(tcg_ctx, entry, tcg_ctx->cpu_env, (TCGv_ptr)t);
++    tcg_gen_addi_ptr(tcg_ctx, entry, entry, table);
++    tcg_gen_ld_i64(tcg_ctx, key, entry, offsetof(ItsJumpCacheEntry, key));
++    tcg_gen_ld_ptr(tcg_ctx, host, entry, offsetof(ItsJumpCacheEntry, host));
++    tcg_gen_ld32u_i64(tcg_ctx, t, tcg_ctx->cpu_env, offsetof(CPUARMState, thumb));
++    tcg_gen_xori_i64(tcg_ctx, t, t, 1);
++    tcg_gen_or_i64(tcg_ctx, pc, pc, t);
++    tcg_gen_ori_i64(tcg_ctx, pc, pc, (uint64_t)uc->its_jump_sites << 32);
++    tcg_gen_brcond_i64(tcg_ctx, TCG_COND_NE, key, pc, miss);
++    tcg_gen_op1i(tcg_ctx, INDEX_op_goto_ptr, tcgv_ptr_arg(tcg_ctx, host));
++
++    gen_set_label(tcg_ctx, miss);
++    site = tcg_const_i32(tcg_ctx, uc->its_jump_sites);
++    gen_helper_its_lookup_tb_ptr(tcg_ctx, host, tcg_ctx->cpu_env, site);
++    tcg_gen_op1i(tcg_ctx, INDEX_op_goto_ptr, tcgv_ptr_arg(tcg_ctx, host));
++
++    tcg_temp_free_i32(tcg_ctx, site);
++    tcg_temp_free_ptr(tcg_ctx, host);
++    tcg_temp_free_ptr(tcg_ctx, entry);
++    tcg_temp_free_i64(tcg_ctx, t);
++    tcg_temp_free_i64(tcg_ctx, key);
++    tcg_temp_free_i64(tcg_ctx, pc);
+ }
+ 
+ /* This will end the TB but doesn't guarantee we'll return to
+@@ -11710,7 +11776,7 @@
+             gen_goto_tb(dc, 1, dc->base.pc_next);
+             break;
+         case DISAS_JUMP:
+-            gen_goto_ptr(tcg_ctx);
++            its_gen_goto_ptr(dc);
+             break;
+         case DISAS_UPDATE:
+             gen_set_pc_im(dc, dc->base.pc_next);
+--- a/qemu/aarch64.h
++++ b/qemu/aarch64.h
+@@ -1125,6 +1125,7 @@
+ #define helper_ctpop_i32 helper_ctpop_i32_aarch64
+ #define helper_ctpop_i64 helper_ctpop_i64_aarch64
+ #define helper_lookup_tb_ptr helper_lookup_tb_ptr_aarch64
++#define helper_its_lookup_tb_ptr helper_its_lookup_tb_ptr_aarch64
+ #define helper_exit_atomic helper_exit_atomic_aarch64
+ #define helper_gvec_add8 helper_gvec_add8_aarch64
+ #define helper_gvec_add16 helper_gvec_add16_aarch64
+--- a/qemu/accel/tcg/tcg-runtime.c
++++ b/qemu/accel/tcg/tcg-runtime.c
+@@ -160,6 +160,29 @@
+     return tb->tc.ptr;
+ }
+ 
++/*
++ * ITS-EMU: lookup_tb_ptr for the indirect jump with the number `site`, which
++ * found nothing for the pc in its_jc: remembers the block for that site.
++ */
++void *HELPER(its_lookup_tb_ptr)(CPUArchState *env, uint32_t site)
++{
++    CPUState *cpu = env_cpu(env);
++    TranslationBlock *tb;
++    target_ulong cs_base, pc;
++    uint32_t flags;
++    struct uc_struct *uc = (struct uc_struct *)cpu->uc;
++    ItsJumpCacheEntry *e;
++
++    tb = tb_lookup__cpu_state(cpu, &pc, &cs_base, &flags, curr_cflags());
++    if (tb == NULL) {
++        return uc->tcg_ctx->code_gen_epilogue;
++    }
++    e = &env_neg(env)->its_jc[(pc >> 1) & ((1 << ITS_JC_BITS) - 1)];
++    e->key = (uint64_t)site << 32 | pc;
++    e->host = tb->tc.ptr;
++    return tb->tc.ptr;
++}
++
+ void HELPER(exit_atomic)(CPUArchState *env)
+ {
+     cpu_loop_exit_atomic(env_cpu(env), GETPC());
+--- a/qemu/accel/tcg/tcg-runtime.h
++++ b/qemu/accel/tcg/tcg-runtime.h
+@@ -25,6 +25,7 @@
+ DEF_HELPER_FLAGS_1(ctpop_i64, TCG_CALL_NO_RWG_SE, i64, i64)
+ 
+ DEF_HELPER_FLAGS_1(lookup_tb_ptr, TCG_CALL_NO_WG_SE, ptr, env)
++DEF_HELPER_FLAGS_2(its_lookup_tb_ptr, TCG_CALL_NO_WG, ptr, env, i32)
+ 
+ DEF_HELPER_FLAGS_1(exit_atomic, TCG_CALL_NO_WG, noreturn, env)
+ 
+--- a/qemu/accel/tcg/translate-all.c
++++ b/qemu/accel/tcg/translate-all.c
+@@ -1370,6 +1370,7 @@
+ #else
+     cpu_tb_jmp_cache_clear(cpu);
+ #endif
++    its_jc_clear(cpu);
+ 
+     qht_reset_size(cpu->uc, &cpu->uc->tcg_ctx->tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
+     page_flush_tb(cpu->uc);
+@@ -1527,6 +1528,7 @@
+     if (cpu->tb_jmp_cache[h] == tb) {
+         cpu->tb_jmp_cache[h] = NULL;
+     }
++    its_jc_clear(cpu);
+ 
+     /* suppress this TB from the two jump lists */
+     tb_remove_from_jmp_list(tb, 0);
+@@ -2163,6 +2165,7 @@
+        overlap the flushed page.  */
+     tb_jmp_cache_clear_page(cpu, addr - TARGET_PAGE_SIZE);
+     tb_jmp_cache_clear_page(cpu, addr);
++    its_jc_clear(cpu);
+ }
+ 
+ /* This is a wrapper for common code that can not use CONFIG_SOFTMMU */
+--- a/qemu/accel/tcg/translator.c
++++ b/qemu/accel/tcg/translator.c
+@@ -32,6 +32,221 @@
+ #endif
+ }
+ 
++/*
++ * ITS-EMU: inline cycle accounting (uc_its_account). The code at the start
++ * of a block does what the emulator's block hook does for most blocks, and
++ * skips the hook then:
++ *
++ *   edge = how the previous block ended: the address after it (bit 0 set if
++ *          it ended with an unconditional branch) | conditional << 32
++ *          | fresh << 33 | its size << 48
++ *   by_branch = (uint32_t)edge != pc
++ *   refill = (edge >> 32) & by_branch        (of a taken conditional branch)
++ *   slow = clock + refill >= limit
++ *   clock += refill + cycles + (by_branch & penalty)
++ *   if (!slow) edge = this block's; else undo and call the hook
++ *
++ * and for the idle detector (layout.idle): the hook also runs at its loop
++ * head and at a backward branch once 64 blocks ran since the head; otherwise
++ * the block counts itself and sets the detector's flags.
++ *
++ * The clock is advanced before the conditions are known and set back on the
++ * way to the hook (the edge is still the old one there): the next block's
++ * clock then waits for a load, an add and a store only, not for the
++ * comparisons. The hook finds the state as if this code did not exist. No
++ * temporary lives across a branch.
++ * Cycles, penalty and the new edge are known once the block is translated:
++ * its_finish_account patches them in, or removes all of it.
++ * The PC is written (pc_sync) for the hook only: blocks that charge
++ * themselves leave it as QEMU does, to whoever stops the block.
++ */
++typedef struct ItsAccount {
++    TCGOp *before;             /* last op before the accounting code */
++    TCGOp *last;               /* its last op (the hook call follows) */
++    TCGOp *cycles[2], *penalty[2], *post; /* movi_i64 to patch */
++    TCGOp *stores[2], *side[2]; /* op before, last op of the flag updates */
++    TCGLabel *done;
++} ItsAccount;
++
++static TCGv_i64 its_patched_const(TCGContext *s, TCGOp **op)
++{
++    TCGv_i64 t = tcg_const_i64(s, 1);
++    *op = tcg_last_op(s);
++    assert((*op)->opc == INDEX_op_movi_i64);
++    return t;
++}
++
++static void its_gen_account(TCGContext *s, struct uc_struct *uc, uint64_t pc,
++                            ItsAccount *g)
++{
++    const struct uc_its_layout *a = &uc->its_acct;
++    TCGLabel *slow_path = gen_new_label(s);
++    TCGv_ptr base;
++    TCGv_i64 addr, edge, low, by_branch, slow, clock, t, d, k, n = NULL;
++
++    g->before = tcg_last_op(s);
++    g->done = gen_new_label(s);
++    base = tcg_const_ptr(s, a->base);
++    addr = tcg_const_i64(s, pc);
++    edge = tcg_temp_new_i64(s);
++    low = tcg_temp_new_i64(s);
++    by_branch = tcg_temp_new_i64(s);
++    slow = tcg_temp_new_i64(s);
++    clock = tcg_temp_new_i64(s);
++    t = tcg_temp_new_i64(s);
++    d = tcg_temp_new_i64(s);
++
++    tcg_gen_ld_i64(s, edge, base, a->edge);
++    tcg_gen_ext32u_i64(s, low, edge);
++    tcg_gen_setcond_i64(s, TCG_COND_NE, by_branch, low, addr);
++    tcg_gen_ld_i64(s, clock, base, a->clock);
++    tcg_gen_shri_i64(s, d, edge, 32);
++    tcg_gen_and_i64(s, d, d, by_branch);
++    tcg_gen_add_i64(s, t, clock, d);
++    tcg_gen_ld_i64(s, slow, base, a->limit);
++    tcg_gen_setcond_i64(s, TCG_COND_GEU, slow, t, slow);
++
++    if (a->idle) {
++        TCGv_i64 u = tcg_temp_new_i64(s);
++
++        n = tcg_temp_new_i64(s);
++        /* backward (pc <= previous block's address) after 64 blocks */
++        tcg_gen_shri_i64(s, t, edge, 48);
++        tcg_gen_sub_i64(s, t, low, t);
++        tcg_gen_setcond_i64(s, TCG_COND_GEU, t, t, addr);
++        tcg_gen_ld32u_i64(s, n, base, a->idle_blocks);
++        tcg_gen_setcondi_i64(s, TCG_COND_GEU, u, n, 64);
++        tcg_gen_and_i64(s, t, t, u);
++        tcg_gen_or_i64(s, slow, slow, t);
++        /* the loop head */
++        tcg_gen_ld_i64(s, t, base, a->idle_head);
++        tcg_gen_setcond_i64(s, TCG_COND_EQ, t, t, addr);
++        tcg_gen_or_i64(s, slow, slow, t);
++        tcg_gen_addi_i64(s, n, n, 1);
++        tcg_gen_st32_i64(s, n, base, a->idle_blocks);
++        tcg_temp_free_i64(s, u);
++        tcg_temp_free_i64(s, n);
++    }
++
++    k = its_patched_const(s, &g->penalty[0]);
++    tcg_gen_and_i64(s, t, by_branch, k);
++    tcg_gen_add_i64(s, d, d, t);
++    tcg_temp_free_i64(s, k);
++    k = its_patched_const(s, &g->cycles[0]);
++    tcg_gen_add_i64(s, d, d, k);
++    tcg_temp_free_i64(s, k);
++    tcg_gen_add_i64(s, clock, clock, d);
++    tcg_gen_st_i64(s, clock, base, a->clock);
++    tcg_gen_brcondi_i64(s, TCG_COND_NE, slow, 0, slow_path);
++
++    tcg_temp_free_i64(s, d);
++    tcg_temp_free_i64(s, t);
++    tcg_temp_free_i64(s, clock);
++    tcg_temp_free_i64(s, slow);
++    tcg_temp_free_i64(s, by_branch);
++    tcg_temp_free_i64(s, low);
++    tcg_temp_free_i64(s, edge);
++    tcg_temp_free_i64(s, addr);
++    tcg_temp_free_ptr(s, base);
++
++    /* the block is charged: its edge and the idle detector's flags */
++    base = tcg_const_ptr(s, a->base);
++    k = its_patched_const(s, &g->post);
++    tcg_gen_st_i64(s, k, base, a->edge);
++    tcg_temp_free_i64(s, k);
++    if (a->idle) {
++        g->stores[0] = tcg_last_op(s);
++        k = tcg_const_i64(s, 1);
++        tcg_gen_st8_i64(s, k, base, a->idle_stored);
++        tcg_temp_free_i64(s, k);
++        g->stores[1] = tcg_last_op(s);
++        g->side[0] = tcg_last_op(s);
++        k = tcg_const_i64(s, 0);
++        tcg_gen_st8_i64(s, k, base, a->idle_clean);
++        tcg_gen_st8_i64(s, k, base, a->idle_delay_clean);
++        tcg_temp_free_i64(s, k);
++        g->side[1] = tcg_last_op(s);
++    }
++    tcg_temp_free_ptr(s, base);
++    tcg_gen_br(s, g->done);
++
++    /* not charged: as before, then the hook */
++    gen_set_label(s, slow_path);
++    base = tcg_const_ptr(s, a->base);
++    addr = tcg_const_i64(s, pc);
++    clock = tcg_temp_new_i64(s);
++    d = tcg_temp_new_i64(s);
++    t = tcg_temp_new_i64(s);
++    /* what was added above, from the same values */
++    tcg_gen_ld_i64(s, d, base, a->edge);
++    tcg_gen_ext32u_i64(s, t, d);
++    tcg_gen_setcond_i64(s, TCG_COND_NE, t, t, addr);
++    tcg_gen_shri_i64(s, d, d, 32);
++    tcg_gen_and_i64(s, d, d, t);
++    k = its_patched_const(s, &g->penalty[1]);
++    tcg_gen_and_i64(s, t, t, k);
++    tcg_gen_add_i64(s, d, d, t);
++    tcg_temp_free_i64(s, k);
++    k = its_patched_const(s, &g->cycles[1]);
++    tcg_gen_add_i64(s, d, d, k);
++    tcg_temp_free_i64(s, k);
++    tcg_gen_ld_i64(s, clock, base, a->clock);
++    tcg_gen_sub_i64(s, clock, clock, d);
++    tcg_gen_st_i64(s, clock, base, a->clock);
++    tcg_temp_free_i64(s, t);
++    tcg_temp_free_i64(s, addr);
++    if (a->idle) {
++        tcg_gen_ld32u_i64(s, d, base, a->idle_blocks);
++        tcg_gen_subi_i64(s, d, d, 1);
++        tcg_gen_st32_i64(s, d, base, a->idle_blocks);
++    }
++    tcg_temp_free_i64(s, d);
++    tcg_temp_free_i64(s, clock);
++    tcg_temp_free_ptr(s, base);
++    g->last = tcg_last_op(s);
++}
++
++/* Removes the ops after `before` up to `last`. */
++static void its_remove_ops(TCGContext *s, TCGOp *before, TCGOp *last)
++{
++    TCGOp *op = before ? QTAILQ_NEXT(before, link) : QTAILQ_FIRST(&s->ops);
++
++    for (;;) {
++        TCGOp *next = QTAILQ_NEXT(op, link);
++        bool end = op == last;
++        tcg_op_remove(s, op);
++        if (end) {
++            break;
++        }
++        op = next;
++    }
++}
++
++static void its_finish_account(TCGContext *s, struct uc_struct *uc,
++                               TranslationBlock *tb, ItsAccount *g)
++{
++    struct uc_its_block b;
++
++    memset(&b, 0, sizeof(b));
++    if (!uc->its_block(uc->its_block_opaque, tb->pc, tb->size, &b)) {
++        /* always the hook (the label after it stays, unused) */
++        its_remove_ops(s, g->before, g->last);
++        return;
++    }
++    g->cycles[0]->args[1] = g->cycles[1]->args[1] = b.cycles;
++    g->penalty[0]->args[1] = g->penalty[1]->args[1] = b.penalty;
++    g->post->args[1] = b.post;
++    if (uc->its_acct.idle) {
++        /* in this order: the second range starts at the first one's end */
++        if (!b.side_effects) {
++            its_remove_ops(s, g->side[0], g->side[1]);
++        }
++        if (!b.stores) {
++            its_remove_ops(s, g->stores[0], g->stores[1]);
++        }
++    }
++}
++
+ void translator_loop(const TranslatorOps *ops, DisasContextBase *db,
+                      CPUState *cpu, TranslationBlock *tb, int max_insns)
+ {
+@@ -40,6 +255,8 @@
+     TCGContext *tcg_ctx = uc->tcg_ctx;
+     TCGOp *prev_op = NULL;
+     bool block_hook = false;
++    ItsAccount its_account;
++    bool its = false;
+ 
+     /* Initialize DisasContext */
+     db->tb = tb;
+@@ -74,10 +291,18 @@
+      * full translation cache
+      */
+     if (HOOK_EXISTS_BOUNDED(uc, UC_HOOK_BLOCK, tb->pc)) {
++        if (uc->its_block) {
++            /* ITS-EMU: the hook only if the block cannot account for itself */
++            its = true;
++            its_gen_account(tcg_ctx, uc, db->pc_first, &its_account);
++        }
+         ops->pc_sync(db, cpu);
+         prev_op = tcg_last_op(tcg_ctx);
+         block_hook = true;
+         gen_uc_tracecode(tcg_ctx, 0xf8f8f8f8, UC_HOOK_BLOCK_IDX, uc, db->pc_first);
++        if (its) {
++            gen_set_label(tcg_ctx, its_account.done);
++        }
+     }
+ 
+     // tcg_dump_ops(tcg_ctx, false, "translator loop");
+@@ -168,4 +393,8 @@
+ 
+         tcg_op->args[1] = db->tb->size;
+     }
++
++    if (its) {
++        its_finish_account(tcg_ctx, uc, db->tb, &its_account);
++    }
+ }
+--- a/qemu/arm.h
++++ b/qemu/arm.h
+@@ -1125,6 +1125,7 @@
+ #define helper_ctpop_i32 helper_ctpop_i32_arm
+ #define helper_ctpop_i64 helper_ctpop_i64_arm
+ #define helper_lookup_tb_ptr helper_lookup_tb_ptr_arm
++#define helper_its_lookup_tb_ptr helper_its_lookup_tb_ptr_arm
+ #define helper_exit_atomic helper_exit_atomic_arm
+ #define helper_gvec_add8 helper_gvec_add8_arm
+ #define helper_gvec_add16 helper_gvec_add16_arm
+--- a/qemu/include/tcg/tcg-apple-jit.h
++++ b/qemu/include/tcg/tcg-apple-jit.h
+@@ -40,8 +40,11 @@
+ static inline uint64_t read_sprr_perm(void)
+ {
+     uint64_t v;
+-    __asm__ __volatile__("isb sy\n"
+-                         "mrs %0, S3_6_c15_c1_5\n"
++    /* ITS-EMU: no "isb sy" before the read. Only
++     * pthread_jit_write_protect_np writes the register, and it synchronizes
++     * after the write; the barrier here flushed the pipeline in every API
++     * call (uc_reg_read: save_jit_state). */
++    __asm__ __volatile__("mrs %0, S3_6_c15_c1_5\n"
+                          : "=r"(v)::"memory");
+     return v;
+ }
+@@ -71,6 +74,9 @@
+ }
+ 
+ static inline void assert_executable(bool executable) {
++    /* ITS-EMU: a consistency check at every switch and API call; only
++     * when debugging TCG */
++#ifdef CONFIG_DEBUG_TCG
+     if (!pthread_jit_write_protect_supported_np()) {
+         return;
+     }
+@@ -79,6 +85,9 @@
+     if (!v) {
+         assert(executable == thread_executable());
+     }
++#else
++    (void)executable;
++#endif
+ }
+ 
+ #else
