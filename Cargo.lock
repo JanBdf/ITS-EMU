@@ -3253,6 +3253,7 @@ dependencies = [
  "env_logger",
  "log",
  "thiserror 2.0.21",
+ "usbip",
 ]
 
 [[package]]
@@ -3614,6 +3615,7 @@ version = "0.1.1"
 dependencies = [
  "emu-core",
  "log",
+ "usbip",
 ]
 
 [[package]]

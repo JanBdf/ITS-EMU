@@ -9,8 +9,8 @@
 //! periodically while it has data to send.
 //!
 //! A host on the computer (USB/IP) can take over once the built-in host has
-//! enumerated the device ([`SerialPipe::remote`]): its transfers
-//! ([`SerialPipe::requests`]) are then played into the endpoint buffers
+//! enumerated the device ([`SerialPipe::link`]): its transfers
+//! are then played into the endpoint buffers
 //! as they are, and the built-in serial pump pauses.
 
 use std::cell::RefCell;
@@ -18,6 +18,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use emu_core::{Clock, DeviceCtx, Peripheral};
+use usbip::forward::{HostLink, Transfer};
 
 use crate::regs::{Block, Op};
 
@@ -46,31 +47,9 @@ pub struct SerialPipe {
     pub from_device: Vec<u8>,
     /// The CDC interface is configured and DTR is set.
     pub open: bool,
-    /// Device and configuration descriptor, once the built-in host has
-    /// enumerated the device (`None` again when it disconnects).
-    pub descriptors: Option<(Vec<u8>, Vec<u8>)>,
-    /// A host on the computer drives the device: [`Self::requests`] are
-    /// carried out and the serial pump above pauses.
-    pub remote: bool,
-    /// Transfers of the computer's host, in order per endpoint.
-    pub requests: VecDeque<Transfer>,
-    /// Finished transfers: id and result (`None`: stalled).
-    pub done: Vec<(u64, Option<Vec<u8>>)>,
-}
-
-/// A transfer of a host on the computer.
-#[derive(Debug, Clone)]
-pub struct Transfer {
-    pub id: u64,
-    /// Endpoint number (without direction bit).
-    pub ep: u8,
-    pub dir_in: bool,
-    /// The SETUP packet (endpoint 0).
-    pub setup: [u8; 8],
-    /// OUT data.
-    pub data: Vec<u8>,
-    /// IN: at most this many bytes.
-    pub max_len: usize,
+    /// The device for a host on the computer: while it is attached
+    /// ([`HostLink::remote`]) the serial pump above pauses.
+    pub link: HostLink,
 }
 
 pub type SharedSerial = Rc<RefCell<SerialPipe>>;
@@ -280,7 +259,7 @@ impl UsbCore {
             Step::GetConfig => {
                 log::debug!("Pico: USB device {:02x?}, configuration {data:02x?}", self.device_desc);
                 self.cdc = find_cdc(&data);
-                self.pipe.borrow_mut().descriptors = Some((self.device_desc.clone(), data.clone()));
+                self.pipe.borrow_mut().link.descriptors = Some((self.device_desc.clone(), data.clone()));
                 self.config_desc = data;
                 Some(Step::SetConfiguration)
             }
@@ -296,7 +275,7 @@ impl UsbCore {
                 None
             }
             Step::Remote(id) => {
-                self.pipe.borrow_mut().done.push((id, Some(data)));
+                self.pipe.borrow_mut().link.done.push((id, Some(data)));
                 None
             }
         };
@@ -387,7 +366,7 @@ impl UsbCore {
             }
             if self.ep0_stalled() {
                 if let Step::Remote(id) = step {
-                    self.pipe.borrow_mut().done.push((id, None));
+                    self.pipe.borrow_mut().link.done.push((id, None));
                 } else {
                     log::warn!("Pico: USB request {step:?} stalled");
                 }
@@ -429,14 +408,14 @@ impl UsbCore {
                 }
             }
         }
-        if self.pipe.borrow().remote {
+        if self.pipe.borrow().link.remote {
             if self.host == Host::Configured && self.start_remote_control() {
                 // its SETUP packet is with the firmware now
                 self.schedule(ns(POLL_NS));
                 return;
             }
             self.remote_endpoints();
-            if !self.pipe.borrow().requests.is_empty() {
+            if !self.pipe.borrow().link.requests.is_empty() {
                 self.schedule(ns(POLL_NS));
             }
         } else if self.host == Host::Configured
@@ -453,9 +432,9 @@ impl UsbCore {
     fn disconnected(&mut self) {
         let mut pipe = self.pipe.borrow_mut();
         pipe.open = false;
-        pipe.descriptors = None;
-        let failed: Vec<u64> = pipe.requests.drain(..).map(|t| t.id).collect();
-        pipe.done.extend(failed.into_iter().map(|id| (id, None)));
+        pipe.link.descriptors = None;
+        let failed: Vec<u64> = pipe.link.requests.drain(..).map(|t| t.id).collect();
+        pipe.link.done.extend(failed.into_iter().map(|id| (id, None)));
         self.out_sent = [0; 16];
     }
 
@@ -463,8 +442,8 @@ impl UsbCore {
     fn start_remote_control(&mut self) -> bool {
         let t = {
             let mut pipe = self.pipe.borrow_mut();
-            let Some(i) = pipe.requests.iter().position(|t| t.ep == 0) else { return false };
-            pipe.requests.remove(i).unwrap()
+            let Some(i) = pipe.link.requests.iter().position(|t| t.ep == 0) else { return false };
+            pipe.link.requests.remove(i).unwrap()
         };
         let length = u16::from_le_bytes([t.setup[6], t.setup[7]]);
         let stage = match (t.setup[0] & 0x80 != 0, length) {
@@ -485,7 +464,7 @@ impl UsbCore {
         let mut started: Vec<(u8, bool)> = Vec::new();
         let mut i = 0;
         loop {
-            let Some(t) = self.pipe.borrow().requests.get(i).cloned() else { break };
+            let Some(t) = self.pipe.borrow().link.requests.get(i).cloned() else { break };
             if t.ep == 0 || started.contains(&(t.ep, t.dir_in)) {
                 i += 1;
                 continue;
@@ -495,8 +474,8 @@ impl UsbCore {
             match result {
                 Some(data) => {
                     let mut pipe = self.pipe.borrow_mut();
-                    pipe.requests.remove(i);
-                    pipe.done.push((t.id, Some(data)));
+                    pipe.link.requests.remove(i);
+                    pipe.link.done.push((t.id, Some(data)));
                 }
                 None => i += 1,
             }
@@ -609,7 +588,7 @@ impl UsbCore {
         self.last_now = now;
         let new_request = self.new_request();
         if new_request {
-            self.seen_request = self.pipe.borrow().requests.iter().map(|t| t.id).max().unwrap_or(0);
+            self.seen_request = self.pipe.borrow().link.requests.iter().map(|t| t.id).max().unwrap_or(0);
         }
         if new_request || self.sending() || self.poll_at.is_some_and(|t| t <= now) {
             self.poll_at = None;
@@ -625,12 +604,12 @@ impl UsbCore {
     /// The built-in host has serial data for the device.
     fn sending(&self) -> bool {
         let pipe = self.pipe.borrow();
-        self.host == Host::Configured && !pipe.remote && !pipe.to_device.is_empty()
+        self.host == Host::Configured && !pipe.link.remote && !pipe.to_device.is_empty()
     }
 
     /// The computer's host has queued a transfer since the last look.
     fn new_request(&self) -> bool {
-        self.pipe.borrow().requests.iter().any(|t| t.id > self.seen_request)
+        self.pipe.borrow().link.requests.iter().any(|t| t.id > self.seen_request)
     }
 
     fn next_event(&self) -> Option<u64> {

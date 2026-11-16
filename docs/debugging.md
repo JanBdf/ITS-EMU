@@ -89,9 +89,10 @@ sudo usbip attach -r 127.0.0.1 -b 1-1    # by hand (its-emu-gui --no-usb-attach,
 ```
 
 `its-emu-gui --no-usb` / `--usb[=ADDR]` override the switch for one run.
-The same server exports the USB device of each [Pico](usage.md#raspberry-pi-pico)
-as `1-2`, `1-3`, ... (`its-emu --usb --usb-attach` and the GUI plug those in
-as well; by hand: `sudo usbip attach -r 127.0.0.1 -b 1-2`). The
+The same server exports the firmware's USB device on [CN13](usage.md#usb-on-cn13-linux)
+and that of each [Pico](usage.md#raspberry-pi-pico) as `1-2`, `1-3`, ..., in
+the order they connect (`its-emu --usb --usb-attach` and the GUI plug those
+in as well; by hand: `sudo usbip attach -r 127.0.0.1 -b 1-2`). The
 udev rules pyOCD/OpenOCD install for the real probe (e.g. `60-openocd.rules`)
 cover the emulated one. Other machines can attach it with `--usb
 0.0.0.0:3240` and `usbip attach -r HOST -b 1-1` (usbip-win2 on Windows,

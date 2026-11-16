@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+usbip.workspace = true
 emu-core.workspace = true
 log.workspace = true
 thiserror.workspace = true

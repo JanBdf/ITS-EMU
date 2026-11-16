@@ -149,7 +149,7 @@ impl PicoPlugin {
     /// Pico); `wake` is called when it has replies. While the computer has
     /// it attached, the pseudo terminal and [`Self::send`] are idle.
     pub fn usb_device(&self, wake: Arc<dyn Fn() + Send + Sync>) -> PicoUsbDevice {
-        PicoUsbDevice::new(self.usb.clone(), wake)
+        PicoUsbDevice::new("Pico", self.usb.clone(), wake)
     }
 
     /// Sends bytes to the Pico's serial port as a host program would.
@@ -216,7 +216,7 @@ fn run(
         // the serial port
         {
             let mut serial = pico.serial().borrow_mut();
-            usb.lock().unwrap().sync(&mut serial);
+            usb.lock().unwrap().sync(&mut serial.link);
             while let Ok(data) = input.try_recv() {
                 serial.to_device.extend(data);
             }

@@ -174,6 +174,8 @@ pub struct Snapshot {
     /// A debugger is connected.
     pub gdb_attached: bool,
     pub usb: UsbStatus,
+    /// The firmware's USB device on CN13 (OTG FS) while exported: bus id, attached.
+    pub otg: Option<(String, bool)>,
     /// Output voltage of DAC1 while it is enabled.
     pub dac1: Option<f32>,
     /// Mode and level of the pins of ports A–G.
@@ -203,6 +205,7 @@ impl Default for Snapshot {
             gdb: Err("off".into()),
             gdb_attached: false,
             usb: UsbStatus::Off,
+            otg: None,
             dac1: None,
             pins: Default::default(),
             devices: Vec::new(),
@@ -316,6 +319,8 @@ struct Worker {
     /// How the debugger wants the core to run (`Free` without debugger).
     execution: Execution,
     usb: Option<stlink::UsbProbe>,
+    /// CN13's cable, while the USB server runs.
+    otg_usb: Option<stm32f429::otg_fs::OtgUsbDevice>,
     usb_config: UsbConfig,
     usb_server_error: Option<String>,
     /// Outcome of the running `usbip attach`, and the last failure.
@@ -447,6 +452,7 @@ impl Worker {
             gdb_retry_at: now,
             execution: Execution::Free,
             usb: None,
+            otg_usb: None,
             usb_config: usb_config.clone(),
             usb_server_error: None,
             attach_result: None,
@@ -477,6 +483,9 @@ impl Worker {
         if !on {
             for d in &mut self.devices {
                 d.pico_usb = None;
+            }
+            if let (Some(otg), Some(usb)) = (self.otg_usb.take(), &mut self.usb) {
+                otg.unplug(usb.server());
             }
             if self.usb.take().is_some() {
                 log::info!("ST-LINK unplugged");
@@ -572,6 +581,11 @@ impl Worker {
             // The probe may leave the core on a BKPT: a HardFault on the chip.
             sim.machine.system_mut().bkpt_stops = false;
             usb.set_serial(Some(sim.board.mcu().usart3.clone()));
+            let port = sim.board.mcu().otg.clone();
+            match &mut self.otg_usb {
+                Some(otg) => otg.set_port(port),
+                None => self.otg_usb = Some(stm32f429::otg_fs::OtgUsbDevice::new(port, self.wake.clone())),
+            }
         } else {
             usb.set_serial(None);
         }
@@ -919,6 +933,23 @@ impl Worker {
         }
     }
 
+    /// Lets the USB host talk to the firmware's device on CN13, plugs it in
+    /// when the firmware has connected.
+    fn poll_otg_usb(&mut self) {
+        let (Some(usb), Some(otg)) = (&mut self.usb, &mut self.otg_usb) else { return };
+        let addr = usb.local_addr();
+        let attached = otg.busid().is_some_and(|b| usb.device_attached(b));
+        if let Some(busid) = otg.poll(usb.server()) {
+            log::info!("USB OTG FS (CN13): device on {}", stlink::attach_command(addr, &busid));
+            if self.usb_config.attach {
+                let _ = stlink::spawn_attach(addr, &busid, "OTG FS (CN13)");
+            }
+            self.publish(true);
+        } else if attached != otg.busid().is_some_and(|b| usb.device_attached(b)) {
+            self.publish(true);
+        }
+    }
+
     /// Lets the USB host talk to the Picos' USB devices, plugs them in when
     /// their firmware has connected.
     fn poll_pico_usb(&mut self) {
@@ -952,6 +983,7 @@ impl Worker {
             self.publish(true);
         }
         self.poll_pico_usb();
+        self.poll_otg_usb();
         let (Some(usb), Some(sim)) = (&mut self.usb, &mut self.sim) else { return };
         let progress = usb.poll(&mut sim.machine);
         let mut changed = progress;
@@ -1173,6 +1205,12 @@ impl Worker {
         changed |= set(&mut snap.gdb, self.gdb_status.clone());
         changed |= set(&mut snap.gdb_attached, self.gdb.as_ref().is_some_and(GdbServer::has_controller));
         changed |= set(&mut snap.usb, self.usb_status());
+        let otg = self
+            .usb
+            .as_ref()
+            .zip(self.otg_usb.as_ref())
+            .and_then(|(usb, otg)| otg.busid().map(|b| (b.to_owned(), usb.device_attached(b))));
+        changed |= set(&mut snap.otg, otg);
         let board = self.sim.as_ref().map(|s| &s.board);
         let devices = self.devices.iter().map(|d| DeviceView {
             id: d.id,
