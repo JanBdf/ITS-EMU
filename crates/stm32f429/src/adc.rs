@@ -841,9 +841,9 @@ impl Peripheral for Dac {
         if (0x08..=0x28).contains(&reg) {
             // a write to DHR answers the DMA request
             let dual = reg >= 0x20;
-            for ch in 0..2 {
+            for (ch, request) in self.dma_request.iter_mut().enumerate() {
                 if dual || (reg >= 0x14) == (ch == 1) {
-                    self.dma_request[ch] = false;
+                    *request = false;
                 }
             }
             self.load(0, false);

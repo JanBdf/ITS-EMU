@@ -762,8 +762,7 @@ impl Block for Pio {
             0x000 => {
                 let v = op.apply(u32::from(self.enabled), value);
                 let newly = v as u8 & 0xF & !self.enabled;
-                for i in 0..4 {
-                    let sm = &mut self.sm[i];
+                for (i, sm) in self.sm.iter_mut().enumerate() {
                     if v & (1 << (4 + i)) != 0 {
                         sm.restart();
                     }
