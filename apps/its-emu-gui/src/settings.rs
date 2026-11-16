@@ -44,6 +44,8 @@ pub struct Settings {
     pub bounce: bool,
     /// Window size and position of the last run (logical points).
     pub window: Option<WindowState>,
+    /// The tutorial was finished or ended (it starts on the first run).
+    pub tutorial_done: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -139,6 +141,7 @@ impl Default for Settings {
             // like the real board: students debounce
             bounce: true,
             window: None,
+            tutorial_done: false,
         }
     }
 }
@@ -173,6 +176,7 @@ impl Settings {
                 "echo" => self.echo = on,
                 "timestamps" => self.timestamps = on,
                 "bounce" => self.bounce = on,
+                "tutorial_done" => self.tutorial_done = on,
                 "theme" => self.theme = by_name(&Theme::ALL, value).unwrap_or(self.theme),
                 "speed" => self.speed = value.parse().unwrap_or(self.speed),
                 "window" => {
@@ -214,7 +218,8 @@ impl Settings {
         let Some(path) = Self::path() else { return };
         let mut text = format!(
             "# ITS-Board emulator (GUI)\nusb = {}\nauto_reload = {}\nconsole = {}\nconsole_side = {}\n\
-             line_ending = {}\necho = {}\ntimestamps = {}\ntheme = {}\nspeed = {}\nbounce = {}\n",
+             line_ending = {}\necho = {}\ntimestamps = {}\ntheme = {}\nspeed = {}\nbounce = {}\n\
+             tutorial_done = {}\n",
             self.usb,
             self.auto_reload,
             self.console,
@@ -225,6 +230,7 @@ impl Settings {
             name(&Theme::ALL, self.theme),
             self.speed,
             self.bounce,
+            self.tutorial_done,
         );
         if let Some(on) = self.pyocd {
             text += &format!("pyocd_stlink = {on}\n");
@@ -283,10 +289,11 @@ mod tests {
         assert_eq!(s.pyocd, None);
         s.parse("pyocd_stlink = yes");
         assert_eq!(s.pyocd, Some(true));
-        s.parse("theme = light\nspeed = 10\nbounce = off\nwindow = 1200 900 10 20 max\n");
+        s.parse("theme = light\nspeed = 10\nbounce = off\nwindow = 1200 900 10 20 max\ntutorial_done = true\n");
         assert_eq!(s.theme, Theme::Light);
         assert_eq!(s.speed, 10.0);
         assert!(!s.bounce);
+        assert!(s.tutorial_done);
         assert_eq!(s.window, Some(WindowState { size: [1200.0, 900.0], pos: Some([10.0, 20.0]), maximized: true }));
     }
 

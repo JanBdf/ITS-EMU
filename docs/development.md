@@ -31,6 +31,8 @@ lab solutions in `tests/fixtures/ac6` skip themselves.
 Fixtures in `tests/fixtures/ac6` are rebuilt from an ITS-BRD-VSC checkout
 with `tools/build-fixtures.sh` (CMSIS-Toolbox and AC6 from the course's VS
 Code setup); `tools/build-own.sh [Name]` rebuilds only the own test programs.
+`tools/build-own.sh Tutorial` also copies the GUI's tutorial program to
+`apps/its-emu-gui/assets/tutorial.axf`, which the GUI embeds.
 
 ## Arch Linux package
 

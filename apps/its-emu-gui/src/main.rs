@@ -12,6 +12,7 @@ mod files;
 mod pins;
 mod render;
 mod settings;
+mod tutorial;
 
 use std::path::PathBuf;
 

@@ -86,4 +86,8 @@ path = sys.argv[2]
 data = open(path, "rb").read()
 open(path, "wb").write(data.replace(prefix, b"/" * len(prefix)))
 PY
+    # the GUI starts its tutorial with this program
+    if [ "$name" = Tutorial ]; then
+        cp "$dest/$name.axf" "$here/apps/its-emu-gui/assets/tutorial.axf"
+    fi
 done

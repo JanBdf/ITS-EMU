@@ -11,6 +11,7 @@ use crate::console::Console;
 use crate::emu::{self, Command, EmuHandle, RunState, Speed, UsbStatus, Via};
 use crate::files::FilePicker;
 use crate::settings::{ConsoleSide, Settings, Theme, WindowState};
+use crate::tutorial::{Goal, Spot, Targets, Tutorial};
 
 pub(crate) const OK_GREEN: Color32 = Color32::from_rgb(0x34, 0xD3, 0x59);
 const ERR_RED: Color32 = Color32::from_rgb(0xFF, 0x5B, 0x50);
@@ -102,6 +103,11 @@ pub struct App {
     board_view: board::Zoom,
     /// The window state last saved.
     saved_window: Option<WindowState>,
+    /// The tutorial runs.
+    tutorial: Option<Tutorial>,
+    /// Where the serial console and the Open button were last drawn (for the tutorial).
+    console_rect: Option<egui::Rect>,
+    open_rect: Option<egui::Rect>,
 }
 
 /// Speed as the settings keep it.
@@ -308,7 +314,7 @@ impl App {
             pyocd_ask: settings.pyocd.is_none() && !cfg!(target_os = "linux"),
             pyocd_report: None,
             settings,
-            // ITS_EMU_GUI_VIEW=lcd, see-through, pins, help (comma separated):
+            // ITS_EMU_GUI_VIEW=lcd, see-through, pins, devices, help, tutorial (comma separated):
             // start in that view (documentation, visual checks)
             lcd_focus: start_view("lcd"),
             see_through: start_view("see-through").then_some(SEE_THROUGH_DEFAULT),
@@ -325,15 +331,35 @@ impl App {
             text_was_focused: false,
             board_view: board::Zoom::default(),
             saved_window: None,
+            tutorial: None,
+            console_rect: None,
+            open_rect: None,
         };
         if app.pyocd_on {
             // again at every start: an update of VS Code's extension comes without it
             app.pyocd_report = Some(stlink::pyocd_plugin::install());
         }
+        // the tutorial on the first start, unless a firmware file was given or
+        // the window is only taken a picture of (ITS_EMU_GUI_VIEW=tutorial shows it)
+        let first = !app.settings.tutorial_done && app.self_screenshot.is_none();
         if let Some(path) = firmware {
             app.load(path);
+        } else if first || start_view("tutorial") {
+            app.start_tutorial(&cc.egui_ctx);
         }
         app
+    }
+
+    /// Loads the tutorial program and shows the first step.
+    fn start_tutorial(&mut self, ctx: &egui::Context) {
+        match crate::tutorial::firmware_file() {
+            // not among the recent files
+            Ok(path) => self.emu.send(Command::Load(path)),
+            Err(e) => self.notify(ctx, format!("Cannot write the tutorial program: {e}"), true),
+        }
+        self.lcd_focus = false;
+        self.board_view = board::Zoom::default();
+        self.tutorial = Some(Tutorial::default());
     }
 
     /// Loads a firmware file and remembers it among the recent ones.
@@ -684,6 +710,9 @@ impl App {
                 if menu_item(ui, "Controls and mouse actions", &HELP) {
                     self.show_help = true;
                 }
+                if ui.button("Tutorial").on_hover_text("Loads the tutorial program and leads through the inputs").clicked() {
+                    self.start_tutorial(ctx);
+                }
             });
         });
     }
@@ -702,6 +731,7 @@ impl App {
                 "Open a firmware file (.axf) · {}\nShift+click: the emulator's own file browser",
                 ctx.format_shortcut(&OPEN)
             ));
+            self.open_rect = Some(open.rect);
             if open.clicked() {
                 self.files.open(ctx, ui.input(|i| i.modifiers.shift));
             }
@@ -1108,6 +1138,10 @@ impl eframe::App for App {
         });
 
         // ---- serial console, below the board or right of it
+        if self.tutorial.as_ref().is_some_and(|t| t.spot() == Spot::Console) && !self.settings.console {
+            self.set_console(true);
+        }
+        self.console_rect = None;
         if self.settings.console {
             self.place_console(&ctx);
             let panel = if self.console_right {
@@ -1115,8 +1149,13 @@ impl eframe::App for App {
             } else {
                 egui::Panel::bottom("console").resizable(true).default_size(CONSOLE_H).min_size(80.0)
             };
-            let action = panel.show(ui, |ui| self.console.show(ui)).inner;
+            let shown = panel.show(ui, |ui| self.console.show(ui));
+            self.console_rect = Some(shown.response.rect);
+            let action = shown.inner;
             if let Some(bytes) = action.send {
+                if let Some(t) = &mut self.tutorial {
+                    t.saw(Goal::Serial);
+                }
                 self.emu.send(Command::Serial(bytes));
             }
             if action.hide {
@@ -1206,12 +1245,25 @@ impl eframe::App for App {
             }
             let key_down = !typing && ctx.input(|inp| inp.key_down(key) && !inp.modifiers.command);
             let down = input.buttons[i] || self.latched[i] || key_down;
+            if let Some(t) = &mut self.tutorial {
+                if down && !self.sent_buttons[i] {
+                    t.saw(Goal::Button);
+                }
+                if input.latch_toggled[i] && !self.latched[i] {
+                    t.saw(Goal::Unlatch);
+                }
+            }
             if down != self.sent_buttons[i] {
                 self.sent_buttons[i] = down;
                 self.emu.send(Command::Button(i as u32, down));
             }
         }
         if input.user != self.sent_user {
+            if let Some(t) = &mut self.tutorial
+                && input.user
+            {
+                t.saw(Goal::User);
+            }
             self.sent_user = input.user;
             self.emu.send(Command::UserButton(input.user));
         }
@@ -1219,6 +1271,11 @@ impl eframe::App for App {
             self.emu.send(Command::Reset);
         }
         if input.touch != self.sent_touch {
+            if let Some(t) = &mut self.tutorial
+                && input.touch.is_some()
+            {
+                t.saw(Goal::Touch);
+            }
             self.sent_touch = input.touch;
             self.emu.send(Command::Touch(input.touch));
         }
@@ -1228,15 +1285,43 @@ impl eframe::App for App {
                 Some(false) => Some(true),
                 Some(true) => None,
             };
+            if let Some(t) = &mut self.tutorial
+                && self.ints[n] == Some(true)
+            {
+                t.saw(Goal::Aux);
+            }
             self.emu.send(Command::Int(n as u32, self.ints[n]));
         }
         if let Some((n, volts)) = input.analog {
+            // pad 0 is DAC1, the program converts the others
+            if let Some(t) = &mut self.tutorial
+                && n > 0
+                && volts.is_some_and(|v| v >= 2.0 - 1e-3)
+            {
+                t.saw(Goal::Analog);
+            }
             self.analog[n] = volts;
             self.emu.send(Command::Analog(n, volts));
         }
 
         self.help_window(&ctx);
         self.pyocd_question(&ctx);
+        if let Some(t) = &mut self.tutorial {
+            let targets = Targets {
+                board: input.spots,
+                console: self.console_rect,
+                open: self.open_rect,
+                area: central.response.rect,
+            };
+            // ends when the user's own program takes over
+            if !t.program_kept(firmware.as_deref())
+                || !t.show(&ctx, &targets, &ctx.format_shortcut(&OPEN), &ctx.format_shortcut(&HELP))
+            {
+                self.tutorial = None;
+                self.settings.tutorial_done = true;
+                self.settings.save();
+            }
+        }
 
         // ---- drag & drop of firmware files: a hint while a file is over the window
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {

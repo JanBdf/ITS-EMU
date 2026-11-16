@@ -20,6 +20,7 @@
 !/tests/fixtures/ac6/I2cLm75.axf
 !/tests/fixtures/ac6/NetEcho.axf
 !/tests/fixtures/ac6/UsbCdcEcho.axf
+!/tests/fixtures/ac6/Tutorial.axf
 
 /tools/vscode-nodebug/*.vsix
 

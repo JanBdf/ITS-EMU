@@ -59,7 +59,8 @@ its-emu path/to/Program.axf --seconds 10 \
 ```
 
 In the GUI, keys `0`–`7` press S0–S7, clicking the display touches it,
-firmware files can be dropped onto the window, and F1 lists all controls.
+firmware files can be dropped onto the window, and F1 lists all controls;
+the first start shows a short tutorial.
 Everything else is in [Usage](docs/usage.md).
 
 ## What is emulated

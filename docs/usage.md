@@ -10,7 +10,9 @@ cargo run --release -p its-emu -- path/to/Program.axf --seconds 10 \
     --input "2.5:S7=1,2.6:S7=0,3:SERIAL=hello\n" --screenshot screen.png
 ```
 
-**GUI.** F1 lists all controls. The main ones:
+**GUI.** The first start (without a firmware file) loads a tutorial program
+and leads through the inputs in a few popups; *Help → Tutorial* starts it
+again. F1 lists all controls. The main ones:
 
 - Keys `0`–`7` press S0–S7; right click latches a button. Clicking the
   display touches it; clicking an AUX pad ties it to GND/3V3; mouse wheel
