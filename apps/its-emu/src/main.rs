@@ -116,13 +116,15 @@ struct Args {
     gdb: Option<String>,
 
     /// Export the board's ST-LINK (debug probe and virtual COM port) over
-    /// USB/IP (default address 127.0.0.1:3240). On Linux,
-    /// `sudo usbip attach -r 127.0.0.1 -b 1-1` plugs it in (vhci-hcd module);
-    /// then pyOCD, OpenOCD and terminal programs use it like the real board's
+    /// USB/IP (default address 127.0.0.1:3240), and the USB device of each
+    /// Pico of --device (bus ids 1-2, ...). On Linux,
+    /// `sudo usbip attach -r 127.0.0.1 -b 1-1` plugs the ST-LINK in (vhci-hcd
+    /// module); then pyOCD, OpenOCD and terminal programs use it like the
+    /// real board's
     #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:3240")]
     usb: Option<String>,
 
-    /// With --usb: run `sudo usbip attach` for it
+    /// With --usb: run `sudo usbip attach` for the ST-LINK and the Picos
     #[arg(long, requires = "usb")]
     usb_attach: bool,
 }
@@ -310,7 +312,7 @@ fn main() -> Result<()> {
             let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
                 let _ = wake_tx.try_send(());
             });
-            let probe = stlink::UsbProbe::start(addr, Some(mcu.usart3.clone()), wake)
+            let probe = stlink::UsbProbe::start(addr, Some(mcu.usart3.clone()), wake.clone())
                 .with_context(|| format!("starting the USB/IP server on {addr}"))?;
             println!(
                 "ST-LINK exported over USB/IP on {}; attach it with: {}",
@@ -318,9 +320,10 @@ fn main() -> Result<()> {
                 probe.attach_command()
             );
             if args.usb_attach {
-                let _ = stlink::spawn_attach(probe.local_addr());
+                let _ = probe.spawn_attach();
             }
-            Some(probe)
+            let pico_usb: Vec<_> = picos.iter().map(|p| p.usb_device(wake.clone())).collect();
+            Some((probe, pico_usb))
         }
         None => None,
     };
@@ -361,8 +364,20 @@ fn main() -> Result<()> {
             }
             None => Execution::Free,
         };
-        if let Some(probe) = &mut usb {
+        if let Some((probe, pico_usb)) = &mut usb {
             probe.poll(&mut machine);
+            let addr = probe.local_addr();
+            for (n, device) in pico_usb.iter_mut().enumerate() {
+                if let Some(busid) = device.poll(probe.server()) {
+                    println!(
+                        "Pico {n}: USB device exported as {busid}; attach it with: {}",
+                        stlink::attach_command(addr, &busid)
+                    );
+                    if args.usb_attach {
+                        let _ = stlink::spawn_attach(addr, &busid, "Pico");
+                    }
+                }
+            }
         }
         // Halted by the debug probe, held in reset, or locked up until the probe does something.
         let held = machine.is_halted() || (usb.is_some() && machine.is_locked_up());

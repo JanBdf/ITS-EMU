@@ -1,6 +1,7 @@
 //! A Raspberry Pi Pico running a UF2 firmware, as a [`plugin`](crate::plugin)
 //! on a thread of its own. Its USB serial port is a pseudo terminal that
-//! programs on the host open like the real Pico's port.
+//! programs on the host open like the real Pico's port, and its USB device
+//! can be plugged into the computer ([`PicoPlugin::usb_device`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,6 +11,7 @@ use std::time::Duration;
 
 use rp2040::Pico;
 
+use crate::pico_usb::{PicoUsbDevice, SharedBridge};
 use crate::plugin::Link;
 
 /// Virtual time the Pico runs between looks at its serial port (ps).
@@ -96,6 +98,7 @@ pub struct PicoPlugin {
     input: mpsc::Sender<Vec<u8>>,
     /// What the Pico said and how it ended, shared with its thread.
     status: Arc<Mutex<Status>>,
+    usb: SharedBridge,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -112,17 +115,19 @@ impl PicoPlugin {
         let stop = Arc::new(AtomicBool::new(false));
         let (input, input_rx) = mpsc::channel();
         let status = Arc::new(Mutex::new(Status::default()));
+        let usb = SharedBridge::default();
         let thread = {
-            let (link, stop, gpios, status) = (link.clone(), stop.clone(), gpios.clone(), status.clone());
+            let (link, stop, gpios, status, usb) =
+                (link.clone(), stop.clone(), gpios.clone(), status.clone(), usb.clone());
             std::thread::Builder::new().name("pico".into()).spawn(move || {
-                if let Err(e) = run(&bootrom, &uf2, &gpios, &link, &stop, tty, &input_rx, &status) {
+                if let Err(e) = run(&bootrom, &uf2, &gpios, &link, &stop, tty, &input_rx, &status, &usb) {
                     log::error!("{e}");
                     status.lock().unwrap().failure = Some(e);
                 }
                 link.end();
             })?
         };
-        Ok(Self { link, gpios, port, input, status, stop, thread: Some(thread) })
+        Ok(Self { link, gpios, port, input, status, usb, stop, thread: Some(thread) })
     }
 
     pub fn link(&self) -> Arc<Link> {
@@ -138,6 +143,13 @@ impl PicoPlugin {
     /// (not on Windows).
     pub fn serial_port(&self) -> Option<&std::path::Path> {
         self.port.as_deref()
+    }
+
+    /// Its USB device for a USB/IP server on the host's thread (one per
+    /// Pico); `wake` is called when it has replies. While the computer has
+    /// it attached, the pseudo terminal and [`Self::send`] are idle.
+    pub fn usb_device(&self, wake: Arc<dyn Fn() + Send + Sync>) -> PicoUsbDevice {
+        PicoUsbDevice::new(self.usb.clone(), wake)
     }
 
     /// Sends bytes to the Pico's serial port as a host program would.
@@ -191,6 +203,7 @@ fn run(
     mut tty: Option<Pty>,
     input: &mpsc::Receiver<Vec<u8>>,
     status: &Mutex<Status>,
+    usb: &SharedBridge,
 ) -> Result<(), String> {
     let mut pico = Pico::new(bootrom, uf2).map_err(|e| format!("Pico: {e}"))?;
     let mut line = Vec::new();
@@ -203,6 +216,7 @@ fn run(
         // the serial port
         {
             let mut serial = pico.serial().borrow_mut();
+            usb.lock().unwrap().sync(&mut serial);
             while let Ok(data) = input.try_recv() {
                 serial.to_device.extend(data);
             }

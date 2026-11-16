@@ -12,7 +12,7 @@ use crate::emu::{self, Command, EmuHandle, RunState, Speed, UsbStatus};
 use crate::files::FilePicker;
 use crate::settings::{ConsoleSide, Settings, Theme, WindowState};
 
-const OK_GREEN: Color32 = Color32::from_rgb(0x34, 0xD3, 0x59);
+pub(crate) const OK_GREEN: Color32 = Color32::from_rgb(0x34, 0xD3, 0x59);
 const ERR_RED: Color32 = Color32::from_rgb(0xFF, 0x5B, 0x50);
 const WARN_YELLOW: Color32 = Color32::from_rgb(0xFF, 0xD5, 0x4A);
 

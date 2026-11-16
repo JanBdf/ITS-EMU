@@ -95,6 +95,15 @@ its-emu-gui Drehgeber.axf --device pico=pio_2_squarewaves.uf2
 python3 tools/pico/run_gui.py /dev/ttys004 Rechteckgenerator/Python_GUI/main.py
 ```
 
+On Linux the Pico's USB device can also be plugged into the computer like
+a real Pico, next to the [ST-LINK](debugging.md#the-boards-st-link-on-usb-linux):
+while the USB switch is on (`its-emu --usb`), each Pico is exported over
+USB/IP as soon as its firmware connects (bus ids `1-2`, `1-3`, ...; the
+Devices panel shows its state). The computer then sees the firmware's own
+descriptors (`2e8a:000a`, "Pico - Board CDC") and a `/dev/ttyACM*` port, so
+the generator's Python GUI runs unchanged, without `run_gui.py`. While it is
+plugged in, the pseudo terminal is idle.
+
 - **Timing.** The Pico has its own thread and clock, at most 20 ms (virtual)
   ahead of the board; pin changes reach the board at the time they were made.
   It runs at about 0.7–0.8× real time while busy-waiting, and so does the

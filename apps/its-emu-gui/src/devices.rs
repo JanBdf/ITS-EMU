@@ -186,11 +186,12 @@ impl DevicesPanel {
                         });
                         show_wiring(ui, spec);
                     }
-                    (DeviceSpec::Pico(spec), DeviceState::Running { port, notices }) => {
+                    (DeviceSpec::Pico(spec), DeviceState::Running { port, usb, notices }) => {
                         for notice in notices {
                             ui.label(RichText::new(format!("⚠ {notice}")).color(ui.visuals().warn_fg_color));
                         }
                         show_wiring(ui, spec);
+                        show_pico_usb(ui, usb.as_ref());
                         self.show_pico(ui, d.id, port.as_deref(), settings, emu);
                     }
                     _ => {}
@@ -599,6 +600,23 @@ fn check_pins(spec: &DeviceSpec, devices: &[DeviceView]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The Pico's USB device on the computer's USB (USB/IP), if exported.
+fn show_pico_usb(ui: &mut egui::Ui, usb: Option<&(String, bool)>) {
+    let Some((busid, attached)) = usb else { return };
+    ui.horizontal(|ui| {
+        ui.label("USB device:");
+        if *attached {
+            ui.label(RichText::new(format!("plugged in ({busid})")).color(crate::app::OK_GREEN)).on_hover_text(
+                "Programs on this computer find it like a real Pico (e.g. /dev/ttyACM*); \
+                 the pseudo terminal below is idle meanwhile",
+            );
+        } else {
+            ui.label(RichText::new(format!("waiting for usbip attach ({busid})")).weak())
+                .on_hover_text(format!("sudo usbip attach -r 127.0.0.1 -b {busid}"));
+        }
+    });
 }
 
 /// Starts `program` with `python` on the Pico's serial port through

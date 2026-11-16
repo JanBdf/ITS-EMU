@@ -10,10 +10,11 @@ README.md for features and usage.
 apps/its-emu (CLI)        apps/its-emu-gui (egui)
         \                     /
          stlink     — ST-LINK/V2-1 (debug commands, virtual COM port) on USB/IP
-         usbip      — USB/IP server for one emulated device (vhci-hcd attaches it)
+         usbip      — USB/IP server for the emulated devices, bus ids 1-1 (ST-LINK),
+                      1-2... (Picos); vhci-hcd attaches them
          itsboard   — wiring, ILI9486, XPT2046, LM75, LEDs/buttons, network, fonts.bin
               |   \
-              |    rp2040 — Raspberry Pi Pico (both cores, PIO, DMA, USB CDC), own thread
+              |    rp2040 — Raspberry Pi Pico (both cores, PIO, DMA, USB device), own thread
               |
          stm32f429  — memory map, RCC, PWR, FLASH, GPIO, EXTI/SYSCFG, TIM1–14, ADC/DAC,
                       I2C1–3, SPI1–6, U(S)ART1–8, DMA1/2, ETH, IWDG, CRC, RNG
@@ -49,6 +50,14 @@ Not yet compared with the board (record with HwCheck first):
 - **ADC/DAC triggers** from CCx, OCxREF/compare-pulse TRGO, EXTI11/15 (ADC)
   and EXTI9 (DAC): measure which signal the ADC sees (OCxREF edge or compare
   pulse; EXTI line before or after RTSR/FTSR/IMR) before modelling.
+
+Not built yet:
+
+- **USB OTG_FS (CN13)** of the STM32F429: the Synopsys DWC2 core in device
+  mode (FIFOs, endpoint registers, IRQ 67, PA9 VBUS, PLL48 check) exported
+  as one more USB/IP device, forwarding the computer's transfers as the
+  Pico's USB does. Needed for the BITMAP task's fast USB-CDC transfer (S7);
+  until then it uses UART via USB (S6) on the ST-LINK's COM port.
 
 Known gaps:
 

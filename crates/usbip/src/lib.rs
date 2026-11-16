@@ -1,4 +1,4 @@
-//! USB/IP server for one emulated USB device.
+//! USB/IP server for emulated USB devices.
 //!
 //! The Linux kernel's `vhci-hcd` driver attaches a device exported over
 //! USB/IP (`usbip attach -r HOST -b BUSID`) like a locally plugged-in one, so
@@ -10,6 +10,7 @@
 //! the host's thread (like the GDB server). IN transfers the device cannot
 //! answer yet stay pending and are retried on every poll.
 
+pub mod attach;
 pub mod descriptors;
 
 use std::collections::VecDeque;
@@ -123,88 +124,153 @@ struct Attached {
     pending: VecDeque<Urb>,
 }
 
-/// Exports one device under bus id `busid` (e.g. `1-1`).
+/// One exported device.
+struct Port {
+    busid: String,
+    /// `struct usbip_usb_device` and the interface list of the device list.
+    record: Vec<u8>,
+    interfaces: Vec<u8>,
+    attached: Option<Attached>,
+    /// Attach (`true`) and detach events the device has not been told yet.
+    notify: VecDeque<bool>,
+}
+
+/// Exports emulated devices under bus ids `1-1`, `1-2`, ... on one port.
+/// Each device is served by its own [`UsbipServer::poll`] call, so devices
+/// with different host contexts (or none) share the server.
 pub struct UsbipServer {
     local: SocketAddr,
-    busid: String,
     events: Receiver<Event>,
-    /// Connections that have not imported the device (yet).
+    /// Connections that have not imported a device (yet).
     others: Vec<(u64, TcpStream)>,
-    attached: Option<Attached>,
+    ports: Vec<Port>,
 }
 
 impl UsbipServer {
     /// Listens on `addr`; `wake` is called (from another thread) whenever a
     /// request arrives, so that the host polls soon.
-    pub fn bind(addr: impl ToSocketAddrs, busid: &str, wake: Arc<dyn Fn() + Send + Sync>) -> io::Result<Self> {
+    pub fn bind(addr: impl ToSocketAddrs, wake: Arc<dyn Fn() + Send + Sync>) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
         let local = listener.local_addr()?;
         let (tx, events) = channel();
-        let busid_owned = busid.to_owned();
         std::thread::Builder::new().name("usbip-accept".into()).spawn(move || {
-            accept_loop(listener, tx, wake, busid_owned);
+            accept_loop(listener, tx, wake);
         })?;
-        Ok(Self { local, busid: busid.to_owned(), events, others: Vec::new(), attached: None })
+        Ok(Self { local, events, others: Vec::new(), ports: Vec::new() })
     }
 
     pub fn local_addr(&self) -> SocketAddr {
         self.local
     }
 
-    pub fn busid(&self) -> &str {
-        &self.busid
-    }
-
-    /// A host has the device attached.
-    pub fn is_attached(&self) -> bool {
-        self.attached.is_some()
-    }
-
-    /// Handles the requests that arrived and retries pending transfers.
-    /// Returns true if anything was completed.
-    pub fn poll<C: ?Sized, D: UsbDevice<C> + ?Sized>(&mut self, dev: &mut D, ctx: &mut C) -> bool {
-        let mut progress = false;
-        while let Ok(ev) = self.events.try_recv() {
-            progress = true;
-            self.handle(ev, dev, ctx);
+    /// Offers `dev` under `busid` (`1-n`); its descriptors are read now. An
+    /// exported device keeps its bus id and gets the new descriptors (seen
+    /// at the next import).
+    pub fn export<C: ?Sized, D: UsbDevice<C> + ?Sized>(&mut self, busid: &str, dev: &D) {
+        let (record, interfaces) = device_record(busid, dev);
+        match self.ports.iter_mut().find(|p| p.busid == busid) {
+            Some(p) => (p.record, p.interfaces) = (record, interfaces),
+            None => {
+                self.ports.push(Port {
+                    busid: busid.to_owned(),
+                    record,
+                    interfaces,
+                    attached: None,
+                    notify: VecDeque::new(),
+                });
+                self.ports.sort_by_key(|p| busid_number(&p.busid));
+            }
         }
-        progress | self.service(dev, ctx)
     }
 
-    fn handle<C: ?Sized, D: UsbDevice<C> + ?Sized>(&mut self, ev: Event, dev: &mut D, ctx: &mut C) {
+    /// Withdraws a device: a host that has it attached sees it unplugged.
+    pub fn unexport(&mut self, busid: &str) {
+        if let Some(i) = self.ports.iter().position(|p| p.busid == busid) {
+            let p = self.ports.remove(i);
+            if let Some(a) = p.attached {
+                log::info!("usbip: device {busid} unplugged from {}", fmt_peer(a.peer));
+                let _ = a.stream.shutdown(Shutdown::Both);
+            }
+        }
+    }
+
+    /// The bus ids of the exported devices.
+    pub fn busids(&self) -> impl Iterator<Item = &str> {
+        self.ports.iter().map(|p| p.busid.as_str())
+    }
+
+    /// The first bus id `1-n` not in use.
+    pub fn free_busid(&self) -> String {
+        let n = (1..).find(|n| !self.ports.iter().any(|p| busid_number(&p.busid) == *n)).unwrap();
+        format!("1-{n}")
+    }
+
+    /// A host has the device `busid` attached.
+    pub fn is_attached(&self, busid: &str) -> bool {
+        self.ports.iter().any(|p| p.busid == busid && p.attached.is_some())
+    }
+
+    /// Handles the requests that arrived and retries pending transfers of
+    /// the device exported as `busid`. Returns true if anything was
+    /// completed for it.
+    pub fn poll<C: ?Sized, D: UsbDevice<C> + ?Sized>(&mut self, busid: &str, dev: &mut D, ctx: &mut C) -> bool {
+        self.dispatch();
+        let Some(port) = self.ports.iter_mut().find(|p| p.busid == busid) else { return false };
+        let mut progress = false;
+        while let Some(attached) = port.notify.pop_front() {
+            dev.attached(ctx, attached);
+            progress = true;
+        }
+        progress | port.service(dev, ctx)
+    }
+
+    /// Takes the requests that arrived and sorts them to the devices.
+    fn dispatch(&mut self) {
+        while let Ok(ev) = self.events.try_recv() {
+            self.handle(ev);
+        }
+    }
+
+    fn handle(&mut self, ev: Event) {
         match ev {
             Event::Connected(id, stream) => self.others.push((id, stream)),
             Event::DevList(id) => {
                 let mut reply = op_header(OP_REP_DEVLIST, 0);
-                reply.extend_from_slice(&1u32.to_be_bytes());
-                reply.extend(device_record(&self.busid, dev, true));
+                reply.extend_from_slice(&(self.ports.len() as u32).to_be_bytes());
+                for p in &self.ports {
+                    reply.extend_from_slice(&p.record);
+                    reply.extend_from_slice(&p.interfaces);
+                }
                 self.send_other(id, &reply);
             }
             Event::Import(id, busid) => {
-                let ok = busid == self.busid && self.attached.is_none();
-                if !ok {
+                let Some(port) = self.ports.iter_mut().find(|p| p.busid == busid && p.attached.is_none()) else {
                     log::warn!("usbip: import of '{busid}' refused (busy or unknown bus id)");
                     self.send_other(id, &op_header(OP_REP_IMPORT, 1));
                     return;
-                }
+                };
                 let mut reply = op_header(OP_REP_IMPORT, 0);
-                reply.extend(device_record(&self.busid, dev, false));
-                self.send_other(id, &reply);
+                reply.extend_from_slice(&port.record);
+                let record = reply;
                 if let Some(i) = self.others.iter().position(|(c, _)| *c == id) {
-                    let (_, stream) = self.others.remove(i);
+                    let (_, mut stream) = self.others.remove(i);
+                    if let Err(e) = stream.write_all(&record) {
+                        log::debug!("usbip: write failed: {e}");
+                        return;
+                    }
                     let peer = stream.peer_addr().ok();
-                    log::info!("usbip: device {} attached by {}", self.busid, fmt_peer(peer));
-                    self.attached = Some(Attached { id, stream, peer, pending: VecDeque::new() });
-                    dev.attached(ctx, true);
+                    log::info!("usbip: device {busid} attached by {}", fmt_peer(peer));
+                    port.attached = Some(Attached { id, stream, peer, pending: VecDeque::new() });
+                    port.notify.push_back(true);
                 }
             }
             Event::Submit(id, urb) => {
-                if let Some(a) = self.attached.as_mut().filter(|a| a.id == id) {
+                if let Some(a) = self.attached_mut(id) {
                     a.pending.push_back(urb);
                 }
             }
             Event::Unlink { conn, seqnum, victim } => {
-                let Some(a) = self.attached.as_mut().filter(|a| a.id == conn) else { return };
+                let Some(a) = self.attached_mut(conn) else { return };
                 // Still pending: cancelled, no RET_SUBMIT follows. Otherwise it
                 // has completed already.
                 let status = match a.pending.iter().position(|u| u.seqnum == victim) {
@@ -217,19 +283,33 @@ impl UsbipServer {
                 let mut msg = urb_header(RET_UNLINK, seqnum);
                 msg.extend_from_slice(&status.to_be_bytes());
                 msg.extend_from_slice(&[0; 24]);
-                Self::send_attached(a, &msg);
+                send_attached(a, &msg);
             }
             Event::Closed(id) => {
                 self.others.retain(|(c, _)| *c != id);
-                if self.attached.as_ref().is_some_and(|a| a.id == id) {
-                    let a = self.attached.take().unwrap();
-                    log::info!("usbip: device {} detached by {}", self.busid, fmt_peer(a.peer));
-                    dev.attached(ctx, false);
+                if let Some(p) = self.ports.iter_mut().find(|p| p.attached.as_ref().is_some_and(|a| a.id == id)) {
+                    let a = p.attached.take().unwrap();
+                    log::info!("usbip: device {} detached by {}", p.busid, fmt_peer(a.peer));
+                    p.notify.push_back(false);
                 }
             }
         }
     }
 
+    fn attached_mut(&mut self, conn: u64) -> Option<&mut Attached> {
+        self.ports.iter_mut().filter_map(|p| p.attached.as_mut()).find(|a| a.id == conn)
+    }
+
+    fn send_other(&mut self, id: u64, msg: &[u8]) {
+        if let Some((_, stream)) = self.others.iter_mut().find(|(c, _)| *c == id)
+            && let Err(e) = stream.write_all(msg)
+        {
+            log::debug!("usbip: write failed: {e}");
+        }
+    }
+}
+
+impl Port {
     /// Tries the pending transfers in order; a NAKed transfer blocks later
     /// ones on the same endpoint.
     fn service<C: ?Sized, D: UsbDevice<C> + ?Sized>(&mut self, dev: &mut D, ctx: &mut C) -> bool {
@@ -274,32 +354,24 @@ impl UsbipServer {
             if urb.dir_in && status == 0 {
                 msg.extend_from_slice(&data);
             }
-            Self::send_attached(a, &msg);
+            send_attached(a, &msg);
             progress = true;
         }
         progress
     }
+}
 
-    fn send_other(&mut self, id: u64, msg: &[u8]) {
-        if let Some((_, stream)) = self.others.iter_mut().find(|(c, _)| *c == id)
-            && let Err(e) = stream.write_all(msg)
-        {
-            log::debug!("usbip: write failed: {e}");
-        }
-    }
-
-    fn send_attached(a: &mut Attached, msg: &[u8]) {
-        if let Err(e) = a.stream.write_all(msg) {
-            log::debug!("usbip: write failed: {e}");
-            let _ = a.stream.shutdown(Shutdown::Both);
-        }
+fn send_attached(a: &mut Attached, msg: &[u8]) {
+    if let Err(e) = a.stream.write_all(msg) {
+        log::debug!("usbip: write failed: {e}");
+        let _ = a.stream.shutdown(Shutdown::Both);
     }
 }
 
 impl Drop for UsbipServer {
     fn drop(&mut self) {
-        // Ends the reader threads; the kernel sees the device unplugged.
-        if let Some(a) = &self.attached {
+        // Ends the reader threads; the kernel sees the devices unplugged.
+        for a in self.ports.iter().filter_map(|p| p.attached.as_ref()) {
             let _ = a.stream.shutdown(Shutdown::Both);
         }
         for (_, s) in &self.others {
@@ -308,11 +380,16 @@ impl Drop for UsbipServer {
     }
 }
 
+/// `n` of bus id `1-n` (0 for other forms).
+fn busid_number(busid: &str) -> u32 {
+    busid.strip_prefix("1-").and_then(|n| n.parse().ok()).unwrap_or(0)
+}
+
 fn fmt_peer(peer: Option<SocketAddr>) -> String {
     peer.map_or_else(|| "?".to_owned(), |p| p.to_string())
 }
 
-fn accept_loop(listener: TcpListener, tx: Sender<Event>, wake: Arc<dyn Fn() + Send + Sync>, busid: String) {
+fn accept_loop(listener: TcpListener, tx: Sender<Event>, wake: Arc<dyn Fn() + Send + Sync>) {
     let mut next_id = 0u64;
     for stream in listener.incoming() {
         let stream = match stream {
@@ -329,13 +406,13 @@ fn accept_loop(listener: TcpListener, tx: Sender<Event>, wake: Arc<dyn Fn() + Se
         if tx.send(Event::Connected(id, stream)).is_err() {
             return; // server dropped
         }
-        let (tx, wake, busid) = (tx.clone(), wake.clone(), busid.clone());
+        let (tx, wake) = (tx.clone(), wake.clone());
         let _ = std::thread::Builder::new().name("usbip-conn".into()).spawn(move || {
             let result = read_loop(id, reader, &tx, &*wake);
             if let Err(e) = result
                 && e.kind() != ErrorKind::UnexpectedEof
             {
-                log::debug!("usbip {busid}: connection {id}: {e}");
+                log::debug!("usbip: connection {id}: {e}");
             }
             let _ = tx.send(Event::Closed(id));
             wake();
@@ -431,10 +508,9 @@ fn urb_header(command: u32, seqnum: u32) -> Vec<u8> {
 }
 
 const BUSNUM: u32 = 1;
-const DEVNUM: u32 = 1;
 
-/// `struct usbip_usb_device` (+ interfaces for the device list).
-fn device_record<C: ?Sized, D: UsbDevice<C> + ?Sized>(busid: &str, dev: &D, with_interfaces: bool) -> Vec<u8> {
+/// `struct usbip_usb_device`, and the interfaces for the device list.
+fn device_record<C: ?Sized, D: UsbDevice<C> + ?Sized>(busid: &str, dev: &D) -> (Vec<u8>, Vec<u8>) {
     let dd = dev.device_descriptor();
     let cd = dev.configuration_descriptor();
     let mut v = Vec::with_capacity(312);
@@ -444,7 +520,7 @@ fn device_record<C: ?Sized, D: UsbDevice<C> + ?Sized>(busid: &str, dev: &D, with
     let mut bus = busid.as_bytes().to_vec();
     bus.resize(32, 0);
     v.extend(bus);
-    for x in [BUSNUM, DEVNUM, dev.speed() as u32] {
+    for x in [BUSNUM, busid_number(busid), dev.speed() as u32] {
         v.extend_from_slice(&x.to_be_bytes());
     }
     let le16 = |b: &[u8], at: usize| u16::from_le_bytes([b[at], b[at + 1]]);
@@ -453,10 +529,6 @@ fn device_record<C: ?Sized, D: UsbDevice<C> + ?Sized>(busid: &str, dev: &D, with
     }
     let interfaces = descriptors::interfaces(&cd);
     v.extend_from_slice(&[dd[4], dd[5], dd[6], cd[5], dd[17], interfaces.len() as u8]);
-    if with_interfaces {
-        for (class, sub, proto) in interfaces {
-            v.extend_from_slice(&[class, sub, proto, 0]);
-        }
-    }
-    v
+    let list = interfaces.iter().flat_map(|&(class, sub, proto)| [class, sub, proto, 0]).collect();
+    (v, list)
 }

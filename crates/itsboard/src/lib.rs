@@ -17,6 +17,7 @@ pub mod ili9486;
 pub mod lm75;
 pub mod net;
 pub mod pico;
+pub mod pico_usb;
 pub mod plugin;
 pub mod sim;
 pub mod spec;

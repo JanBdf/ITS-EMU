@@ -1947,6 +1947,7 @@ dependencies = [
  "smoltcp",
  "stm32f429",
  "thiserror 2.0.21",
+ "usbip",
 ]
 
 [[package]]

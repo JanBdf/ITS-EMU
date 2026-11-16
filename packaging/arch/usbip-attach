@@ -1,18 +1,40 @@
 #!/bin/sh
-# Attaches the ITS-Board emulator's ST-LINK, exported over USB/IP on this
-# computer (127.0.0.1, bus id 1-1), with the kernel's vhci-hcd driver.
+# Attaches a USB device of the ITS-Board emulator (the ST-LINK, bus id 1-1,
+# or another one it exports), served over USB/IP on this computer
+# (127.0.0.1), with the kernel's vhci-hcd driver.
 # its-emu-gui runs it through pkexec (polkit action its-emu.usbip-attach).
 set -eu
 port="${1:-3240}"
+busid="${2:-1-1}"
 case "$port" in
-  '' | *[!0-9]*) echo "usage: $0 [PORT]" >&2; exit 2 ;;
+  '' | *[!0-9]*) echo "usage: $0 [PORT [BUSID]]" >&2; exit 2 ;;
 esac
 if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
   echo "port out of range: $port" >&2
   exit 2
 fi
-if ! modprobe vhci-hcd 2>/dev/null && [ ! -d "/usr/lib/modules/$(uname -r)" ]; then
-  echo "the kernel was updated since the last start: restart the computer to load the vhci-hcd kernel module" >&2
+case "$busid" in
+  1-[1-9] | 1-[1-9][0-9]) ;;
+  *) echo "bus id out of range: $busid (1-1 .. 1-99)" >&2; exit 2 ;;
+esac
+# After a kernel update without a restart the running kernel's modules are
+# gone, but those loaded before still work.
+modules_gone() { [ ! -d "/usr/lib/modules/$(uname -r)" ]; }
+if [ ! -d /sys/devices/platform/vhci_hcd.0 ] && ! modprobe vhci-hcd 2>/dev/null; then
+  if modules_gone; then
+    echo "the kernel was updated since the last start: restart the computer to load the vhci-hcd kernel module" >&2
+  else
+    echo "cannot load the vhci-hcd kernel module" >&2
+  fi
   exit 1
 fi
-exec /usr/bin/usbip --tcp-port "$port" attach -r 127.0.0.1 -b 1-1
+# The serial ports (/dev/ttyACM*) need cdc_acm, which the kernel loads when
+# the device appears; attaching works without it.
+if [ ! -d /sys/bus/usb/drivers/cdc_acm ] && ! modprobe -n -q cdc_acm 2>/dev/null; then
+  if modules_gone; then
+    echo "warning: the kernel was updated since the last start: the serial port (/dev/ttyACM*) appears only after a restart (cdc_acm kernel module)" >&2
+  else
+    echo "warning: no cdc_acm kernel module: the serial port (/dev/ttyACM*) will not appear" >&2
+  fi
+fi
+exec /usr/bin/usbip --tcp-port "$port" attach -r 127.0.0.1 -b "$busid"

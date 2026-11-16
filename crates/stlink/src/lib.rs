@@ -18,6 +18,7 @@ use stm32f429::usart::SharedSerial;
 use usbip::descriptors::{self, StandardState};
 use usbip::{Reply, SetupPacket, UsbDevice};
 
+pub use usbip::attach::{attach_command, restart_needed, serial_needs_restart, spawn_attach};
 pub use usbip::{DEFAULT_PORT, UsbipServer};
 
 pub const VID: u16 = 0x0483;
@@ -36,7 +37,9 @@ const IF_VCP_COMM: u16 = 1;
 const STRINGS: [&str; 6] =
     ["STMicroelectronics", "STM32 STLink", "", "ST-Link Debug", "ST-Link VCP Ctrl", "ST-Link VCP Data"];
 
-/// The ST-LINK exported over USB/IP: the host polls it between emulation slices.
+/// The ST-LINK exported over USB/IP: the host polls it between emulation
+/// slices. Its server also exports the other USB devices of the emulation
+/// ([`UsbProbe::server`]).
 pub struct UsbProbe {
     server: UsbipServer,
     device: Stlink,
@@ -50,22 +53,34 @@ impl UsbProbe {
         serial: Option<SharedSerial>,
         wake: std::sync::Arc<dyn Fn() + Send + Sync>,
     ) -> std::io::Result<Self> {
-        let server = UsbipServer::bind(addr, BUSID, wake)?;
-        Ok(Self { server, device: Stlink::new(serial) })
+        let mut server = UsbipServer::bind(addr, wake)?;
+        let device = Stlink::new(serial);
+        server.export(BUSID, &device);
+        Ok(Self { server, device })
     }
 
     pub fn local_addr(&self) -> std::net::SocketAddr {
         self.server.local_addr()
     }
 
+    /// The USB/IP server, for exporting further devices (bus ids from `1-2`).
+    pub fn server(&mut self) -> &mut UsbipServer {
+        &mut self.server
+    }
+
+    /// A host has the device exported as `busid` attached.
+    pub fn device_attached(&self, busid: &str) -> bool {
+        self.server.is_attached(busid)
+    }
+
     /// A host has the probe attached.
     pub fn is_attached(&self) -> bool {
-        self.server.is_attached()
+        self.server.is_attached(BUSID)
     }
 
     /// A debugger has the probe in debug mode (between JTAG_ENTER and JTAG_EXIT).
     pub fn debug_active(&self) -> bool {
-        self.server.is_attached() && self.device.mode == commands::MODE_DEBUG
+        self.is_attached() && self.device.mode == commands::MODE_DEBUG
     }
 
     /// The probe is in debug mode and got a debug command within `recent`.
@@ -76,79 +91,24 @@ impl UsbProbe {
 
     /// Handles USB requests; returns true if any completed.
     pub fn poll(&mut self, m: &mut Machine) -> bool {
-        self.server.poll(&mut self.device, m)
+        self.server.poll(BUSID, &mut self.device, m)
     }
 
     /// The command that attaches the probe to this Linux host.
     pub fn attach_command(&self) -> String {
-        attach_command(self.local_addr())
+        attach_command(self.local_addr(), BUSID)
+    }
+
+    /// Plugs the probe into this Linux host (see [`spawn_attach`]).
+    pub fn spawn_attach(&self) -> std::sync::mpsc::Receiver<Result<(), String>> {
+        spawn_attach(self.local_addr(), BUSID, "ST-LINK")
     }
 
     /// Connects the virtual COM port to another USART (a new board).
     pub fn set_serial(&mut self, serial: Option<SharedSerial>) {
-        self.device.vcp.set_serial(serial, self.server.is_attached());
+        let attached = self.is_attached();
+        self.device.vcp.set_serial(serial, attached);
     }
-}
-
-/// `usbip attach` for a probe listening on `addr`.
-pub fn attach_command(addr: std::net::SocketAddr) -> String {
-    let host = if addr.ip().is_unspecified() { "127.0.0.1".to_owned() } else { addr.ip().to_string() };
-    let port = if addr.port() == DEFAULT_PORT { String::new() } else { format!(" --tcp-port {}", addr.port()) };
-    format!("sudo usbip{port} attach -r {host} -b {BUSID}")
-}
-
-/// Helper installed by the package (`packaging/arch`): attaches the probe on
-/// 127.0.0.1 through polkit, so that the GUI needs no terminal for sudo.
-pub const ATTACH_HELPER: &str = "/usr/lib/its-emu/usbip-attach";
-
-/// The vhci-hcd module is not loaded and cannot be before a restart: the
-/// running kernel's modules are gone (a kernel update without a restart since).
-pub fn restart_needed() -> bool {
-    let vhci = std::path::Path::new("/sys/devices/platform/vhci_hcd.0").exists();
-    let modules = std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .map_or(true, |release| std::path::Path::new("/usr/lib/modules").join(release.trim()).exists());
-    !vhci && !modules
-}
-
-/// Plugs the probe listening on `addr` into this Linux host, in the
-/// background: with the packaged helper through `pkexec` if it is installed
-/// (local address), otherwise with `sudo -n usbip attach`. Needs the
-/// `vhci-hcd` kernel module. The outcome arrives on the returned channel
-/// (and is logged).
-pub fn spawn_attach(addr: std::net::SocketAddr) -> std::sync::mpsc::Receiver<Result<(), String>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let local = addr.ip().is_loopback() || addr.ip().is_unspecified();
-    let argv: Vec<String> = if local && std::path::Path::new(ATTACH_HELPER).exists() {
-        vec!["pkexec".into(), ATTACH_HELPER.into(), addr.port().to_string()]
-    } else {
-        let cmd = attach_command(addr).replacen("sudo ", "sudo -n ", 1);
-        cmd.split_whitespace().map(String::from).collect()
-    };
-    std::thread::spawn(move || {
-        let shown = argv.join(" ");
-        let result = match std::process::Command::new(&argv[0]).args(&argv[1..]).output() {
-            Ok(out) if out.status.success() => Ok(()),
-            Ok(out) => {
-                let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
-                let hint = if std::path::Path::new("/sys/devices/platform/vhci_hcd.0").exists() {
-                    ""
-                } else if restart_needed() {
-                    " — the kernel was updated since the last start: restart the computer to load the \
-                     vhci-hcd kernel module"
-                } else {
-                    " — the vhci-hcd kernel module is not loaded (sudo modprobe vhci-hcd)"
-                };
-                Err(format!("{err}{hint}"))
-            }
-            Err(e) => Err(format!("cannot run {}: {e}", argv[0])),
-        };
-        match &result {
-            Ok(()) => log::info!("attached the ST-LINK: {shown}"),
-            Err(e) => log::warn!("`{shown}` failed: {e}"),
-        }
-        let _ = tx.send(result);
-    });
-    rx
 }
 
 /// The ST-LINK as a USB device. Lives on the emulator thread.
