@@ -48,7 +48,7 @@ W = rs_const('BOARD_W')
 H = rs_const('BOARD_H')
 X0, Y0 = rs_const('BOARD_ORIGIN')
 X1, Y1 = X0 + W, Y0 + H
-CORNER = 9.0                        # all corners of the board, also those of the notch
+CORNER = 5.0                        # all corners of the board, also those of the notch
 
 # positions of the parts the GUI draws on (lights, presses, plugs, the display)
 OUT_X = rs_const('OUT_X')           # OUT0..OUT15
@@ -104,7 +104,7 @@ LED_BODY = '#f3ecd9'
 HEADER = '#1c1c1e'
 NUCLEO = '#e3e3dd'
 ST_BLUE = '#1f6fd0'
-FELT = '#66665f'          # the grey sockets the Morpho pins are bent into
+FELT = '#838479'          # the grey sockets the Morpho pins are bent into
 CAP_RED = '#d9434b'       # caps of S0..S7
 
 FONT_DIRS = ['/usr/share/fonts/OpenSans', '/usr/share/fonts/noto', '/usr/share/fonts/liberation',
@@ -451,16 +451,17 @@ def smd_r(x, y, w, h, body='#202022', vertical=False):
                       rect(x - w / 2 + e, y - h / 2, x + w / 2 - e, y + h / 2, body)])
 
 
-def lit_led(x, y, color='#ffb030'):
+def lit_led(x, y, color='#ff9a1c'):
     """0805 LED that is on (power LEDs D24/D25)."""
     gid = f'glow{int(x)}{int(y)}'
     svg.defs.append(f'<radialGradient id="{gid}"><stop offset="0" stop-color="#fffbe8"/>'
-                    f'<stop offset="0.3" stop-color="#ffe9a0" stop-opacity="0.9"/>'
-                    f'<stop offset="0.55" stop-color="{color}" stop-opacity="0.35"/>'
+                    f'<stop offset="0.5" stop-color="#ffe8a8"/>'
+                    f'<stop offset="0.67" stop-color="{color}" stop-opacity="0.95"/>'
+                    f'<stop offset="0.85" stop-color="{color}" stop-opacity="0.3"/>'
                     f'<stop offset="1" stop-color="{color}" stop-opacity="0"/></radialGradient>')
     return '\n'.join([rect(x - 4.5, y - 8.5, x + 4.5, y - 5.5, TIN, 0.5), rect(x - 4.5, y + 5.5, x + 4.5, y + 8.5, TIN, 0.5),
                       rect(x - 4.8, y - 6.5, x + 4.8, y + 6.5, '#f7d27a', 1),
-                      circle(x, y, 10, f'url(#{gid})')])
+                      circle(x, y, 7.5, f'url(#{gid})')])
 
 
 # ======================================================================
@@ -493,9 +494,14 @@ TIM_PADS = [355.7] + [387.1 + i * 31.73 for i in range(10)]
 TIM_Y = 32.3
 CN8_X = [716.1 + i * PITCH for i in range(12)]
 CN8_Y = 29.0
-# the grey sockets beside the Nucleo the Morpho pins are bent into (top view)
-FELT_TOP = (349.5, 37.0, 720.5, 66.0)
-FELT_BOTTOM = (349.5, 347.0, 720.5, 376.0)
+# the grey sockets the Morpho pins are bent into (photo coordinates of the
+# Nucleo's layer).  In board-rect.jpg they reach from x 330 to 724.6, 8 units
+# past the outer pins, and lie over the Nucleo's edges; their top faces stand
+# higher than the Nucleo, so the photo shows them shifted away from the
+# camera (top: y 15.4-49.8, bottom: y 345.5-381.2).  Taken back to the
+# Nucleo's height: 28.6 units beyond each edge and 6 over it, on both sides.
+FELT_TOP = (333.5, 22.0, 723.8, 56.6)
+FELT_BOTTOM = (333.5, 346.0, 723.8, 380.6)
 # J1 (DE-9, its flange is 7.7 mm above the board): centre of the flange
 DSUB = (223.5, 38.0)
 # J3 (footprint of an I2C module): centre line
@@ -528,7 +534,7 @@ SECTIONS = [
      (733.4, 481.2), (750.6, 481.2), (762, 469.6), (1008, 469.6)],
     [(634.5, 495.6), (634.5, 655)],
     [(330, 382.7), (344.4, 382.7), (344.4, 464.4)],
-    [(413, 464.4), (413, 355.8), (418, 350.8), (731, 350.8), (761, 380.8), (761, 469.6)],
+    [(413, 464.4), (413, 355.8), (418, 350.8), (727, 350.8), (761, 384.8), (761, 469.6)],
     [(895.1, 190.5), (895.1, 469.6)],          # above y = 300 never seen (under the display), assumed
     [(869.0, -7), (869.0, 53.0), (851.0, 71.0), (738.0, 71.0)],      # Timer frame (bare board)
     [(339.5, -7), (339.5, 69.7)],
@@ -775,8 +781,11 @@ def carrier():
     # J2 (CAN, D-sub footprint not fitted) and the RS232 footprint frame
     for x0, x1 in [(21.8, 56.1), (57.2, 114.6), (115.8, 151.1)]:
         out.append(rect_stroke(x0, 12.5, x1, 64.1, SILK, sw))
-    out.append(polyline([(159.6, 64.7), (278.0, 64.7)], SILK, sw))
-    out.append(polyline([(282.7, 12.4), (289.5, 12.4), (289.5, 58.5)], SILK, sw))
+    out.append(polyline([(159.6, 58.6), (159.6, 64.7), (289.5, 64.7), (289.5, 12.4), (282.7, 12.4)], SILK, sw))
+    for x in (196.0, 254.0):                       # the D-sub's board locks
+        out.append(polyline([(x, 58.6), (x, 64.7)], SILK, sw))
+    # CN8: the edge of its outline beside "Timer" (the rest is under the socket)
+    out.append(polyline([(709.6, 38.0), (837.8, 38.0)], SILK, sw))
     # C9, U6, JP1, JP2
     out.append(rect_stroke(48.4, 83.0, 55.8, 97.0, SILK, 0.8))
     out.append(rect_stroke(68.5, 82.9, 90.1, 96.9, SILK, sw))
@@ -895,8 +904,6 @@ def carrier_hidden():
     out = []
     for ys in MORPHO_SOCKET_Y:
         out.append(socket_2row(MORPHO_SOCKET_X[0], ys, 36))
-        x0, x1 = MORPHO_SOCKET_X[0] - 6.3, MORPHO_SOCKET_X[-1] + 6.3
-        out.append(rect_stroke(x0, ys[0] - 6.3, x1, ys[1] + 6.3, SILK, 0.9))
     for x, y in HIDDEN_HOLES:
         out.append(mount_hole(x, y, 5.6))
     # the three bus buffers (SN74LVC245A, SO-20, pin 1 at the top right), U4 (SO-8)
@@ -1112,7 +1119,7 @@ def nucleo_outline():
     d = (f'M{f(x0 + r)},{f(y0)}H{f(x1 - r)}A{r},{r} 0 0 1 {f(x1)},{f(y0 + r)}V{f(y1 - r)}'
          f'A{r},{r} 0 0 1 {f(x1 - r)},{f(y1)}H{f(x0 + r)}A{r},{r} 0 0 1 {f(x0)},{f(y1 - r)}V{f(y0 + r)}'
          f'A{r},{r} 0 0 1 {f(x0 + r)},{f(y0)}Z')
-    for x, y, rr in NUCLEO_HOLES:
+    for x, y, rr in NUCLEO_HOLES:          # filled black by nucleo()
         d += f'M{f(x - rr)},{f(y)}a{f(rr)},{f(rr)} 0 1 0 {f(2 * rr)},0a{f(rr)},{f(rr)} 0 1 0 {f(-2 * rr)},0Z'
     (sx0, sx1), segs = NUCLEO_SLOTS
     w = (sx1 - sx0) / 2
@@ -1319,6 +1326,8 @@ def nucleo():
     out = []
     # PCB with the slot of the snap-off ST-LINK part at the bottom
     out.append(path(nucleo_outline(), NUCLEO, ' fill-rule="evenodd"'))
+    # the mounting holes look black (the carrier is far below, in shadow)
+    out += [circle(x, y, rr, '#0a0a0b') for x, y, rr in NUCLEO_HOLES]
     out.append(rect(352.5, 88.6, 374.6, 167.3, '#fbfbf9'))          # white label field
     # Morpho pins and GND test points
     for x in MORPHO_X:
@@ -1499,23 +1508,27 @@ def nucleo_top_right():
 
 
 def morpho_pins():
-    """The Morpho pins of the Nucleo, bent outwards into the grey sockets."""
+    """The Morpho pins of the Nucleo, bent outwards into the grey sockets: from
+    the inner row straight under the socket (photo coordinates of the
+    Nucleo's layer, colours of board-rect.jpg)."""
     out = []
-    for (x0, y0, x1, y1), rows in [(FELT_TOP, MORPHO_ROWS[:2]), (FELT_BOTTOM, MORPHO_ROWS[2:])]:
-        top = y1 < 200
-        for xp in MORPHO_X:
-            x, yi = ortho(xp, rows[1] if top else rows[0], M_NUCLEO)        # inner row
-            out.append(line(x, yi, x, y1 if top else y0, '#c99a43', 2.3, cap='butt'))
-            out.append(line(x - 0.35, yi, x - 0.35, y1 if top else y0, '#f0cd7a', 0.8, cap='butt'))
+    for rows, (x0, y0, x1, y1), sgn in [(MORPHO_ROWS[:2], FELT_TOP, -1), (MORPHO_ROWS[2:], FELT_BOTTOM, 1)]:
+        yi = rows[1] if sgn < 0 else rows[0]               # inner row
+        end = y1 - 2.0 if sgn < 0 else y0 + 2.0            # under the socket
+        for x in MORPHO_X:
+            out.append(line(x, yi, x, end, '#9c7a44', 2.8))
+            out.append(line(x, yi, x, end, '#c6a058', 2.2))
+            out.append(line(x - 0.4, yi, x - 0.4, end, '#ecd08e', 0.7))
     return '\n'.join(out)
 
 
 def morpho_sockets():
-    """The grey sockets on the carrier beside the Nucleo."""
+    """The grey sockets over the Nucleo's edges (photo coordinates of the
+    Nucleo's layer)."""
     out = []
     for x0, y0, x1, y1 in (FELT_TOP, FELT_BOTTOM):
-        out.append(rect(x0, y0, x1, y1, FELT, 1.5))
-        out.append(rect_stroke(x0, y0, x1, y1, '#4e4e48', 0.8, 1.5))
+        out.append(rect(x0, y0, x1, y1, FELT, 1.0))
+        out.append(rect_stroke(x0, y0, x1, y1, '#5f6058', 0.7, 1.0))
     return '\n'.join(out)
 
 
@@ -1549,8 +1562,8 @@ def main():
     layers = {
         'carrier': carrier_layer,
         # the grey sockets sit on the Nucleo's bent Morpho pins
-        'nucleo': lambda: [morpho_sockets(), f'<g transform="{layer(M_NUCLEO)}">', nucleo(), '</g>',
-                           nucleo_top_right(), nucleo_caps(), morpho_pins()],
+        'nucleo': lambda: [f'<g transform="{layer(M_NUCLEO)}">', nucleo(), morpho_pins(), morpho_sockets(), '</g>',
+                           nucleo_top_right(), nucleo_caps()],
         'shield': lambda: [f'<g transform="{layer(M_SHIELD)}">', shield(), '</g>', poly(GLASS, '#08090a')],
     }
     for name, make in layers.items():

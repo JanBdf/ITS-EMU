@@ -305,15 +305,19 @@ impl Pcb<'_> {
             let ((t0, c0), (t1, c1)) = (stops[i], stops[i + 1]);
             let u = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
             let m = |a: u8, b: u8| f32::from(a) + (f32::from(b) - f32::from(a)) * u;
-            // interpolated unmultiplied, then premultiplied for the mesh
-            let alpha = m(c0.a(), c1.a()) / 255.0;
-            let px = |a: u8, b: u8| (m(a, b) * alpha) as u8;
-            Color32::from_rgba_premultiplied(
-                px(c0.r(), c1.r()),
-                px(c0.g(), c1.g()),
-                px(c0.b(), c1.b()),
-                (alpha * 255.0) as u8,
-            )
+            // interpolated unmultiplied (Color32 holds premultiplied values),
+            // then premultiplied for the mesh
+            let (mut c0, mut c1) = (c0.to_srgba_unmultiplied(), c1.to_srgba_unmultiplied());
+            // a transparent stop has no colour of its own: fade in its neighbour's
+            if c0[3] == 0 {
+                c0 = [c1[0], c1[1], c1[2], 0];
+            }
+            if c1[3] == 0 {
+                c1 = [c0[0], c0[1], c0[2], 0];
+            }
+            let alpha = m(c0[3], c1[3]) / 255.0;
+            let px = |k: usize| (m(c0[k], c1[k]) * alpha) as u8;
+            Color32::from_rgba_premultiplied(px(0), px(1), px(2), (alpha * 255.0) as u8)
         };
         let mut mesh = Mesh::default();
         mesh.vertices.push(Vertex { pos: self.p(x, y), uv: egui::epaint::WHITE_UV, color: at_radius(0.0) });
@@ -351,12 +355,14 @@ impl Pcb<'_> {
         self.light(
             x,
             y,
-            12.0,
+            8.5,
+            // as photographed: the lens is white-hot, the package around it
+            // and a narrow halo glow in the full colour
             &[
-                (0.0, tint(lerp(color, Color32::WHITE, 0.9), a(1.0))),
-                (0.28, tint(lerp(color, Color32::WHITE, 0.6), a(1.0))),
-                (0.45, tint(lerp(color, Color32::WHITE, 0.15), a(0.8))),
-                (0.7, tint(color, a(0.5))),
+                (0.0, tint(lerp(color, Color32::WHITE, 0.85), a(1.0))),
+                (0.3, tint(lerp(color, Color32::WHITE, 0.6), a(1.0))),
+                (0.6, tint(color, a(1.0))),
+                (0.8, tint(color, a(0.45))),
                 (1.0, tint(color, 0)),
             ],
         );
@@ -887,7 +893,7 @@ fn strip_button(painter: &egui::Painter, c: Pos2, d: f32, color: Color32, down: 
 fn strip_led(painter: &egui::Painter, c: Pos2, d: f32, color: Color32, duty: f32) {
     let b = duty.clamp(0.0, 1.0).powf(1.0 / 2.2);
     if b > 0.01 {
-        painter.circle_filled(c, d * 0.5, color.gamma_multiply(0.3 * b));
+        painter.circle_filled(c, d * 0.5, color.gamma_multiply(0.55 * b));
     }
     painter.circle_filled(c, d * 0.3, lerp(Color32::from_gray(55), color, b));
     if b > 0.01 {
