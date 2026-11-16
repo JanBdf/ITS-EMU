@@ -31,3 +31,6 @@ __pycache__/
 
 # macOS Finder metadata
 .DS_Store
+
+# Agent instructions (local only)
+/CLAUDE.md
