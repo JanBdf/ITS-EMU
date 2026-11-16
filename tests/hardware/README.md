@@ -31,6 +31,7 @@ ITS-Board (Rev 02, NUCLEO-F429ZI, 180 MHz, ART accelerator on), taken
 | `HwCheck-timdma.txt` | `timdma` | TIM2 DMA requests on DMA1: update, CC1, CCR1 from memory, DMAR burst, a request while the stream is off |
 | `HwCheck-flash.txt` | `flash` | erase of sector 23 (128 KB, bank 2) at x32 and x8, programming of words, half words and bytes: core cycles |
 | `HwCheck-rcc.txt` | `rcc` | start-up times of HSI (core on the PLL), the main PLL and HSE in bypass (core on HSI), and RCC_CR with the factory HSICAL |
+| `HwCheck-bounce.txt` | `bounce 180` | edges of S0–S7 (PF0–7) and USER (PC13, bit 8), each pressed by hand 5 times about once a second; per burst the ms since the start, then edge times in 0.1 µs |
 | `probe-ids.txt` | `rd` | debug system: ROM table and CoreSight component IDs, DBGMCU_IDCODE, CPUID and processor feature registers, TPIU and ETM registers (not DWT_CTRL and DBGMCU_CR: a system reset keeps what a debugger set) |
 | `UsbCdcEcho.txt` | (UsbCdcEcho on CN13) | `lsusb -v` of the device and `tools/usb/cdc-echo.py`: echo round trips and throughput through the computer's host controller |
 | `HwCheck-regs.txt` | `wr`/`dump` (first line) | reset values of the registers of timers, SPIs, U(S)ARTs, I2Cs, ADC, DAC, SYSCFG, EXTI |

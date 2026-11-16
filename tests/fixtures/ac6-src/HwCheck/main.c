@@ -44,6 +44,7 @@
  *   timsync         timer chaining delays in timer clocks (gate, trigger, reset)
  *   flash           flash erase and programming times (sector 23, bank 2)
  *   rcc             start-up times of HSI, HSE (bypass) and the main PLL
+ *   bounce [S]      edges of S0-S7 and USER for S seconds (contact bounce)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -2221,6 +2222,45 @@ static void cmd_timsync(void) {
     TIM2->CR2 = 0;
 }
 
+/* Contact bounce of S0-S7 (PF0-PF7) and the USER button (PC13, bit 8) for
+ * the given seconds (decimal, default 30): each burst of edges, ended by
+ * 20 ms without a change, as "B <ms> <levels before> <edges>: <t>:<levels> ..."
+ * with ms since the start and t in 0.1 us after the first edge. */
+static uint32_t bounce_levels(void) {
+    return (GPIOF->IDR & 0xFF) | ((GPIOC->IDR >> 5) & 0x100);
+}
+
+static void cmd_bounce(const char *arg) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN | RCC_AHB1ENR_GPIOFEN;
+    __DSB();
+    uint32_t seconds = arg ? strtoul(arg, NULL, 10) : 30;
+    static uint32_t at[200], lv[200];
+    uint32_t start = HAL_GetTick(), last = bounce_levels(), before = last, n = 0, t_last = 0, ms = 0;
+    printf("B start %03lx\n", (unsigned long)last);
+    while (HAL_GetTick() - start < seconds * 1000) {
+        uint32_t v = bounce_levels(), t = DWT->CYCCNT;
+        if (v != last) {
+            if (n == 0) {
+                ms = HAL_GetTick() - start;
+            }
+            if (n < 200) {
+                at[n] = t, lv[n] = v;
+            }
+            n++, last = v, t_last = t;
+        } else if (n && t - t_last > 20 * 180000u) {
+            printf("B %lu %03lx %lu:", (unsigned long)ms, (unsigned long)before, (unsigned long)n);
+            for (uint32_t i = 0; i < n && i < 200; i++) {
+                printf(" %lu:%03lx", (unsigned long)((at[i] - at[0]) / 18), (unsigned long)lv[i]);
+            }
+            printf("\n");
+            before = last, n = 0;
+        }
+    }
+    printf("B end\n");
+}
+
 /* Start-up times of the oscillators and the main PLL (DWT cycles, printed
  * in ns): HSI while the core runs from the PLL (HSE in bypass, 8 MHz from
  * the ST-LINK), PLL lock and HSE start-up while it runs from HSI. The
@@ -2699,6 +2739,8 @@ static void execute(char *line) {
         cmd_irqlat();
     } else if (!strcmp(line, "dacwave")) {
         cmd_dacwave();
+    } else if (!strcmp(line, "bounce")) {
+        cmd_bounce(arg);
     } else if (!strcmp(line, "rcc")) {
         cmd_rcc();
     } else if (!strcmp(line, "flash")) {

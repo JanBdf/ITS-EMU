@@ -60,19 +60,45 @@ pub const TRANSITIONS_PER_DETENT: i32 = 4;
 /// Time between two transitions while the knob turns (`rotate`).
 const TRANSITION_NS: u64 = 1_000_000;
 
+/// How a contact bounces: with a chance of `per_mille`, 1 to `max_glitches`
+/// times; each time the new level holds for `hold_ns`, then the old level
+/// returns for `glitch_ns` (both ranges, uniform).
+pub struct Bounce {
+    pub per_mille: u32,
+    pub max_glitches: u32,
+    pub hold_ns: (u64, u64),
+    pub glitch_ns: (u64, u64),
+}
+
+/// S0–S7, measured on the board (HwCheck `bounce`, about 310 presses and
+/// releases in two recordings): 2 bounced, once each, with the old level
+/// back for 2 and 130 µs.
+pub const TACT_SWITCH: Bounce =
+    Bounce { per_mille: 7, max_glitches: 1, hold_ns: (500, 60_000), glitch_ns: (2_000, 130_000) };
+/// Pressing the Nucleo's USER button, measured: 1 of 26 bounced.
+pub const USER_PRESS: Bounce =
+    Bounce { per_mille: 40, max_glitches: 1, hold_ns: (500, 45_000), glitch_ns: (25_000, 600_000) };
+/// Releasing it, measured: 7 of 26 bounced, 1 to 4 times within at most
+/// 1.2 ms, the pressed level back for 28 µs to 1.2 ms.
+pub const USER_RELEASE: Bounce =
+    Bounce { per_mille: 270, max_glitches: 4, hold_ns: (500, 45_000), glitch_ns: (25_000, 600_000) };
+/// Encoder contacts: not measured (no encoder on the board).
+pub const ENCODER: Bounce =
+    Bounce { per_mille: 670, max_glitches: 2, hold_ns: (30_000, 280_000), glitch_ns: (5_000, 85_000) };
+
 /// The mechanical contacts of the board: tact switches S0–S7, the Nucleo's
 /// USER button and the encoder. With `bounce` on, a new level reaches the
-/// pin after a burst of short glitches, as real contacts do (typical tact
-/// switch: a few bounces within 0.1–2 ms; not measured on this board), so
-/// that firmware without debouncing misbehaves here as it does on the board.
-/// The sequence is deterministic (own xorshift generator).
+/// pin after a burst of short glitches, as real contacts do (see
+/// [`Bounce`]), so that firmware without debouncing misbehaves here as it
+/// does on the board. The sequence is deterministic (own xorshift generator).
 pub struct Contacts {
     gpio: SharedGpio,
     pub bounce: bool,
-    /// Levels requested from outside the machine's time, not yet scheduled.
-    requests: Vec<(usize, u32, bool)>,
+    /// Levels requested from outside the machine's time, not yet scheduled
+    /// (`None`: open).
+    requests: Vec<(usize, u32, Option<bool>, &'static Bounce)>,
     /// Scheduled edges: (cycle, port, pin, level), unsorted.
-    edges: Vec<(u64, usize, u32, bool)>,
+    edges: Vec<(u64, usize, u32, Option<bool>)>,
     rng: u32,
 }
 
@@ -88,37 +114,47 @@ impl Contacts {
         self.rng
     }
 
-    /// Drives the pin to `level` (bouncing if that is on); from outside the
-    /// emulation, so the bounce starts at the next sweep of the devices.
-    pub fn set(&mut self, port: usize, pin: u32, level: bool) {
+    /// A random value in `lo..=hi`.
+    fn within(&mut self, (lo, hi): (u64, u64)) -> u64 {
+        lo + u64::from(self.next()) % (hi - lo + 1)
+    }
+
+    /// Drives the pin to `level`, or leaves it open (`None`), bouncing like
+    /// `how` if bounce is on; from outside the emulation, so the bounce
+    /// starts at the next sweep of the devices.
+    pub fn set(&mut self, port: usize, pin: u32, level: Option<bool>, how: &'static Bounce) {
+        self.requests.retain(|r| (r.0, r.1) != (port, pin));
         if !self.bounce {
             self.edges.retain(|e| (e.1, e.2) != (port, pin));
-            self.gpio.borrow_mut().drive(port, pin, Some(level));
+            self.gpio.borrow_mut().drive(port, pin, level);
             return;
         }
-        self.requests.push((port, pin, level));
+        self.requests.push((port, pin, level, how));
     }
 
-    /// Leaves the pin open (nothing drives it), cancelling a pending bounce.
-    pub fn open(&mut self, port: usize, pin: u32) {
-        self.edges.retain(|e| (e.1, e.2) != (port, pin));
-        self.requests.retain(|r| (r.0, r.1) != (port, pin));
-        self.gpio.borrow_mut().drive(port, pin, None);
-    }
-
-    /// Schedules the edges of a transition to `level` at cycle `at`
-    /// (`ns_to_cycles` converts durations). `glitches`: how many bounces at most.
-    pub fn schedule(&mut self, port: usize, pin: u32, level: bool, at: u64, glitches: u32, ns: impl Fn(u64) -> u64) {
+    /// Schedules the edges of a transition from `old` to `level` at cycle
+    /// `at` (`ns` converts durations to cycles).
+    #[allow(clippy::too_many_arguments)]
+    pub fn schedule(
+        &mut self,
+        port: usize,
+        pin: u32,
+        old: Option<bool>,
+        level: Option<bool>,
+        at: u64,
+        how: &Bounce,
+        ns: impl Fn(u64) -> u64,
+    ) {
         // a newer transition on the pin replaces what was still to come
         self.edges.retain(|e| (e.1, e.2) != (port, pin));
         let mut t = at;
         self.edges.push((t, port, pin, level));
-        let n = if glitches == 0 { 0 } else { self.next() % (glitches + 1) };
-        for i in 0..n {
-            // the contacts separate again for a short moment, later ones further apart
-            t += ns(30_000 + u64::from(self.next() % 250_000) * u64::from(i + 1));
-            self.edges.push((t, port, pin, !level));
-            t += ns(5_000 + u64::from(self.next() % 80_000));
+        let n = if self.next() % 1000 < how.per_mille { 1 + self.next() % how.max_glitches } else { 0 };
+        for _ in 0..n {
+            // the contacts separate again for a short moment
+            t += ns(self.within(how.hold_ns));
+            self.edges.push((t, port, pin, old));
+            t += ns(self.within(how.glitch_ns));
             self.edges.push((t, port, pin, level));
         }
     }
@@ -127,8 +163,9 @@ impl Contacts {
 impl PinDevice for Contacts {
     fn update(&mut self, ctx: &mut DeviceCtx) {
         let now = ctx.now();
-        for (port, pin, level) in std::mem::take(&mut self.requests) {
-            self.schedule(port, pin, level, now, 3, |n| ctx.clock.ns_to_cycles(n));
+        for (port, pin, level, how) in std::mem::take(&mut self.requests) {
+            let old = self.gpio.borrow().ports[port].driven(pin);
+            self.schedule(port, pin, old, level, now, how, |n| ctx.clock.ns_to_cycles(n));
         }
         // in time order, so that a later edge of a burst wins
         self.edges.sort_unstable_by_key(|e| e.0);
@@ -139,7 +176,7 @@ impl PinDevice for Contacts {
             if at > now {
                 break;
             }
-            g.drive_at(port, pin, Some(level), at);
+            g.drive_at(port, pin, level, at);
             i += 1;
         }
         self.edges.drain(..i);
@@ -229,7 +266,7 @@ impl RotaryEncoder {
                 let mut c = c.borrow_mut();
                 for ((p, pin), old, new) in [(self.a, a0, a1), (self.b, b0, b1)] {
                     if old != new {
-                        c.schedule(p, pin, new, cycle, 2, |n| ctx.clock.ns_to_cycles(n));
+                        c.schedule(p, pin, Some(old), Some(new), cycle, &ENCODER, |n| ctx.clock.ns_to_cycles(n));
                     }
                 }
             }
@@ -643,6 +680,24 @@ impl PinDevice for OneWireBus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contacts_bounce_as_often_and_as_long_as_measured() {
+        let mut c = Contacts::new(SharedGpio::default());
+        // (profile, share of bouncing transitions in per mille, longest burst in µs)
+        for (how, per_mille, max_us) in [(&TACT_SWITCH, 7, 200), (&USER_PRESS, 40, 700), (&USER_RELEASE, 270, 2_700)] {
+            let (mut bounced, mut longest) = (0u32, 0);
+            for i in 0..10_000 {
+                c.schedule(0, 0, Some(i % 2 == 0), Some(i % 2 != 0), 0, how, |ns| ns);
+                if c.edges.len() > 1 {
+                    bounced += 1;
+                    longest = longest.max(c.edges.iter().map(|e| e.0).max().unwrap());
+                }
+            }
+            assert!(bounced.abs_diff(per_mille * 10) < per_mille * 3, "{bounced} of 10000 bounced");
+            assert!(longest <= max_us * 1000, "{longest} ns");
+        }
+    }
 
     #[test]
     fn crc8_of_the_power_on_scratchpad() {

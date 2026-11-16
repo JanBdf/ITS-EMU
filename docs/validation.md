@@ -31,8 +31,9 @@ python3 tools/hw/boardcmp.py 0 0 300 160 /tmp/cmp.png
 
 Modelled from typical values rather than measured on this board: the
 lock time of PLLI2S and PLLSAI (taken from the main PLL's, which is
-measured like HSI and HSE in bypass), the contact bounce of buttons and
-encoder (a few bounces within 0.1–2 ms, a deterministic sequence), the
+measured like HSI and HSE in bypass), the contact bounce of an encoder
+(the board has none; S0–S7 and USER bounce as recorded in
+`tests/hardware/HwCheck-bounce.txt`), the
 ADC's noise on voltages applied from outside (±2 counts; the DAC output and
 the internal channels are measured) and the touch controller's jitter (±2
 counts, more on the pressure channels). Known deviations from the chip are listed in

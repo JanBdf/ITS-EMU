@@ -79,6 +79,11 @@ pub struct PortState {
 }
 
 impl PortState {
+    /// Level an outside driver puts on `pin` (`None`: not driven).
+    pub fn driven(&self, pin: u32) -> Option<bool> {
+        (self.ext_mask >> pin & 1 != 0).then(|| self.ext_level >> pin & 1 != 0)
+    }
+
     fn reset_for(port: usize) -> Self {
         let (moder, ospeedr, pupdr) = match port {
             0 => (0xA800_0000, 0x0C00_0000, 0x6400_0000),
