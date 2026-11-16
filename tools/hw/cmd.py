@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Sends HwCheck commands to the real board over the ST-LINK virtual COM port
-and prints the answers.  Usage: cmd.py [--port PORT] [--wait-ready] CMD...
+and prints the answers.  Usage: cmd.py [--port PORT] [--timeout S] [--wait-ready] CMD...
 The default port is the virtual COM port of the real board's ST-LINK
 (tools/hw/board-serial.sh), not that of an emulator exported over USB/IP.
-Each command is sent as one line; the script waits for "ok <cmd>" or "? <cmd>".
+Each command is sent as one line; the script waits for "ok <cmd>" or "? <cmd>"
+(at most S seconds, default 10, between two lines).
 "sleep SECONDS" waits between commands."""
 import os
 import select
@@ -15,8 +16,12 @@ import time
 port = None
 args = sys.argv[1:]
 wait_ready = False
+timeout = 10.0
 while args and args[0].startswith("--"):
-    if args[0] == "--port":
+    if args[0] == "--timeout":
+        timeout = float(args[1])
+        args = args[2:]
+    elif args[0] == "--port":
         port = args[1]
         args = args[2:]
     elif args[0] == "--wait-ready":
@@ -73,7 +78,7 @@ for cmd in args:
     os.write(fd, (cmd + "\n").encode())
     name = cmd.split()[0]
     while True:
-        line = read_line(10)
+        line = read_line(timeout)
         if line is None:
             sys.exit(f"timeout waiting for 'ok {name}'")
         print(line)

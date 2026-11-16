@@ -28,11 +28,13 @@ cargo run --release -p its-emu -- path/to/Program.axf --seconds 10 \
   copy or save its text.
 - Ctrl + mouse wheel zooms the board at the pointer; the middle button or
   Shift + drag pans it; Home fits it to the window again.
-- The buttons S0–S7, USER and the contacts of a rotary encoder bounce for a
-  moment when they change, as on the real board: a program that does not
-  debounce sees several edges per press (*Emulation → Contact bounce of the
-  buttons* switches it off). Speed, theme (*View → Theme*), window size and
-  position and the console's options are remembered in
+- The buttons S0–S7, USER and the contacts of a rotary encoder bounce now
+  and then when they change, as measured on the real board (S0–S7 in about
+  1 % of the presses and releases; USER in about 4 % of the presses and
+  27 % of the releases, up to 4 times within 1.2 ms): a program that does
+  not debounce sometimes sees several edges per press (*Emulation → Contact
+  bounce of the buttons* switches it off). Speed, theme (*View → Theme*),
+  window size and position and the console's options are remembered in
   `~/.config/its-emu/gui.conf` (the platform's config directory elsewhere).
 - *Devices* (Ctrl+E) connects devices on the header pins while the board
   runs: a [Pico](#raspberry-pi-pico), a rotary encoder (buttons for 1 or 10

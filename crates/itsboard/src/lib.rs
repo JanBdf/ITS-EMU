@@ -355,7 +355,7 @@ impl ItsBoard {
         assert!(n < 8, "the ITS-Board has buttons S0..S7");
         // Pressed buttons pull the pin to GND; released ones are pulled up on
         // the carrier board (high even with the MCU's pull-down enabled).
-        self.contacts.borrow_mut().set(port('F'), n, !pressed);
+        self.contacts.borrow_mut().set(port('F'), n, Some(!pressed), &devices::TACT_SWITCH);
     }
 
     /// Drives one of the INT0–5 inputs (PG0–5); `None` leaves it open.
@@ -379,11 +379,8 @@ impl ItsBoard {
     pub fn set_user_button(&self, pressed: bool) {
         // Released: only a weak pull-down on the Nucleo (the MCU's pull-up wins).
         let (p, pin) = (port(USER_BUTTON.0), USER_BUTTON.1);
-        if pressed {
-            self.contacts.borrow_mut().set(p, pin, true);
-        } else {
-            self.contacts.borrow_mut().open(p, pin);
-        }
+        let (level, how) = if pressed { (Some(true), &devices::USER_PRESS) } else { (None, &devices::USER_RELEASE) };
+        self.contacts.borrow_mut().set(p, pin, level, how);
     }
 
     /// OUT15..OUT0 as a bit mask (bit n = OUTn lit).

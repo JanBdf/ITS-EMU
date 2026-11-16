@@ -469,8 +469,9 @@ impl App {
                 if ui
                     .checkbox(&mut bounce, "Contact bounce of the buttons")
                     .on_hover_text(
-                        "The buttons S0–S7, USER and the encoder contacts bounce for a moment when pressed \
-                         or released, as on the real board: a program without debouncing sees several edges",
+                        "The buttons S0–S7, USER and the encoder contacts bounce now and then when pressed \
+                         or released, as measured on the real board (S0–S7 rarely, USER on about one release \
+                         in four): a program without debouncing sometimes sees several edges",
                     )
                     .changed()
                 {
