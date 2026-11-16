@@ -132,6 +132,10 @@ struct Args {
 
 /// Virtual time slice while a debugger is attached (Ctrl-C latency).
 const GDB_SLICE_NS: u64 = 1_000_000;
+/// Virtual time slice while serving USB: the host's transfers are taken
+/// and answered between slices (a round trip of the echo of CN13 takes
+/// 0.1–0.2 ms on the board).
+const USB_SLICE_NS: u64 = 200_000;
 
 #[derive(Debug, Clone)]
 enum Input {
@@ -366,29 +370,8 @@ fn main() -> Result<()> {
             }
             None => Execution::Free,
         };
-        if let Some((probe, pico_usb, otg)) = &mut usb {
-            probe.poll(&mut machine);
-            let addr = probe.local_addr();
-            if let Some(busid) = otg.poll(probe.server()) {
-                println!(
-                    "USB OTG FS (CN13): device exported as {busid}; attach it with: {}",
-                    stlink::attach_command(addr, &busid)
-                );
-                if args.usb_attach {
-                    let _ = stlink::spawn_attach(addr, &busid, "OTG FS (CN13)");
-                }
-            }
-            for (n, device) in pico_usb.iter_mut().enumerate() {
-                if let Some(busid) = device.poll(probe.server()) {
-                    println!(
-                        "Pico {n}: USB device exported as {busid}; attach it with: {}",
-                        stlink::attach_command(addr, &busid)
-                    );
-                    if args.usb_attach {
-                        let _ = stlink::spawn_attach(addr, &busid, "Pico");
-                    }
-                }
-            }
+        if let Some(usb) = &mut usb {
+            poll_usb(usb, &mut machine, args.usb_attach);
         }
         // Halted by the debug probe, held in reset, or locked up until the probe does something.
         let held = machine.is_halted() || (usb.is_some() && machine.is_locked_up());
@@ -410,8 +393,11 @@ fn main() -> Result<()> {
         halted_since = None;
         let clock = machine.clock();
         let mut slice_ns = if realtime { REALTIME_SLICE_NS } else { limit_ns - now_ns }.min(limit_ns - now_ns);
-        if gdb.is_some() || usb.is_some() {
+        if gdb.is_some() {
             slice_ns = slice_ns.min(GDB_SLICE_NS);
+        }
+        if usb.is_some() {
+            slice_ns = slice_ns.min(USB_SLICE_NS);
         }
         if let Some(ev) = inputs.peek() {
             slice_ns = slice_ns.min(ev.at_ns - now_ns);
@@ -419,6 +405,10 @@ fn main() -> Result<()> {
         let budget = clock.ns_to_cycles(slice_ns).max(1);
         let result = machine.run(budget);
         forward_serial(&mcu, stdin_rx.as_ref());
+        if let Some(usb) = &mut usb {
+            // transfers finished in the slice go to the host before the pacing wait
+            poll_usb(usb, &mut machine, args.usb_attach);
+        }
         if execution == Execution::Running {
             // The debugger decides what happens after a stop.
             gdb.as_mut().unwrap().report_stop(&mut machine, &result);
@@ -490,6 +480,35 @@ fn main() -> Result<()> {
 }
 
 /// One line of JSON with the result of the run (for scripts and autograders).
+type UsbDevices = (stlink::UsbProbe, Vec<itsboard::pico_usb::PicoUsbDevice>, stm32f429::otg_fs::OtgUsbDevice);
+
+/// Serves the USB host: the ST-LINK's commands, the devices of CN13 and the
+/// Picos (exported once their firmware has connected; `attach` plugs them in).
+fn poll_usb((probe, pico_usb, otg): &mut UsbDevices, machine: &mut Machine, attach: bool) {
+    probe.poll(machine);
+    let addr = probe.local_addr();
+    if let Some(busid) = otg.poll(probe.server()) {
+        println!(
+            "USB OTG FS (CN13): device exported as {busid}; attach it with: {}",
+            stlink::attach_command(addr, &busid)
+        );
+        if attach {
+            let _ = stlink::spawn_attach(addr, &busid, "OTG FS (CN13)");
+        }
+    }
+    for (n, device) in pico_usb.iter_mut().enumerate() {
+        if let Some(busid) = device.poll(probe.server()) {
+            println!(
+                "Pico {n}: USB device exported as {busid}; attach it with: {}",
+                stlink::attach_command(addr, &busid)
+            );
+            if attach {
+                let _ = stlink::spawn_attach(addr, &busid, "Pico");
+            }
+        }
+    }
+}
+
 fn json_summary(
     machine: &Machine,
     image: &ElfImage,

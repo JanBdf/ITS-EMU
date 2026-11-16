@@ -40,6 +40,16 @@ pub fn serial_needs_restart() -> bool {
     !Path::new("/sys/bus/usb/drivers/cdc_acm").exists() && modules_gone()
 }
 
+/// The packaged helper is installed and can attach `busid`: helpers of
+/// packages before the CN13 and Pico exports attach bus id 1-1 whatever they
+/// are given.
+fn helper_takes(busid: &str) -> bool {
+    match std::fs::read_to_string(ATTACH_HELPER) {
+        Ok(script) => busid == "1-1" || script.contains("busid"),
+        Err(_) => false,
+    }
+}
+
 /// Plugs device `busid` of the server on `addr` into this Linux host, in
 /// the background: with the packaged helper through `pkexec` if it is
 /// installed (local address), otherwise with `sudo -n usbip attach`. Needs
@@ -48,7 +58,7 @@ pub fn serial_needs_restart() -> bool {
 pub fn spawn_attach(addr: SocketAddr, busid: &str, what: &str) -> Receiver<Result<(), String>> {
     let (tx, rx) = channel();
     let local = addr.ip().is_loopback() || addr.ip().is_unspecified();
-    let argv: Vec<String> = if local && Path::new(ATTACH_HELPER).exists() {
+    let argv: Vec<String> = if local && helper_takes(busid) {
         vec!["pkexec".into(), ATTACH_HELPER.into(), addr.port().to_string(), busid.to_owned()]
     } else {
         let cmd = attach_command(addr, busid).replacen("sudo ", "sudo -n ", 1);

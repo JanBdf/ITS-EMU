@@ -278,6 +278,10 @@ const PORT_LEFT_TO_PYOCD: &str = "port left to pyOCD (ST-LINK in use)";
 
 /// Virtual time executed between two looks at the command queue / clock.
 const SLICE: Duration = Duration::from_millis(4);
+/// The same while the USB host is served: its transfers are taken and
+/// answered between slices (a round trip of the echo of CN13 takes 0.1–0.2 ms
+/// on the board).
+const USB_SLICE: Duration = Duration::from_micros(200);
 /// Minimum interval between snapshot updates (UI refresh).
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 /// Interval of repaints for the virtual time alone, when nothing else changed.
@@ -1114,8 +1118,14 @@ impl Worker {
 
     /// Runs one slice and keeps virtual time in step with the wall clock.
     fn step(&mut self) {
+        let slice = if self.usb.is_some() { USB_SLICE } else { SLICE };
         let Some(sim) = &mut self.sim else { return };
-        let stop = sim.run_for_ns(SLICE.as_nanos() as u64);
+        let stop = sim.run_for_ns(slice.as_nanos() as u64);
+        if self.usb.is_some() {
+            // transfers finished in the slice go to the host before the pacing wait
+            self.poll_usb();
+        }
+        let Some(sim) = &mut self.sim else { return };
         if self.execution == Execution::Running {
             // The debugger decides what happens after a stop.
             if let Some(gdb) = &mut self.gdb {
