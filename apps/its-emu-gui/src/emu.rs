@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use emu_core::gdb::{Execution, GdbServer};
 use emu_core::{ElfImage, StopReason};
 use itsboard::pico::PicoPlugin;
+use itsboard::pico_usb::PicoUsbDevice;
 use itsboard::sim::DEFAULT_FONTS;
 use itsboard::spec::DeviceSpec;
 use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH, Simulator};
@@ -93,6 +94,8 @@ pub enum DeviceState {
     /// A Pico runs; host programs open its USB serial port here.
     Running {
         port: Option<PathBuf>,
+        /// Its USB device on the computer's USB: bus id, attached.
+        usb: Option<(String, bool)>,
         /// What the firmware uses that is not emulated.
         notices: Vec<String>,
     },
@@ -350,6 +353,8 @@ struct Device {
     board_index: Option<usize>,
     celsius: f32,
     pico: Option<PicoPlugin>,
+    /// The Pico's USB device while the USB/IP server runs.
+    pico_usb: Option<PicoUsbDevice>,
     /// A Pico being started (on a thread of its own: the boot ROM may be downloaded).
     starting: Option<Receiver<Result<PicoPlugin, String>>>,
     error: Option<String>,
@@ -358,7 +363,7 @@ struct Device {
 }
 
 impl Device {
-    fn state(&self, board: Option<&itsboard::ItsBoard>) -> DeviceState {
+    fn state(&self, board: Option<&itsboard::ItsBoard>, usb: Option<&stlink::UsbProbe>) -> DeviceState {
         if let Some(e) = self.error.clone().or_else(|| self.pico.as_ref().and_then(PicoPlugin::failure)) {
             return DeviceState::Failed(e);
         }
@@ -375,7 +380,14 @@ impl Device {
                 rom: board.zip(self.board_index).and_then(|(b, n)| b.ds18b20_rom(n)),
             },
             DeviceSpec::Pico(_) => match &self.pico {
-                Some(p) => DeviceState::Running { port: p.serial_port().map(PathBuf::from), notices: p.notices() },
+                Some(p) => DeviceState::Running {
+                    port: p.serial_port().map(PathBuf::from),
+                    usb: self.pico_usb.as_ref().and_then(PicoUsbDevice::busid).map(|busid| {
+                        let attached = usb.is_some_and(|u| u.device_attached(busid));
+                        (busid.to_owned(), attached)
+                    }),
+                    notices: p.notices(),
+                },
                 None => DeviceState::Starting,
             },
         }
@@ -463,6 +475,9 @@ impl Worker {
     /// Plugs the ST-LINK in (starts the USB/IP server, attaches it) or unplugs it.
     fn set_usb(&mut self, on: bool) {
         if !on {
+            for d in &mut self.devices {
+                d.pico_usb = None;
+            }
             if self.usb.take().is_some() {
                 log::info!("ST-LINK unplugged");
             }
@@ -483,11 +498,14 @@ impl Worker {
             Ok(probe) => {
                 log::info!("ST-LINK on USB/IP {}; attach with {}", probe.local_addr(), probe.attach_command());
                 if self.usb_config.attach {
-                    self.attach_result = Some(stlink::spawn_attach(probe.local_addr()));
+                    self.attach_result = Some(probe.spawn_attach());
                 }
                 self.usb = Some(probe);
                 self.usb_server_error = None;
                 self.adopt_sim();
+                for d in &mut self.devices {
+                    d.pico_usb = d.pico.as_ref().map(|p| p.usb_device(self.wake.clone()));
+                }
             }
             Err(e) => {
                 log::warn!("cannot start the USB/IP server on {}: {e}", self.usb_config.addr);
@@ -569,6 +587,7 @@ impl Worker {
             board_index: None,
             celsius: DEFAULT_CELSIUS,
             pico: None,
+            pico_usb: None,
             starting: None,
             error: None,
             net_bound: Vec::new(),
@@ -653,7 +672,12 @@ impl Worker {
                 Ok(result) => {
                     d.starting = None;
                     match result {
-                        Ok(pico) => d.pico = Some(pico),
+                        Ok(pico) => {
+                            if self.usb.is_some() {
+                                d.pico_usb = Some(pico.usb_device(self.wake.clone()));
+                            }
+                            d.pico = Some(pico);
+                        }
                         Err(e) => d.error = Some(e),
                     }
                     started = true;
@@ -675,12 +699,17 @@ impl Worker {
         match cmd {
             Command::AddDevice(spec) => self.add_device(spec),
             Command::RemoveDevice(id) => {
+                if let Some(d) = self.device(id) {
+                    let usb = d.pico_usb.take();
+                    self.unplug_pico(usb);
+                }
                 self.devices.retain(|d| d.id != id);
                 self.wire_devices();
             }
             Command::RestartDevice(id) => {
                 let Some(i) = self.devices.iter().position(|d| d.id == id) else { return };
                 let mut d = self.devices.remove(i);
+                self.unplug_pico(d.pico_usb.take());
                 // stopped before its successor starts (the pins are free again)
                 d.pico = None;
                 self.wire_devices();
@@ -883,6 +912,36 @@ impl Worker {
         self.publish(true);
     }
 
+    /// Withdraws a Pico's USB device from the computer.
+    fn unplug_pico(&mut self, device: Option<PicoUsbDevice>) {
+        if let (Some(mut device), Some(usb)) = (device, &mut self.usb) {
+            device.unplug(usb.server());
+        }
+    }
+
+    /// Lets the USB host talk to the Picos' USB devices, plugs them in when
+    /// their firmware has connected.
+    fn poll_pico_usb(&mut self) {
+        let Some(usb) = &mut self.usb else { return };
+        let addr = usb.local_addr();
+        let mut changed = false;
+        for d in &mut self.devices {
+            let Some(device) = &mut d.pico_usb else { continue };
+            let attached = device.busid().is_some_and(|b| usb.server().is_attached(b));
+            if let Some(busid) = device.poll(usb.server()) {
+                log::info!("Pico ({}): USB device on {}", d.spec, stlink::attach_command(addr, &busid));
+                if self.usb_config.attach {
+                    let _ = stlink::spawn_attach(addr, &busid, "Pico");
+                }
+                changed = true;
+            }
+            changed |= attached != device.busid().is_some_and(|b| usb.server().is_attached(b));
+        }
+        if changed {
+            self.publish(true);
+        }
+    }
+
     /// Lets the USB host talk to the probe and follows the core's debug state.
     fn poll_usb(&mut self) {
         if let Some(rx) = &self.attach_result
@@ -892,6 +951,7 @@ impl Worker {
             self.attach_result = None;
             self.publish(true);
         }
+        self.poll_pico_usb();
         let (Some(usb), Some(sim)) = (&mut self.usb, &mut self.sim) else { return };
         let progress = usb.poll(&mut sim.machine);
         let mut changed = progress;
@@ -1114,7 +1174,11 @@ impl Worker {
         changed |= set(&mut snap.gdb_attached, self.gdb.as_ref().is_some_and(GdbServer::has_controller));
         changed |= set(&mut snap.usb, self.usb_status());
         let board = self.sim.as_ref().map(|s| &s.board);
-        let devices = self.devices.iter().map(|d| DeviceView { id: d.id, spec: d.spec.clone(), state: d.state(board) });
+        let devices = self.devices.iter().map(|d| DeviceView {
+            id: d.id,
+            spec: d.spec.clone(),
+            state: d.state(board, self.usb.as_ref()),
+        });
         changed |= set(&mut snap.devices, devices.collect());
         for d in &self.devices {
             if let Some(out) = d.pico.as_ref().map(PicoPlugin::take_output).filter(|o| !o.is_empty()) {

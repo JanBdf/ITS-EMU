@@ -72,7 +72,8 @@ With the [Arch package](development.md#arch-linux-package), the GUI plugs the ST
 by itself. The toolbar switch **USB ST-LINK** (on by default, remembered in
 `~/.config/its-emu/gui.conf`) and the status bar show its state; quitting or
 switching off unplugs it. After a kernel update, reboot first: pacman removes
-the running kernel's modules, so vhci-hcd cannot load until then. The
+the running kernel's modules, so vhci-hcd (if not loaded yet) and cdc_acm,
+which gives the serial ports `/dev/ttyACM*`, cannot load until then. The
 emulator's own GDB server yields port 3333 to pyOCD while pyOCD debugs and
 takes it back afterwards, so both debug configurations work side by side.
 
@@ -87,7 +88,10 @@ its-emu Program.axf --usb --usb-attach
 sudo usbip attach -r 127.0.0.1 -b 1-1    # by hand (its-emu-gui --no-usb-attach, its-emu --usb)
 ```
 
-`its-emu-gui --no-usb` / `--usb[=ADDR]` override the switch for one run. The
+`its-emu-gui --no-usb` / `--usb[=ADDR]` override the switch for one run.
+The same server exports the USB device of each [Pico](usage.md#raspberry-pi-pico)
+as `1-2`, `1-3`, ... (`its-emu --usb --usb-attach` and the GUI plug those in
+as well; by hand: `sudo usbip attach -r 127.0.0.1 -b 1-2`). The
 udev rules pyOCD/OpenOCD install for the real probe (e.g. `60-openocd.rules`)
 cover the emulated one. Other machines can attach it with `--usb
 0.0.0.0:3240` and `usbip attach -r HOST -b 1-1` (usbip-win2 on Windows,

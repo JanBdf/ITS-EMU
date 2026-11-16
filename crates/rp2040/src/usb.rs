@@ -7,6 +7,11 @@
 //! Transfers complete without bus timing: the host looks at the buffer
 //! control registers in DPRAM when the firmware arms a buffer and
 //! periodically while it has data to send.
+//!
+//! A host on the computer (USB/IP) can take over once the built-in host has
+//! enumerated the device ([`SerialPipe::remote`]): its transfers
+//! ([`SerialPipe::requests`]) are then played into the endpoint buffers
+//! as they are, and the built-in serial pump pauses.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -31,7 +36,8 @@ const SIE_BUS_RESET: u32 = 1 << 19;
 /// SIE_STATUS bits that writes of 1 clear.
 const SIE_WC: u32 = 0xFF0E_0810 | SIE_SETUP_REC | SIE_BUS_RESET;
 
-/// Serial data between the device's CDC interface and the computer.
+/// Serial data between the device's CDC interface and the computer, and
+/// the transfers of a host on the computer that drives the device itself.
 #[derive(Default, Debug)]
 pub struct SerialPipe {
     /// Bytes from the computer, not yet taken by the device.
@@ -40,6 +46,31 @@ pub struct SerialPipe {
     pub from_device: Vec<u8>,
     /// The CDC interface is configured and DTR is set.
     pub open: bool,
+    /// Device and configuration descriptor, once the built-in host has
+    /// enumerated the device (`None` again when it disconnects).
+    pub descriptors: Option<(Vec<u8>, Vec<u8>)>,
+    /// A host on the computer drives the device: [`Self::requests`] are
+    /// carried out and the serial pump above pauses.
+    pub remote: bool,
+    /// Transfers of the computer's host, in order per endpoint.
+    pub requests: VecDeque<Transfer>,
+    /// Finished transfers: id and result (`None`: stalled).
+    pub done: Vec<(u64, Option<Vec<u8>>)>,
+}
+
+/// A transfer of a host on the computer.
+#[derive(Debug, Clone)]
+pub struct Transfer {
+    pub id: u64,
+    /// Endpoint number (without direction bit).
+    pub ep: u8,
+    pub dir_in: bool,
+    /// The SETUP packet (endpoint 0).
+    pub setup: [u8; 8],
+    /// OUT data.
+    pub data: Vec<u8>,
+    /// IN: at most this many bytes.
+    pub max_len: usize,
 }
 
 pub type SharedSerial = Rc<RefCell<SerialPipe>>;
@@ -53,6 +84,8 @@ enum Step {
     SetConfiguration,
     SetLineCoding,
     SetControlLineState,
+    /// A control transfer of the computer's host.
+    Remote(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +148,11 @@ pub struct UsbCore {
     /// Cycle of the last update (for scheduling from `&self`).
     last_now: u64,
     pipe: SharedSerial,
+    /// Highest id of the computer's transfers seen so far.
+    seen_request: u64,
+    /// OUT bytes of the computer's transfer at the head of each endpoint's
+    /// queue already given to the device.
+    out_sent: [usize; 16],
 }
 
 /// Time between two looks at the endpoints while the host waits for something.
@@ -145,6 +183,8 @@ impl UsbCore {
             poll_at: None,
             last_now: 0,
             pipe,
+            seen_request: 0,
+            out_sent: [0; 16],
         }
     }
 
@@ -201,6 +241,8 @@ impl UsbCore {
     fn send_setup(&mut self, setup: [u8; 8]) {
         self.dpram[..8].copy_from_slice(&setup);
         self.sie_status |= SIE_SETUP_REC;
+        // a SETUP packet clears EP_STALL_ARM
+        self.other[0x68 / 4] = 0;
     }
 
     fn request(&mut self, step: Step) {
@@ -217,6 +259,7 @@ impl UsbCore {
                 (setup(0x21, 0x20, 0, comm, 7), Stage::DataOut, coding.to_vec())
             }
             Step::SetControlLineState => (setup(0x21, 0x22, 0x3, comm, 0), Stage::StatusIn, Vec::new()),
+            Step::Remote(_) => unreachable!("started by start_remote_control"),
         };
         self.send_setup(setup);
         self.host = Host::Control { step, stage, data, sent: 0 };
@@ -237,6 +280,7 @@ impl UsbCore {
             Step::GetConfig => {
                 log::debug!("Pico: USB device {:02x?}, configuration {data:02x?}", self.device_desc);
                 self.cdc = find_cdc(&data);
+                self.pipe.borrow_mut().descriptors = Some((self.device_desc.clone(), data.clone()));
                 self.config_desc = data;
                 Some(Step::SetConfiguration)
             }
@@ -249,6 +293,10 @@ impl UsbCore {
             Step::SetControlLineState => {
                 log::info!("Pico: USB serial port configured");
                 self.pipe.borrow_mut().open = true;
+                None
+            }
+            Step::Remote(id) => {
+                self.pipe.borrow_mut().done.push((id, Some(data)));
                 None
             }
         };
@@ -327,7 +375,7 @@ impl UsbCore {
         }
         if !self.connected() {
             self.host = Host::Detached;
-            self.pipe.borrow_mut().open = false;
+            self.disconnected();
             return;
         }
         // Control transfers on EP0 (buffer shared by IN and OUT).
@@ -338,9 +386,13 @@ impl UsbCore {
                 break;
             }
             if self.ep0_stalled() {
-                log::warn!("Pico: USB request {step:?} stalled");
+                if let Step::Remote(id) = step {
+                    self.pipe.borrow_mut().done.push((id, None));
+                } else {
+                    log::warn!("Pico: USB request {step:?} stalled");
+                }
                 self.host = Host::Configured;
-                break;
+                continue;
             }
             match stage {
                 Stage::DataIn => {
@@ -377,13 +429,127 @@ impl UsbCore {
                 }
             }
         }
-        if self.host == Host::Configured
+        if self.pipe.borrow().remote {
+            if self.host == Host::Configured && self.start_remote_control() {
+                // its SETUP packet is with the firmware now
+                self.schedule(ns(POLL_NS));
+                return;
+            }
+            self.remote_endpoints();
+            if !self.pipe.borrow().requests.is_empty() {
+                self.schedule(ns(POLL_NS));
+            }
+        } else if self.host == Host::Configured
             && let Some(cdc) = self.cdc
         {
             self.bulk(cdc);
         }
         if matches!(self.host, Host::Control { .. }) {
             self.schedule(ns(POLL_NS));
+        }
+    }
+
+    /// The device went off the bus: the computer's host loses it.
+    fn disconnected(&mut self) {
+        let mut pipe = self.pipe.borrow_mut();
+        pipe.open = false;
+        pipe.descriptors = None;
+        let failed: Vec<u64> = pipe.requests.drain(..).map(|t| t.id).collect();
+        pipe.done.extend(failed.into_iter().map(|id| (id, None)));
+        self.out_sent = [0; 16];
+    }
+
+    /// Starts the computer's first waiting control transfer; false if there is none.
+    fn start_remote_control(&mut self) -> bool {
+        let t = {
+            let mut pipe = self.pipe.borrow_mut();
+            let Some(i) = pipe.requests.iter().position(|t| t.ep == 0) else { return false };
+            pipe.requests.remove(i).unwrap()
+        };
+        let length = u16::from_le_bytes([t.setup[6], t.setup[7]]);
+        let stage = match (t.setup[0] & 0x80 != 0, length) {
+            (_, 0) => Stage::StatusIn,
+            (true, _) => Stage::DataIn,
+            (false, _) => Stage::DataOut,
+        };
+        log::trace!("Pico USB: control transfer {:02x?} of the computer", t.setup);
+        self.send_setup(t.setup);
+        self.host = Host::Control { step: Step::Remote(t.id), stage, data: t.data, sent: 0 };
+        true
+    }
+
+    /// Carries out the computer's transfers on endpoints other than 0: the
+    /// first one of each endpoint and direction, as far as the firmware has
+    /// buffers armed.
+    fn remote_endpoints(&mut self) {
+        let mut started: Vec<(u8, bool)> = Vec::new();
+        let mut i = 0;
+        loop {
+            let Some(t) = self.pipe.borrow().requests.get(i).cloned() else { break };
+            if t.ep == 0 || started.contains(&(t.ep, t.dir_in)) {
+                i += 1;
+                continue;
+            }
+            started.push((t.ep, t.dir_in));
+            let result = if t.dir_in { self.remote_in(&t) } else { self.remote_out(&t) };
+            match result {
+                Some(data) => {
+                    let mut pipe = self.pipe.borrow_mut();
+                    pipe.requests.remove(i);
+                    pipe.done.push((t.id, Some(data)));
+                }
+                None => i += 1,
+            }
+        }
+    }
+
+    /// The data of an armed IN buffer of `t.ep` (two with double buffering).
+    fn remote_in(&mut self, t: &Transfer) -> Option<Vec<u8>> {
+        let (bc, buf, double) = self.ep_buffer(t.ep, false)?;
+        let bit = 1 << (2 * t.ep);
+        if self.buff_status & bit != 0 {
+            return None; // the firmware has not seen the last one yet
+        }
+        let mut data = self.take_in(bc, buf, 0)?;
+        if double
+            && data.len() == 64
+            && t.max_len > 64
+            && let Some(more) = self.take_in(bc, buf + 64, 16)
+        {
+            data.extend(more);
+        }
+        self.buff_status |= bit;
+        Some(data)
+    }
+
+    /// Gives the OUT data of `t` to the armed buffers of `t.ep`, packet by
+    /// packet; the transfer is done when all of it is with the device.
+    fn remote_out(&mut self, t: &Transfer) -> Option<Vec<u8>> {
+        let (bc, buf, double) = self.ep_buffer(t.ep, true)?;
+        let bit = 1 << (2 * t.ep + 1);
+        if self.buff_status & bit != 0 {
+            return None;
+        }
+        let sent = &mut self.out_sent[usize::from(t.ep)];
+        let start = *sent;
+        let end = (start + 64).min(t.data.len());
+        if !self.give_out(bc, buf, 0, &t.data[start..end]) {
+            return None;
+        }
+        let mut sent_to = end;
+        if double && end - start == 64 && end < t.data.len() {
+            let end2 = (end + 64).min(t.data.len());
+            if self.give_out(bc, buf + 64, 16, &t.data[end..end2]) {
+                sent_to = end2;
+            }
+        }
+        self.buff_status |= bit;
+        if sent_to >= t.data.len() {
+            self.out_sent[usize::from(t.ep)] = 0;
+            Some(Vec::new())
+        } else {
+            self.out_sent[usize::from(t.ep)] = sent_to;
+            None
         }
     }
 
@@ -441,8 +607,11 @@ impl UsbCore {
     fn update(&mut self, ctx: &mut DeviceCtx) {
         let now = ctx.now();
         self.last_now = now;
-        let sending = self.host == Host::Configured && !self.pipe.borrow().to_device.is_empty();
-        if sending || self.poll_at.is_some_and(|t| t <= now) {
+        let new_request = self.new_request();
+        if new_request {
+            self.seen_request = self.pipe.borrow().requests.iter().map(|t| t.id).max().unwrap_or(0);
+        }
+        if new_request || self.sending() || self.poll_at.is_some_and(|t| t <= now) {
             self.poll_at = None;
             self.poll(now, ctx.clock);
         }
@@ -453,10 +622,20 @@ impl UsbCore {
         self.sync_irq(ctx);
     }
 
+    /// The built-in host has serial data for the device.
+    fn sending(&self) -> bool {
+        let pipe = self.pipe.borrow();
+        self.host == Host::Configured && !pipe.remote && !pipe.to_device.is_empty()
+    }
+
+    /// The computer's host has queued a transfer since the last look.
+    fn new_request(&self) -> bool {
+        self.pipe.borrow().requests.iter().any(|t| t.id > self.seen_request)
+    }
+
     fn next_event(&self) -> Option<u64> {
-        // the computer sent data: look for an OUT buffer soon
-        let sending = self.host == Host::Configured && !self.pipe.borrow().to_device.is_empty();
-        let send_at = sending.then_some(self.last_now + 1);
+        // the computer sent data or a request: look at the buffers soon
+        let send_at = (self.sending() || self.new_request()).then_some(self.last_now + 1);
         [self.poll_at, send_at].into_iter().flatten().min()
     }
 }
@@ -583,8 +762,8 @@ impl Block for UsbRegs {
     }
 
     fn reset(&mut self) {
+        self.0.borrow_mut().disconnected();
         let pipe = self.0.borrow().pipe.clone();
-        pipe.borrow_mut().open = false;
         *self.0.borrow_mut() = UsbCore::new(pipe);
     }
 }

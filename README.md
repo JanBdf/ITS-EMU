@@ -68,11 +68,11 @@ Everything else is in [Usage](docs/usage.md).
 | Clock | RCC clock tree (16 MHz HSI → 180 MHz PLL) with the oscillators' start-up and the PLLs' lock time; virtual time in CPU cycles with a Cortex-M4 cycle model (loads, branches, divisions, exceptions, APB wait states) measured on the board |
 | Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (up/down/center-aligned, output compare/PWM on the pins, input capture, encoder mode, slave modes reset/gated/trigger/external clock from TI1/TI2 or another timer's TRGO, TIM1/8 repetition counter, complementary outputs with dead time, break, COM), ADC1–3 (regular and injected, timer TRGO triggers), DAC (timer triggers, noise/triangle), I²C1–3 (master; optional LM75, other addresses NACK), SPI1–6, USART1–6 + UART4/5/7/8 (USART3 connected), IWDG, CRC, RNG, DMA1/2 (direct/FIFO with packing, double buffer, all peripheral requests, timer bursts), Ethernet MAC + LAN8742A PHY, PWR, flash interface (program/erase with datasheet timing), bit-banding |
 | Board | LEDs OUT0–15, buttons S0–S7 (with contact bounce, as on the board), INT0–5, Analog header (pin voltages, DAC1), Nucleo LEDs and USER button; on any pins: rotary encoder, DS18B20 sensors, a Raspberry Pi Pico running its own firmware; a virtual network on the Ethernet jack |
-| Pico | RP2040 with both M0+ cores and the real boot ROM, firmware from UF2: clocks, resets, timer, SIO, PIO0/1, PWM, ADC, DMA, RTC, XIP flash, USB CDC serial as a pseudo terminal. Own thread |
+| Pico | RP2040 with both M0+ cores and the real boot ROM, firmware from UF2: clocks, resets, timer, SIO, PIO0/1, PWM, ADC, DMA, RTC, XIP flash, USB CDC serial as a pseudo terminal or (Linux) its USB device over USB/IP. Own thread |
 | Display | ILI9486 480×320 TFT with SPI timing, vertical scrolling, XPT2046 touch, backlight PWM, the real panel's tone response (`--ideal-colors` turns it off) |
 | Serial | Virtual COM port (USART3, `printf` / `stdin_getchar`) |
 | Debugging | GDB server: breakpoints, single step, watchpoints, registers incl. FPU, memory, `monitor reset halt` |
-| USB (Linux) | The Nucleo's ST-LINK/V2-1 over USB/IP for pyOCD and OpenOCD, plus its virtual COM port; behind it halting debug, FPB, DWT, ROM table and CoreSight IDs |
+| USB (Linux) | The Nucleo's ST-LINK/V2-1 over USB/IP for pyOCD and OpenOCD, plus its virtual COM port; behind it halting debug, FPB, DWT, ROM table and CoreSight IDs. The Picos' USB devices on the same USB/IP server |
 
 Not yet: I²C devices other than the LM75, timer slave modes with ETR, ADC
 triggers from CCx and EXTI.
