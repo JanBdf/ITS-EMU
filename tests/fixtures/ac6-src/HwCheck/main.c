@@ -41,6 +41,9 @@
  *   timslave        TIM3 slave modes with TI1/TI2 on PC6/PC7 (pull switching)
  *   timchain        TIM3 slave modes with TIM2's TRGO (ITR1): timer chaining
  *   timdma          TIM2 DMA requests (update, CC1, DMAR burst) on DMA1
+ *   timsync         timer chaining delays in timer clocks (gate, trigger, reset)
+ *   flash           flash erase and programming times (sector 23, bank 2)
+ *   rcc             start-up times of HSI, HSE (bypass) and the main PLL
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -2111,6 +2114,238 @@ static void cmd_timchain(void) {
     TIM2->CR2 = 0;
 }
 
+/* TIM3->CNT read four times right after `val` is written to `reg`, with the
+ * cycles from the write to each read (DWT->CYCCNT before the write). */
+static void sync_samples(const char *name, volatile uint32_t *reg, uint32_t val) {
+    uint32_t t0 = DWT->CYCCNT;
+    *reg = val;
+    uint32_t s0 = TIM3->CNT;
+    uint32_t t1 = DWT->CYCCNT;
+    uint32_t s1 = TIM3->CNT;
+    uint32_t s2 = TIM3->CNT;
+    uint32_t t2 = DWT->CYCCNT;
+    uint32_t s3 = TIM3->CNT;
+    printf("Y %s %lu %lu %lu %lu t %lu %lu\n", name, (unsigned long)s0, (unsigned long)s1, (unsigned long)s2,
+           (unsigned long)s3, (unsigned long)(t1 - t0), (unsigned long)(t2 - t0));
+}
+
+/* Timer chaining in timer clocks (TIM2/TIM3 at 90 MHz, prescaler 0): how many
+ * clocks a slave in gated mode counts for a master's one-pulse of 1000 clocks,
+ * how far a slave started by TRGO (enable) is ahead of the master, when a
+ * reset by TRGO (UG, update) reaches the slave's counter. */
+static void cmd_timsync(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN | RCC_APB1ENR_TIM3EN;
+    __DSB();
+    const uint32_t itr1 = 1u << 4;
+    // gated by TIM2's enable (MMS 001) during a one-pulse of 1000 clocks
+    for (uint32_t psc = 0; psc < 2; psc++) {
+        chain_setup(1, 0, 999, itr1 | 5u, psc);
+        TIM3->CR1 = TIM_CR1_CEN;
+        TIM2->CR1 = TIM_CR1_CEN | TIM_CR1_OPM;
+        slave_wait_us(50);
+        printf("Y gated_psc%lu cnt %lu sr %02lx\n", (unsigned long)psc, (unsigned long)TIM3->CNT,
+               (unsigned long)(TIM3->SR & 0x41));
+        TIM3->CR1 = 0;
+    }
+    // trigger mode started by TIM2's enable: CNT of both read in one order and the other
+    chain_setup(1, 0, 0xFFFFFFFF, itr1 | 6u, 0);
+    TIM2->CR1 = TIM_CR1_CEN;
+    uint32_t a2 = TIM2->CNT, a3 = TIM3->CNT, b3 = TIM3->CNT, b2 = TIM2->CNT;
+    TIM2->CR1 = 0;
+    TIM3->CR1 = 0;
+    printf("Y trigger 2then3 %ld 3then2 %ld\n", (long)(a3 - a2), (long)(b3 - b2));
+    // both started by software, back to back: the reads' own distance
+    chain_setup(1, 0, 0xFFFFFFFF, 0, 0);
+    TIM3->CR1 = TIM_CR1_CEN;
+    TIM2->CR1 = TIM_CR1_CEN;
+    a2 = TIM2->CNT, a3 = TIM3->CNT, b3 = TIM3->CNT, b2 = TIM2->CNT;
+    TIM2->CR1 = 0;
+    TIM3->CR1 = 0;
+    printf("Y software 2then3 %ld 3then2 %ld\n", (long)(a3 - a2), (long)(b3 - b2));
+    // reset by TIM2's UG (MMS 000), TIM2 stopped; TIM3 at prescaler 89 and 0
+    chain_setup(0, 0, 0xFFFFFFFF, itr1 | 4u, 89);
+    TIM3->CR1 = TIM_CR1_CEN;
+    slave_wait_us(500);
+    sync_samples("ug_psc89", &TIM2->EGR, TIM_EGR_UG);
+    chain_setup(0, 0, 0xFFFFFFFF, itr1 | 4u, 0);
+    TIM3->ARR = 0xFFFF;
+    TIM3->CR1 = TIM_CR1_CEN;
+    slave_wait_us(300);
+    sync_samples("ug_psc0", &TIM2->EGR, TIM_EGR_UG);
+    // prescalers of TIM2/TIM3 89/89, 89/0, 0/89 (as in timchain: TIM3 at 1 MHz)
+    static const uint32_t pscs[3][2] = {{89, 89}, {89, 0}, {0, 89}};
+    for (int k = 0; k < 3; k++) {
+        chain_setup(0, pscs[k][0], 0xFFFFFFFF, itr1 | 4u, pscs[k][1]);
+        TIM3->CR1 = TIM_CR1_CEN;
+        slave_wait_us(500);
+        char name[24];
+        snprintf(name, sizeof name, "ug_psc%lu_%lu", (unsigned long)pscs[k][0], (unsigned long)pscs[k][1]);
+        sync_samples(name, &TIM2->EGR, TIM_EGR_UG);
+        TIM3->CR1 = 0;
+    }
+    // timchain's sequence, and CNT 2 us later
+    chain_setup(0, 89, 0xFFFFFFFF, itr1 | 4u, 89);
+    TIM3->CR1 = TIM_CR1_CEN;
+    slave_wait_us(500);
+    uint32_t before = TIM3->CNT;
+    TIM2->EGR = TIM_EGR_UG;
+    uint32_t c3 = TIM3->CNT;
+    slave_wait_us(2);
+    uint32_t c4 = TIM3->CNT;
+    TIM3->CR1 = 0;
+    printf("Y ug_chain before %lu after %lu later %lu sr %02lx\n", (unsigned long)before, (unsigned long)c3,
+           (unsigned long)c4, (unsigned long)(TIM3->SR & 0x41));
+    // UG of TIM3 itself, stopped and running at prescaler 89
+    chain_setup(0, 0, 0xFFFFFFFF, 0, 89);
+    TIM3->CR1 = TIM_CR1_CEN;
+    slave_wait_us(500);
+    sync_samples("own_ug_psc89", &TIM3->EGR, TIM_EGR_UG);
+    TIM3->CR1 = 0;
+    TIM3->CNT = 500;
+    sync_samples("own_ug_stopped", &TIM3->EGR, TIM_EGR_UG);
+    printf("Y own_ug_stopped later %lu\n", (unsigned long)TIM3->CNT);
+    // a CNT write and an SR clear, read back at once
+    TIM3->CR1 = TIM_CR1_CEN;
+    slave_wait_us(500);
+    sync_samples("own_cnt_write", &TIM3->CNT, 100);
+    TIM3->EGR = TIM_EGR_CC1G;
+    TIM3->SR = 0;
+    uint32_t sr0 = TIM3->SR, sr1 = TIM3->SR;
+    TIM3->EGR = TIM_EGR_CC1G;
+    uint32_t sr2 = TIM3->SR;
+    printf("Y sr_clear %02lx %02lx ccg %02lx\n", (unsigned long)sr0, (unsigned long)sr1, (unsigned long)sr2);
+    TIM3->CR1 = 0;
+    TIM3->SMCR = 0;
+    TIM2->CR2 = 0;
+}
+
+/* Start-up times of the oscillators and the main PLL (DWT cycles, printed
+ * in ns): HSI while the core runs from the PLL (HSE in bypass, 8 MHz from
+ * the ST-LINK), PLL lock and HSE start-up while it runs from HSI. The
+ * clocks are restored before printing (USART3 depends on them). */
+static uint32_t rcc_until(uint32_t mask, uint32_t want) {
+    uint32_t t0 = DWT->CYCCNT;
+    while ((RCC->CR & mask) != want) {
+    }
+    return DWT->CYCCNT - t0;
+}
+
+static void rcc_switch(uint32_t sw) {
+    RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_SW) | sw;
+    while ((RCC->CFGR & RCC_CFGR_SWS) != sw << 2) {
+    }
+}
+
+static void cmd_rcc(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    uint32_t cr = RCC->CR, cfgr = RCC->CFGR, pllcfgr = RCC->PLLCFGR;
+    while ((USART3->SR & USART_SR_TC) == 0) {
+    }
+    __disable_irq();
+    // HSI, core at 180 MHz from the PLL
+    RCC->CR &= ~RCC_CR_HSION;
+    uint32_t hsi_off = rcc_until(RCC_CR_HSIRDY, 0);
+    RCC->CR |= RCC_CR_HSION;
+    uint32_t hsi_on = rcc_until(RCC_CR_HSIRDY, RCC_CR_HSIRDY);
+    // PLL and HSE, core at 16 MHz from HSI
+    rcc_switch(RCC_CFGR_SW_HSI);
+    RCC->CR &= ~RCC_CR_PLLON;
+    uint32_t pll_off = rcc_until(RCC_CR_PLLRDY, 0);
+    RCC->CR |= RCC_CR_PLLON;
+    uint32_t pll_on = rcc_until(RCC_CR_PLLRDY, RCC_CR_PLLRDY);
+    RCC->CR &= ~RCC_CR_PLLON;
+    rcc_until(RCC_CR_PLLRDY, 0);
+    RCC->CR &= ~RCC_CR_HSEON;
+    uint32_t hse_off = rcc_until(RCC_CR_HSERDY, 0);
+    RCC->CR |= RCC_CR_HSEON;
+    uint32_t hse_on = rcc_until(RCC_CR_HSERDY, RCC_CR_HSERDY);
+    // back to the PLL
+    RCC->PLLCFGR = pllcfgr;
+    RCC->CR |= RCC_CR_PLLON;
+    uint32_t pll_on2 = rcc_until(RCC_CR_PLLRDY, RCC_CR_PLLRDY);
+    rcc_switch(cfgr & RCC_CFGR_SW);
+    RCC->CFGR = cfgr;
+    __enable_irq();
+    printf("K cr %08lx cfgr %08lx pllcfgr %08lx now %08lx\n", (unsigned long)cr, (unsigned long)cfgr,
+           (unsigned long)pllcfgr, (unsigned long)RCC->CR);
+    printf("K hsi_off %lu ns hsi_on %lu ns\n", (unsigned long)(hsi_off * 50 / 9), (unsigned long)(hsi_on * 50 / 9));
+    printf("K pll_off %lu ns pll_on %lu ns again %lu ns\n", (unsigned long)(pll_off * 125 / 2),
+           (unsigned long)(pll_on * 125 / 2), (unsigned long)(pll_on2 * 125 / 2));
+    printf("K hse_off %lu ns hse_on %lu ns\n", (unsigned long)(hse_off * 125 / 2), (unsigned long)(hse_on * 125 / 2));
+}
+
+/* Flash erase and programming times in core cycles (DWT), on sector 23
+ * (bank 2, 128 KB at 0x081E0000, after the font table) while the code runs
+ * from bank 1: sector erase at x32 and x8, programming of words, half words
+ * and bytes. */
+static uint32_t flash_wait(void) {
+    uint32_t t0 = DWT->CYCCNT;
+    while (FLASH->SR & FLASH_SR_BSY) {
+    }
+    return DWT->CYCCNT - t0;
+}
+
+static uint32_t flash_erase23(uint32_t psize) {
+    FLASH->SR = 0xF3;
+    FLASH->CR = psize | FLASH_CR_SER | (0x1Bu << FLASH_CR_SNB_Pos);
+    FLASH->CR |= FLASH_CR_STRT;
+    uint32_t t = flash_wait();
+    FLASH->CR = 0;
+    return t;
+}
+
+static void cmd_flash(void) {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    volatile uint32_t *const sector = (volatile uint32_t *)0x081E0000;
+    FLASH->KEYR = 0x45670123;
+    FLASH->KEYR = 0xCDEF89AB;
+    __disable_irq();
+    uint32_t erase32 = flash_erase23(FLASH_PSIZE_WORD);
+    uint32_t sr = FLASH->SR;
+    // 64 words, 64 half words, 64 bytes: total cycles of each
+    uint32_t prog[3] = {0, 0, 0};
+    uint32_t min[3] = {~0u, ~0u, ~0u}, max[3] = {0, 0, 0};
+    for (int k = 0; k < 3; k++) {
+        static const uint32_t psizes[3] = {FLASH_PSIZE_WORD, FLASH_PSIZE_HALF_WORD, FLASH_PSIZE_BYTE};
+        FLASH->CR = psizes[k] | FLASH_CR_PG;
+        for (uint32_t i = 0; i < 64; i++) {
+            uint32_t t0 = DWT->CYCCNT;
+            if (k == 0) {
+                sector[i] = 0x12345678u + i;
+            } else if (k == 1) {
+                ((volatile uint16_t *)(sector + 64))[i] = (uint16_t)(0x1234u + i);
+            } else {
+                ((volatile uint8_t *)(sector + 128))[i] = (uint8_t)(0x40u + i);
+            }
+            while (FLASH->SR & FLASH_SR_BSY) {
+            }
+            uint32_t t = DWT->CYCCNT - t0;
+            prog[k] += t;
+            min[k] = t < min[k] ? t : min[k];
+            max[k] = t > max[k] ? t : max[k];
+        }
+        FLASH->CR = 0;
+    }
+    uint32_t ok = sector[0] == 0x12345678u && sector[63] == 0x12345678u + 63 &&
+                  ((volatile uint16_t *)(sector + 64))[5] == 0x1239 && ((volatile uint8_t *)(sector + 128))[7] == 0x47;
+    uint32_t erase8 = flash_erase23(FLASH_PSIZE_BYTE);
+    uint32_t erased = sector[0];
+    __enable_irq();
+    FLASH->CR = FLASH_CR_LOCK;
+    printf("F erase128k_x32 %lu sr %02lx\n", (unsigned long)erase32, (unsigned long)sr);
+    static const char *const names[3] = {"word", "half", "byte"};
+    for (int k = 0; k < 3; k++) {
+        printf("F prog_%s avg %lu min %lu max %lu\n", names[k], (unsigned long)(prog[k] / 64),
+               (unsigned long)min[k], (unsigned long)max[k]);
+    }
+    printf("F verify %lu\n", (unsigned long)ok);
+    printf("F erase128k_x8 %lu erased %08lx\n", (unsigned long)erase8, (unsigned long)erased);
+}
+
 /* ---- TIM2 (1 MHz, 1 ms period) DMA requests on DMA1: update (stream 1,
  * channel 3) and CC1 (stream 5, channel 3), single transfers and bursts
  * through DMAR, and a request made while the stream is off. */
@@ -2464,6 +2699,12 @@ static void execute(char *line) {
         cmd_irqlat();
     } else if (!strcmp(line, "dacwave")) {
         cmd_dacwave();
+    } else if (!strcmp(line, "rcc")) {
+        cmd_rcc();
+    } else if (!strcmp(line, "flash")) {
+        cmd_flash();
+    } else if (!strcmp(line, "timsync")) {
+        cmd_timsync();
     } else if (!strcmp(line, "timout")) {
         cmd_timout();
     } else if (!strcmp(line, "enc")) {

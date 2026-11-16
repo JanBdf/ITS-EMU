@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Sends HwCheck commands to the real board over the ST-LINK virtual COM port
-and prints the answers.  Usage: cmd.py [--port /dev/ttyACM0] [--wait-ready] CMD...
+and prints the answers.  Usage: cmd.py [--port PORT] [--wait-ready] CMD...
+The default port is the virtual COM port of the real board's ST-LINK
+(tools/hw/board-serial.sh), not that of an emulator exported over USB/IP.
 Each command is sent as one line; the script waits for "ok <cmd>" or "? <cmd>".
 "sleep SECONDS" waits between commands."""
 import os
 import select
+import subprocess
 import sys
 import termios
 import time
 
-port = "/dev/ttyACM0"
+port = None
 args = sys.argv[1:]
 wait_ready = False
 while args and args[0].startswith("--"):
@@ -22,6 +25,10 @@ while args and args[0].startswith("--"):
     else:
         sys.exit(__doc__)
 
+if port is None:
+    serial = subprocess.run([os.path.join(os.path.dirname(__file__), "board-serial.sh")],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    port = f"/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_{serial}-if02"
 fd = os.open(port, os.O_RDWR | os.O_NOCTTY)
 attr = termios.tcgetattr(fd)
 attr[0] = 0                                   # iflag

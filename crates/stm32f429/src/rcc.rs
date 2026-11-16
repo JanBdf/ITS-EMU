@@ -2,8 +2,8 @@
 //! flash interface ([`crate::flash`]) everything `SystemClock_Config()`
 //! waits on.
 //!
-//! Oscillators and PLLs report ready after their start-up / lock time (the
-//! datasheet's typical values, see `READY_NS`). The RCC computes the
+//! Oscillators and PLLs report ready after their start-up / lock time
+//! (measured on the board, see `READY_NS`). The RCC computes the
 //! resulting bus clocks, publishes them in [`Clocks`] and sets the core clock
 //! of the virtual time base.
 
@@ -101,10 +101,13 @@ const CR_WRITABLE: u32 = 0x150D_00F9; // ON bits, HSITRIM, HSEBYP, CSSON
 const CR_HSEBYP: u32 = 1 << 18;
 /// ON bits of CR whose ready flag is the bit above, in `ready_at` order.
 const CR_ON: [u32; 5] = [CR_HSION, CR_HSEON, CR_PLLON, CR_PLLI2SON, CR_PLLSAION];
-/// Time from switching on to ready (ns): HSI start-up 2.2 µs typ (4 max),
-/// HSE in bypass a few input clocks, a crystal 2 ms typ, PLL lock 100 µs
-/// (datasheet: 75 min, 200 max; not measured on the board).
-const READY_NS: [u64; 5] = [3_000, 2_000, 100_000, 100_000, 100_000];
+/// Time from switching on to ready (ns), measured on the board (HwCheck
+/// `rcc`): HSI 0.97-1.07 µs (datasheet 2.2 typ), HSE in bypass with the
+/// ST-LINK's 8 MHz 65 µs (about 520 input clocks), main PLL lock 143.7 µs
+/// (datasheet 100 typ, at 1 MHz VCO input). PLLI2S and PLLSAI are assumed
+/// to lock like the main PLL (not measured); a crystal takes 2 ms (datasheet
+/// typical, the board has none).
+const READY_NS: [u64; 5] = [1_000, 65_000, 143_700, 143_700, 143_700];
 const HSE_CRYSTAL_NS: u64 = 2_000_000;
 
 pub struct Rcc {
@@ -176,7 +179,7 @@ impl Rcc {
                 v |= on << 1; // xxxRDY is the bit above xxxON
             }
         }
-        v | (0x80 << 8) // HSICAL
+        v | (0x5E << 8) // HSICAL: the measured board's factory calibration
     }
 
     /// Starts the start-up time of sources switched on by a CR write.
@@ -441,14 +444,15 @@ mod tests {
         rcc.write(&mut ctx, 0x00, 4, 0x0005_0083);
         assert_eq!(rcc.read(&mut ctx, 0x00, 4) & (1 << 17), 0, "HSE not ready at once");
         let us = ctx.clock.ns_to_cycles(1_000);
-        ctx.clock.advance(3 * us);
-        assert_ne!(rcc.read(&mut ctx, 0x00, 4) & (1 << 17), 0, "HSERDY");
+        ctx.clock.advance(65 * us);
+        assert_ne!(rcc.read(&mut ctx, 0x00, 4) & (1 << 17), 0, "HSERDY after 65 us");
         // PLLM=8 PLLN=360 PLLP=2 PLLQ=7 from HSE
         rcc.write(&mut ctx, 0x04, 4, 8 | (360 << 6) | (1 << 22) | (7 << 24));
         rcc.write(&mut ctx, 0x00, 4, 0x0105_0083);
         assert_eq!(rcc.read(&mut ctx, 0x00, 4) & (1 << 25), 0, "PLL locks later");
-        assert_eq!(rcc.read_stable_until(0, ctx.clock), ctx.now() + 100 * us, "until the lock");
-        ctx.clock.advance(100 * us);
+        let lock = ctx.clock.ns_to_cycles(143_700);
+        assert_eq!(rcc.read_stable_until(0, ctx.clock), ctx.now() + lock, "until the lock");
+        ctx.clock.advance(lock);
         assert_ne!(rcc.read(&mut ctx, 0x00, 4) & (1 << 25), 0, "PLLRDY");
         // HPRE=1, PPRE1=/4, PPRE2=/2, SW=PLL
         rcc.write(&mut ctx, 0x08, 4, (5 << 10) | (4 << 13) | 2);

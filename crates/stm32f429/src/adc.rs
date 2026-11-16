@@ -31,6 +31,15 @@ const VBAT_COUNTS: u32 = 1021;
 /// Open pins read about this, with this much noise (counts).
 const OPEN_COUNTS: u32 = 1150;
 const OPEN_NOISE: u32 = 100;
+/// Noise (± counts) of conversions, from 16 conversions on the board
+/// (HwCheck `adc`): the DAC's output through its buffer (min to max about
+/// 40), VREFINT and VBAT (about 5), the temperature sensor (2). A voltage
+/// applied from outside is assumed to give the converter's few LSB.
+const DAC_NOISE: u32 = 20;
+const VREFINT_NOISE: u32 = 3;
+const VBAT_NOISE: u32 = 2;
+const TEMP_NOISE: u32 = 1;
+const APPLIED_NOISE: u32 = 2;
 
 /// Voltages applied to pins from outside (`None`: open) and the DAC outputs.
 pub struct AnalogState {
@@ -70,12 +79,17 @@ impl AnalogState {
         };
         let counts = |v: f32| ((v / VDDA).clamp(0.0, 1.0) * 4095.0).round() as u32;
         match (dac, self.pins[port][pin as usize]) {
-            // the DAC's own output: exact, as measured on the board (HwCheck `adc`)
-            (Some(v), _) => counts(v),
-            // a voltage applied from outside: the converter's few LSB of noise
-            (None, Some(v)) => (counts(v) as i32 + (self.noise_bits() % 5) as i32 - 2).clamp(0, 4095) as u32,
+            // the DAC's own output: its mean as measured on the board (HwCheck `adc`)
+            (Some(v), _) => self.noisy(counts(v), DAC_NOISE),
+            (None, Some(v)) => self.noisy(counts(v), APPLIED_NOISE),
             (None, None) => OPEN_COUNTS - OPEN_NOISE + self.noise_bits() % (2 * OPEN_NOISE),
         }
+    }
+
+    /// `counts` with up to ± `lsb` of noise.
+    fn noisy(&mut self, counts: u32, lsb: u32) -> u32 {
+        let n = (self.noise_bits() % (2 * lsb + 1)) as i32 - lsb as i32;
+        (counts as i32 + n).clamp(0, 4095) as u32
     }
 
     /// Next value of the noise generator (xorshift).
@@ -299,11 +313,12 @@ impl Adc {
     /// 12-bit result of converting channel `ch` of `unit` now.
     fn sample(&self, unit: usize, ch: u32) -> u32 {
         let internal = unit == 0 && self.ccr & CCR_TSVREFE != 0;
+        let noisy = |counts, lsb| self.analog.borrow_mut().noisy(counts, lsb);
         match ch {
-            16 if internal => TEMP_COUNTS,
-            17 if internal => VREFINT_COUNTS,
-            18 if unit == 0 && self.ccr & CCR_VBATE != 0 => VBAT_COUNTS,
-            18 if internal => TEMP_COUNTS,
+            16 if internal => noisy(TEMP_COUNTS, TEMP_NOISE),
+            17 if internal => noisy(VREFINT_COUNTS, VREFINT_NOISE),
+            18 if unit == 0 && self.ccr & CCR_VBATE != 0 => noisy(VBAT_COUNTS, VBAT_NOISE),
+            18 if internal => noisy(TEMP_COUNTS, TEMP_NOISE),
             16..=18 => 1,
             _ => {
                 let Some((p, pin)) = Self::channel_pin(unit, ch) else { return 0 };
@@ -905,7 +920,7 @@ mod tests {
         assert_eq!(adc.read(&mut ctx, 0x4C, 4), 2048);
         assert_eq!(adc.read(&mut ctx, 0x00, 4), SR_STRT, "reading DR clears EOC");
         ctx.clock.advance(15 * 4);
-        assert_eq!(adc.read(&mut ctx, 0x4C, 4), VREFINT_COUNTS);
+        assert!(adc.read(&mut ctx, 0x4C, 4).abs_diff(VREFINT_COUNTS) <= VREFINT_NOISE);
         assert_eq!(adc.next_event(), None);
     }
     #[test]
@@ -933,6 +948,6 @@ mod tests {
         ctx.clock.advance(4 + 8 + 15 * 4);
         adc.update(&mut ctx);
         assert_eq!(adc.read(&mut ctx, 0x00, 4) & SR_JEOC, SR_JEOC);
-        assert_eq!(adc.read(&mut ctx, 0x3C, 4), VREFINT_COUNTS, "JDR1");
+        assert!(adc.read(&mut ctx, 0x3C, 4).abs_diff(VREFINT_COUNTS) <= VREFINT_NOISE, "JDR1");
     }
 }

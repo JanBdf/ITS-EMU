@@ -11,6 +11,22 @@ pub const PPB_BASE: u32 = 0xE000_0000;
 pub const PPB_SIZE: u32 = 0x0010_0000;
 
 const CPUID_CORTEX_M4_R0P1: u32 = 0x410F_C241;
+/// ID_PFR0, ID_PFR1, ID_DFR0, ID_AFR0, ID_MMFR0..3, ID_ISAR0..4.
+const ID_REGS: [u32; 13] = [
+    0x0000_0030,
+    0x0000_0200,
+    0x0010_0000,
+    0,
+    0x0010_0030,
+    0,
+    0x0100_0000,
+    0,
+    0x0110_1110,
+    0x0211_2000,
+    0x2123_2231,
+    0x0111_1131,
+    0x0131_0132,
+];
 const AIRCR_VECTKEY: u32 = 0x05FA;
 
 // CFSR bits
@@ -234,6 +250,8 @@ impl Scs {
             0xE280..=0xE29C => self.irq_word(nvic, aligned - 0xE280, |n, e| n.is_pending(e)),
             0xE300..=0xE31C => self.irq_word(nvic, aligned - 0xE300, |n, e| n.is_active(e)),
             0xED00 => CPUID_CORTEX_M4_R0P1,
+            // ID_PFR0..ID_ISAR4: processor features of the Cortex-M4 (read on the board)
+            0xED40..=0xED70 => ID_REGS[((aligned - 0xED40) / 4) as usize],
             0xED04 => self.icsr(nvic, ipsr),
             0xED08 => self.vtor,
             0xED0C => (0xFA05 << 16) | (u32::from(nvic.prigroup()) << 8),

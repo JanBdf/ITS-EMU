@@ -5,7 +5,9 @@
 //! ([`FlashProgrammer`], the core's [`FlashController`]) share a
 //! [`FlashState`]. Operations take their typical datasheet duration
 //! (STM32F429 DS: sector erase 16/64/128 KB at x32 250/550/1000 ms, mass
-//! erase of a bank 8 s, word programming 16 µs); BSY stays set that long.
+//! erase of a bank 8 s; measured on the board for 128 KB at x32 and x8:
+//! 0.92-1.01 s and 1.93-2.04 s, HwCheck `flash`) and programming the
+//! measured 14.1 µs; BSY stays set that long.
 //!
 //! Deviations: programming bits that are not erased stores the new value
 //! (the cells would end up as old AND new); a store without PG or with a
@@ -145,6 +147,11 @@ fn sector(snb: u32) -> Option<Range<u32>> {
     let start = bank * BANK_SIZE + off;
     Some(start..start + len)
 }
+
+/// Duration of programming an access of any size, measured on the board
+/// (HwCheck `flash`: 2540-2570 cycles at 180 MHz; the datasheet's typical
+/// word programming time is 16 µs).
+const PROGRAM_NS: u64 = 14_100;
 
 /// Typical erase time in ms of `len` bytes at parallelism `psize` bytes.
 fn erase_ms(len: u32, psize: u32) -> u64 {
@@ -342,8 +349,8 @@ impl FlashController for FlashProgrammer {
             s.sr |= e;
             return false;
         }
-        // word programming: 16 µs
-        let cycles = u64::from(self.clocks.get().hclk) * 16 / 1_000_000;
+        // programming a byte, half word or word: 14.1 µs (measured)
+        let cycles = u64::from(self.clocks.get().hclk) * PROGRAM_NS / 1_000_000_000;
         s.start(now, cycles.max(1));
         true
     }

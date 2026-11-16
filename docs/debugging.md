@@ -106,6 +106,7 @@ BKPT without a debugger is a HardFault, as on the chip.
 Known differences: no mass storage drive and no SWO; the COM port ignores
 the baud rate; programming non-erased flash bits stores the new value (the
 chip ANDs); a flash store with a wrong size or without PG faults instead of
-only setting PGPERR/PGSERR. ROM table and DBGMCU_IDCODE use ST's STM32F429
-values (device 0x419, revision 3).
+only setting PGPERR/PGSERR. ROM table, component IDs, DBGMCU_IDCODE
+(device 0x419, revision 0x2003), CPUID and the processor feature registers
+are those read on the measured board (`tests/hardware/probe-ids.txt`).
 

@@ -65,6 +65,7 @@ impl Board {
         self.write(TIM2 + 0x2C, 99);
         self.write(TIM2 + 0x0C, 1 << 8); // UDE
         self.write(TIM2, 1);
+        self.clock.advance(1); // the counter starts a clock after CEN
     }
 
     /// Runs `n` TIM2 update requests.

@@ -215,13 +215,15 @@ pub fn machine(bus: Bus, mcu: &Stm32f429) -> Result<Machine, MachineError> {
 /// Unique device ID (96 bits); the flash size register follows at +0x12.
 pub const UID_BASE: u32 = 0x1FFF_7A10;
 
-/// DBGMCU_IDCODE: DEV_ID 0x419 (STM32F42x/43x), REV_ID 0x2001 (revision 3).
-pub const DBGMCU_IDCODE: u32 = 0x2001_6419;
+/// DBGMCU_IDCODE: DEV_ID 0x419 (STM32F42x/43x), REV_ID 0x2003 (revision 5,
+/// as on the measured board).
+pub const DBGMCU_IDCODE: u32 = 0x2003_6419;
 
-/// ST's parts of the debug system: the ROM table carries the device ID as
-/// part number and ST's JEP106 code (bank 0, 0x20).
+/// ST's parts of the debug system: the ROM table carries part number 0x411
+/// (ST's ROM table of the F2/F4, read on the board) and ST's JEP106 code
+/// (bank 0, 0x20).
 pub const DEBUG_IDS: DebugIds = DebugIds {
-    rom_table_part: 0x419,
+    rom_table_part: 0x411,
     rom_table_jep106: (0, 0x20),
     rom_table_revision: 0,
     dbgmcu_idcode: Some(DBGMCU_IDCODE),

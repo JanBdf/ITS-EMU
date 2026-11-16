@@ -1,0 +1,15 @@
+Y gated_psc0 cnt 1001 sr 40
+Y gated_psc1 cnt 500 sr 40
+Y trigger 2then3 8 3then2 -6
+Y software 2then3 10 3then2 -2
+Y ug_psc89 500 0 0 0 t 30 58
+Y ug_psc0 27033 7 13 21 t 30 58
+Y ug_psc89_89 544 0 0 0 t 28 56
+Y ug_psc89_0 47295 7 13 21 t 30 58
+Y ug_psc0_89 525 0 0 0 t 28 56
+Y ug_chain before 500 after 500 later 2 sr 41
+Y own_ug_psc89 500 0 0 0 t 28 56
+Y own_ug_stopped 500 0 0 0 t 29 57
+Y own_ug_stopped later 0
+Y own_cnt_write 100 100 100 100 t 31 59
+Y sr_clear 00 00 ccg 02
