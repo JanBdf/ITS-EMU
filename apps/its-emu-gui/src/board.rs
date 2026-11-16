@@ -605,14 +605,24 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
             painter.rect_filled(bg, egui::CornerRadius::same(pcb.len(2.0) as u8), Color32::from_black_alpha(170));
             painter.galley(at, galley, Color32::WHITE);
         }
-        let mut hover = format!(
-            "{name} = P{port}{pin}: {}",
+        if n == 0 {
+            // the DAC's output: shown, not driven from outside
+            let hover = match dac {
+                Some(d) => format!("{name} = P{port}{pin}: DAC output {d:.2} V"),
+                None => format!("{name} = P{port}{pin}: DAC output (the DAC is off)"),
+            };
+            let resp = ui.interact(
+                pcb.r(x - 10.0, y - 10.0, x + 10.0, y + 10.0),
+                ui.scope_id().with(("analog", n)),
+                Sense::hover(),
+            );
+            named(resp, egui::Role::Label, &hover).on_hover_text(hover);
+            continue;
+        }
+        let hover = format!(
+            "{name} = P{port}{pin}: {} — scroll: ±0.05 V, double click: open ↔ 3.3 V, right click: set or open",
             volts.map_or_else(|| "open".to_owned(), |v| format!("{v:.2} V applied"))
         );
-        if let Some(d) = dac {
-            hover += &format!(", DAC1 output {d:.2} V");
-        }
-        hover += " — scroll: ±0.05 V, double click: open ↔ 3.3 V, right click: set or open";
         let resp = ui.interact(
             pcb.r(x - 10.0, y - 10.0, x + 10.0, y + 10.0),
             ui.scope_id().with(("analog", n)),
