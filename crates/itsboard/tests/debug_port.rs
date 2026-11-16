@@ -43,8 +43,9 @@ fn single_step_in_a_hot_polling_loop_ends() {
     // (without Unicorn's instruction counting).
     let Some(mut sim) = Sim::boot("TestStdinoutUSART.axf") else { return };
     sim.run_until_ms(12_000);
-    let delay = sim.image.symbol("HAL_Delay").unwrap();
-    assert!(sim.image.symbolize(sim.machine.pc()).is_some_and(|(s, _)| s.name == delay.name));
+    // in the loop: HAL_Delay or the HAL_GetTick it calls
+    let at = sim.image.symbolize(sim.machine.pc()).map(|(s, _)| s.name.clone());
+    assert!(matches!(at.as_deref(), Some("HAL_Delay" | "HAL_GetTick")), "pc in {at:?}");
     for _ in 0..10 {
         let before = sim.machine.pc();
         assert_eq!(sim.machine.step(), StopReason::Step);

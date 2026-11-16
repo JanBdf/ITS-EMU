@@ -1,0 +1,5 @@
+C extclk cnt 100 sr 40
+C trigger cen 0 -> 1 lag -6 sr 40
+C gated cnt 100 tim2_cen 0 sr 40
+C reset at50 50 sr 41
+C ug before 500 after 500

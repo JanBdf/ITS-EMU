@@ -111,7 +111,17 @@ pub struct CoreDebug {
     fp_comp: [u32; FP_NUM_CODE + FP_NUM_LIT],
     dwt: [DwtComparator; DWT_NUM_COMP],
     dbgmcu: [u32; 3],
+    /// TPIU CSPSR, ACPR, SPPR, FFCR (trace output is not modelled).
+    tpiu: [u32; 4],
+    /// ETM control register (ETMCR).
+    etmcr: u32,
 }
+
+/// TPIU registers that a debugger writes: offsets and reset values (SWO
+/// asynchronous mode, formatter in continuous mode), read on the board.
+const TPIU_REGS: [(u32, u32); 4] = [(0x40004, 1), (0x40010, 0), (0x400F0, 1), (0x40304, 0x102)];
+/// ETMCR after reset: powered down, programming bit set (read on the board).
+const ETMCR_RESET: u32 = 0x411;
 
 impl CoreDebug {
     pub fn new(ids: DebugIds) -> Self {
@@ -128,6 +138,8 @@ impl CoreDebug {
             fp_comp: [0; FP_NUM_CODE + FP_NUM_LIT],
             dwt: [DwtComparator::default(); DWT_NUM_COMP],
             dbgmcu: [0; 3],
+            tpiu: TPIU_REGS.map(|(_, v)| v),
+            etmcr: ETMCR_RESET,
         }
     }
 
@@ -205,6 +217,7 @@ impl CoreDebug {
             || (0x1020..0x1060).contains(&off)
             || (0xFF000..0x10_0000).contains(&off)
             || coresight_component(off).is_some()
+            || (0x40000..0x42000).contains(&off)
             || (self.ids.dbgmcu_idcode.is_some() && (0x42000..0x42010).contains(&off))
     }
 
@@ -254,6 +267,15 @@ impl CoreDebug {
             }
             0x42000 => self.ids.dbgmcu_idcode.unwrap_or(0),
             0x42004..=0x4200C => self.dbgmcu[((aligned - 0x42004) / 4) as usize],
+            // TPIU: supported port sizes 1, 2 and 4, formatter stopped, claim tags, DEVID
+            0x40000 => 0xB,
+            0x40300 => 0x8,
+            0x40FA0 => 0xF,
+            0x40FC8 => 0xCA1,
+            _ if let Some(i) = TPIU_REGS.iter().position(|&(o, _)| o == aligned) => self.tpiu[i],
+            // ETM: control, configuration code
+            0x41000 => self.etmcr,
+            0x41004 => 0x8C80_2000,
             0xFF000..=0xFFFFC => self.rom_table(aligned - 0xFF000),
             _ => coresight_component(aligned).map_or(0, |(c, reg)| c.id_register(reg)),
         };
@@ -333,6 +355,8 @@ impl CoreDebug {
                 return DebugAction::PointsChanged;
             }
             0x42004..=0x4200C => self.dbgmcu[((aligned - 0x42004) / 4) as usize] = v,
+            _ if let Some(i) = TPIU_REGS.iter().position(|&(o, _)| o == aligned) => self.tpiu[i] = v,
+            0x41000 => self.etmcr = v,
             _ => {}
         }
         DebugAction::None
@@ -480,7 +504,7 @@ fn coresight_component(off: u32) -> Option<(Component, u32)> {
         0x02000 => Component { part: 0x003, revision: 2, class: 0xE, devtype: 0 }, // FPB
         0x00000 => Component { part: 0x001, revision: 3, class: 0xE, devtype: 0 }, // ITM
         0x40000 => Component { part: 0x9A1, revision: 0, class: 0x9, devtype: 0x11 }, // TPIU
-        0x41000 => Component { part: 0x925, revision: 4, class: 0x9, devtype: 0x13 }, // ETM
+        0x41000 => Component { part: 0x925, revision: 0, class: 0x9, devtype: 0x13 }, // ETM
         _ => return None,
     };
     Some((c, reg))
@@ -491,7 +515,7 @@ mod tests {
     use super::*;
 
     fn st_ids() -> DebugIds {
-        DebugIds { rom_table_part: 0x419, rom_table_jep106: (0, 0x20), rom_table_revision: 0, dbgmcu_idcode: None }
+        DebugIds { rom_table_part: 0x411, rom_table_jep106: (0, 0x20), rom_table_revision: 0, dbgmcu_idcode: None }
     }
 
     #[test]

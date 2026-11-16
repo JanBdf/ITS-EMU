@@ -1,0 +1,4 @@
+K cr 03075e83 cfgr 0000940a pllcfgr 07405a08 now 03075e83
+K hsi_off 311 ns hsi_on 972 ns
+K pll_off 1375 ns pll_on 142687 ns again 142687 ns
+K hse_off 1375 ns hse_on 65125 ns

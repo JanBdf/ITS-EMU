@@ -37,17 +37,11 @@ Each peripheral model is checked against the real board with HwCheck
 
 Not yet compared with the board (record with HwCheck first):
 
-- **Timer chaining** (ITR0–3, TRGO reset/enable/update): `timchain` — TRGO
-  delay to the slave, gated count (`timer_chaining_matches_the_board`).
-  TRGO from the CC1 pulse and OC1REF–OC4REF (MMS ≥ 3) times are rounded like
-  an overflow's, unmeasured.
-- **Timer DMA**: `timdma` — is a request made while the stream is off
-  transferred once it is enabled? (The emulator keeps it, line `T off`.)
 - **TIM1/TIM8 advanced features**: complementary outputs, dead time,
   MOE/AOE, off states, BKIN, COM event.
-- **USB probe**: ROM table/component IDs, FP_CTRL, DWT_CTRL, DBGMCU_IDCODE
-  (HwCheck `rd`); a pyOCD session (`pyocd load -vv` + usbmon against the
-  real ST-LINK) for command sequence and erase/program timing.
+- **USB probe**: a pyOCD session (`pyocd load -vv` + usbmon against the
+  real ST-LINK) for command sequence and erase/program timing. (The debug
+  IDs match the board: `tests/hardware/probe-ids.txt`.)
 - **ADC/DAC triggers** from CCx, OCxREF/compare-pulse TRGO, EXTI11/15 (ADC)
   and EXTI9 (DAC): measure which signal the ADC sees (OCxREF edge or compare
   pulse; EXTI line before or after RTSR/FTSR/IMR) before modelling.
@@ -55,14 +49,24 @@ Not yet compared with the board (record with HwCheck first):
 Known gaps:
 
 - **Timers**: slave modes with ETR; lock levels; break input polled at the
-  sweeps, not at its edge. On the board UG with a stopped counter leaves CNT
-  until it runs again (the emulator clears it at once).
+  sweeps, not at its edge. TRGO from the CC1 pulse and OC1REF–OC4REF
+  (MMS ≥ 3) is timed like an overflow, unmeasured.
+- **Cycle model**: peripheral accesses that are not back to back cost too
+  little: an APB read between other instructions takes ~12 cycles on the
+  board, 10 in the emulator (HwCheck `cyc` ldr_apb1_nop; `timsync` reads),
+  and AHB accesses next to SRAM accesses miss 1–2 cycles. Course code that
+  drives the display or polls peripherals runs 7–11 % fast (`cyc` F lines).
 - **DMA**: memory is written item by item (no bursts, FIFO threshold
   ignored); transfers take no time.
 - **I2C with DMA** keeps CPU byte timing: BTF is set after each byte though
   DMA keeps DR filled on the board (the HAL ignores BTF with DMAEN).
 - **Flash**: programming does not AND; PGSERR faults instead of only setting
   the flag (`stm32f429::flash`). No mass storage, no SWO.
+- **USB OTG FS (CN13)**: the host model sends packets back to back at the
+  bit rate and retries a NAKed one at once. Through a real host controller
+  UsbCdcEcho's echo of 64 KiB runs at 208 KiB/s (562 in the emulator) and
+  512 bytes take 2.3 ms (1.0): it retries NAKed packets later
+  (`tests/hardware/UsbCdcEcho.txt`). Short round trips match (0.2 ms).
 - **Network**: no NAT to the host network; IPv6 frames are dropped.
 - **Devices**: more I2C devices (EEPROM, IMU, …) via `I2cDevice`. Which pin
   the course uses for the DS18B20 is open (encoder: IN0/IN1, GS task 2).

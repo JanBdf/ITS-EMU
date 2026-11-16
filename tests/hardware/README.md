@@ -2,7 +2,7 @@
 
 Output of the `HwCheck` test program (`tests/fixtures/ac6-src/HwCheck`) on an
 ITS-Board (Rev 02, NUCLEO-F429ZI, 180 MHz, ART accelerator on), taken
-2026-10-16/17 with `tools/hw/cmd.py`:
+2026-10-16/17 (`timchain`, `timsync`, `timdma`: 2026-11-16) with `tools/hw/cmd.py`:
 
 | file | command | content |
 |---|---|---|
@@ -26,12 +26,27 @@ ITS-Board (Rev 02, NUCLEO-F429ZI, 180 MHz, ART accelerator on), taken
 | `HwCheck-enc.txt` | `enc` | TIM8 encoder modes (SMS 1/2/3, inverted TI1, wrap below 0) on PC6/PC7, quadrature edges made by switching the pins' pull-up/pull-down |
 | `HwCheck-onewire.txt` | `onewire` | 1-Wire master on PG2 (AUX2) with nothing connected: idle level, no presence pulse, reads all ones (compared in `crates/itsboard/tests/devices.rs`) |
 | `HwCheck-irqlat.txt` | `irqlat` | interrupt latency to a handler that reads DWT->CYCCNT first: pended by NVIC->STIR or EXTI->SWIER, with interrupts enabled or masked until CPSIE |
+| `HwCheck-timchain.txt` | `timchain` | TIM3 slave modes with TIM2's TRGO on ITR1: external clock, trigger, gated, reset by update and by UG |
+| `HwCheck-timsync.txt` | `timsync` | timer chaining in timer clocks: gate length, start offsets of master and slave, CNT samples right after UG or a reset by TRGO, CNT write, SR clear |
+| `HwCheck-timdma.txt` | `timdma` | TIM2 DMA requests on DMA1: update, CC1, CCR1 from memory, DMAR burst, a request while the stream is off |
+| `HwCheck-flash.txt` | `flash` | erase of sector 23 (128 KB, bank 2) at x32 and x8, programming of words, half words and bytes: core cycles |
+| `HwCheck-rcc.txt` | `rcc` | start-up times of HSI (core on the PLL), the main PLL and HSE in bypass (core on HSI), and RCC_CR with the factory HSICAL |
+| `probe-ids.txt` | `rd` | debug system: ROM table and CoreSight component IDs, DBGMCU_IDCODE, CPUID and processor feature registers, TPIU and ETM registers (not DWT_CTRL and DBGMCU_CR: a system reset keeps what a debugger set) |
+| `UsbCdcEcho.txt` | (UsbCdcEcho on CN13) | `lsusb -v` of the device and `tools/usb/cdc-echo.py`: echo round trips and throughput through the computer's host controller |
 | `HwCheck-regs.txt` | `wr`/`dump` (first line) | reset values of the registers of timers, SPIs, U(S)ARTs, I2Cs, ADC, DAC, SYSCFG, EXTI |
 
 `crates/itsboard/tests/hardware.rs` runs the same commands in the emulator
-and compares. Re-measure with:
+and compares. Re-measure with (one command per reset: some leave pins and
+peripherals configured):
 
 ```sh
 tools/hw/flash.sh tests/fixtures/ac6/HwCheck.axf
-python3 tools/hw/cmd.py --wait-ready time cyc div pins
+for c in time cyc div pins; do
+    tools/hw/reset.sh && python3 tools/hw/cmd.py --wait-ready $c
+done
 ```
+
+The tools pick the real board's ST-LINK by its serial number
+(`tools/hw/board-serial.sh`, or `ITS_BOARD_SERIAL`), not the emulator's when
+it is attached over USB/IP. `HwCheck-pins.txt` was taken with nothing on CN13:
+a USB cable there drives PA9 (VBUS), PA11 and PA12.

@@ -305,7 +305,20 @@ fn counting_directions_match_the_board() {
     let Some(out) = run("timdir", 500) else { return };
     let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timdir.txt")).unwrap();
     let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("O ")).collect();
-    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+    let board: Vec<&str> = board.lines().collect();
+    assert_eq!(emu.len(), board.len(), "{out}");
+    for (e, b) in emu.iter().zip(&board) {
+        let (ev, bv): (Vec<&str>, Vec<&str>) = (e.split_whitespace().collect(), b.split_whitespace().collect());
+        if bv[2] == "uif" && (bv[1] == "up" || bv[1] == "down") {
+            // The 10th update comes within a few cycles of the end of the
+            // 10 ms window: 9 or 10 on the board, by code layout.
+            let n = |v: &[&str]| -> i64 { v[3].parse().unwrap() };
+            assert!((n(&ev) - n(&bv)).abs() <= 1, "{e}\n{b}");
+            assert_eq!(ev[4..], bv[4..], "{e}\n{b}");
+        } else {
+            assert_eq!(e, b);
+        }
+    }
 }
 
 #[test]
@@ -321,13 +334,49 @@ fn ccr_preload_matches_the_board() {
 fn timer_chaining_matches_the_board() {
     // TIM3 slave modes with TIM2's TRGO (ITR1)
     let Some(out) = run("timchain", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timchain.txt")).unwrap();
     let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("C ")).collect();
-    for line in ["C extclk cnt 100 sr 40", "C reset at50 50 sr 41", "C ug before 500 after 0"] {
-        assert!(emu.contains(&line), "{line} in {emu:?}");
+    let board: Vec<&str> = board.lines().collect();
+    assert_eq!(emu.len(), board.len(), "{out}");
+    for (e, b) in emu.iter().zip(&board) {
+        if b.starts_with("C trigger") {
+            // The lag includes the time between two CNT reads, in which APB
+            // reads separated by other instructions are a few cycles short.
+            let lag = |l: &str| -> i64 { l.split_whitespace().nth(7).unwrap().parse().unwrap() };
+            assert!((lag(e) - lag(b)).abs() <= 2, "{e}\n{b}");
+        } else {
+            assert_eq!(e, b);
+        }
     }
-    // not recorded yet: tools/hw/cmd.py timchain | grep '^C ' > tests/hardware/HwCheck-timchain.txt
-    let Ok(board) = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timchain.txt")) else { return };
-    assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
+fn timer_chaining_delays_match_the_board() {
+    // Gate length, start offsets and when UG or a reset by TRGO reaches CNT
+    let Some(out) = run("timsync", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timsync.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("Y ")).collect();
+    let board: Vec<&str> = board.lines().collect();
+    assert_eq!(emu.len(), board.len(), "{out}");
+    let num = |l: &str, i: usize| -> i64 { l.split_whitespace().nth(i).unwrap().parse().unwrap() };
+    for (e, b) in emu.iter().zip(&board) {
+        let name = b.split_whitespace().nth(1).unwrap();
+        if name == "trigger" || name == "software" {
+            // CNT of two timers read one after the other: the slave's offset
+            // ((a + b) / 2) matches, the reads' distance is short (APB timing)
+            let offset = |l: &str| num(l, 3) + num(l, 5);
+            assert!((offset(e) - offset(b)).abs() <= 2, "{e}\n{b}");
+        } else if b.contains(" t ") {
+            // CNT samples after a write: the first still old (or the written
+            // value), the second at the reset's count; later ones and the
+            // cycle stamps depend on the APB timing.
+            let (s0e, s0b) = (num(e, 2), num(b, 2));
+            assert_eq!(s0e >= 100, s0b >= 100, "{e}\n{b}");
+            assert!((num(e, 3) - num(b, 3)).abs() <= 1, "{e}\n{b}");
+        } else {
+            assert_eq!(e, b);
+        }
+    }
 }
 
 #[test]
@@ -427,12 +476,18 @@ fn adc_and_dac_match_the_board() {
             250.0 // open pins pick up noise
         } else if name.starts_with("dac") && !name.contains("dor") && b.len() == 4 || name.starts_with("inj_jdr") {
             15.0 // noise of the converter, VREFINT at short sampling time
-        } else if name.starts_with("cont") || name.starts_with("vrefint") {
+        } else if name.starts_with("cont") || name.starts_with("vrefint") || name == "temp" || name == "vbat" {
             3.0
         } else {
             0.0
         };
         assert!((x - y).abs() <= tol, "{name}: emulator {e:?}, board {b:?}");
+        if b.len() == 4 && (name.starts_with("dac") || ["vrefint", "temp", "vbat"].contains(&name)) {
+            // the noise: min to max of 16 conversions
+            let spread = |v: &[String]| -> f64 { v[3].parse::<f64>().unwrap() - v[1].parse::<f64>().unwrap() };
+            let (x, y) = (spread(e), spread(b));
+            assert!(x >= y / 3.0 && x <= y * 2.0 + 2.0, "{name} noise: emulator {e:?}, board {b:?}");
+        }
     }
 }
 
@@ -470,16 +525,72 @@ fn timer_dma_requests_match_the_board() {
     // TIM2 update/CC1 requests on DMA1, DMAR bursts, a request while the stream is off
     let Some(out) = run("timdma", 500) else { return };
     let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("T ")).collect();
-    for line in [
-        "T up ndtr 3 buf 0 0 0 0 0",
-        "T cc1 ndtr 2 buf 300 300 sr 1f",
-        "T m2p ccr1 200 then 400 ndtr 0 lisr 00000c00",
-        "T burst 11 22 then 33 44 ndtr 0",
-        "T off_ude_cleared ndtr 1 buf 0 0",
-    ] {
-        assert!(emu.contains(&line), "{line} in {emu:?}");
-    }
-    // not recorded yet: tools/hw/cmd.py timdma | grep '^T ' > tests/hardware/HwCheck-timdma.txt
-    let Ok(board) = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timdma.txt")) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-timdma.txt")).unwrap();
     assert_eq!(emu, board.lines().collect::<Vec<_>>());
+}
+
+#[test]
+fn debug_ids_match_the_board() {
+    // ROM table, CoreSight component IDs, DBGMCU_IDCODE, CPUID and the
+    // processor feature registers, TPIU and ETM registers (HwCheck `rd`)
+    let Some(mut sim) = Sim::boot("HwCheck.axf") else { return };
+    sim.run_until_ms(2_500);
+    assert!(sim.take_serial().ends_with("ready\n"));
+    let board = std::fs::read_to_string(format!("{REFERENCE}/probe-ids.txt")).unwrap();
+    let mut ms = 2_500;
+    for line in board.lines() {
+        let addr = line.split_whitespace().nth(1).unwrap();
+        sim.send_serial(&format!("rd {addr}\n"));
+        ms += 5;
+        sim.run_until_ms(ms);
+        let out = sim.take_serial();
+        assert!(out.lines().any(|l| l == line), "board: {line}, emulator: {out}");
+    }
+}
+
+#[test]
+fn flash_erase_and_programming_times_match_the_board() {
+    // Sector 23 erased at x32 and x8, 64 accesses of each size programmed
+    let Some(out) = run("flash", 3_500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-flash.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("F ")).collect();
+    let board: Vec<&str> = board.lines().collect();
+    assert_eq!(emu.len(), board.len(), "{out}");
+    let num = |l: &str, i: usize| -> f64 { l.split_whitespace().nth(i).unwrap().parse().unwrap() };
+    for (e, b) in emu.iter().zip(&board) {
+        if b.contains("erase") {
+            // the board's erase times vary by about 10 % from run to run
+            assert!((num(e, 2) / num(b, 2) - 1.0).abs() < 0.12, "{e}\n{b}");
+            assert_eq!(
+                e.split_whitespace().skip(3).collect::<Vec<_>>(),
+                b.split_whitespace().skip(3).collect::<Vec<_>>()
+            );
+        } else if b.contains("prog") {
+            assert!((num(e, 3) / num(b, 3) - 1.0).abs() < 0.02, "{e}\n{b}");
+        } else {
+            assert_eq!(e, b);
+        }
+    }
+}
+
+#[test]
+fn clock_start_up_times_match_the_board() {
+    // HSI, HSE in bypass and main PLL switched off and on again
+    let Some(out) = run("rcc", 500) else { return };
+    let board = std::fs::read_to_string(format!("{REFERENCE}/HwCheck-rcc.txt")).unwrap();
+    let emu: Vec<&str> = out.lines().filter(|l| l.starts_with("K ")).collect();
+    let board: Vec<&str> = board.lines().collect();
+    assert_eq!(emu.len(), board.len(), "{out}");
+    assert_eq!(emu[0], board[0], "CR, CFGR, PLLCFGR");
+    let ns = |l: &str, name: &str| -> f64 {
+        let v: Vec<&str> = l.split_whitespace().collect();
+        let i = v.iter().position(|&w| w == name).unwrap();
+        v[i + 1].parse().unwrap()
+    };
+    // switching off is the polling loop's time (not modelled); on is the start-up
+    // (HSI: 0.97-1.07 us on the board, polled in steps of about 0.1 us)
+    for (i, name, tol) in [(1, "hsi_on", 0.15), (2, "pll_on", 0.03), (2, "again", 0.03), (3, "hse_on", 0.03)] {
+        let (x, y) = (ns(emu[i], name), ns(board[i], name));
+        assert!((x / y - 1.0).abs() < tol, "{name}: emulator {x} ns, board {y} ns");
+    }
 }

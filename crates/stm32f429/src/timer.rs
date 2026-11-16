@@ -18,7 +18,9 @@
 //! - Slave modes reset, gated, trigger and external clock 1, triggered by
 //!   TI1F_ED/TI1FP1/TI2FP2 (HwCheck `timslave`) or another timer's TRGO
 //!   (ITR0–3; TRGO = reset/UG, enable, update, CC1 pulse or OC1REF–OC4REF;
-//!   not yet compared with the board). ETR is not modelled (logged).
+//!   HwCheck `timchain`, `timsync`). ETR is not modelled (logged).
+//! - The counter starts a clock after CEN is set by software and holds its
+//!   prescaler count while stopped; CNT shows UG and resets a few clocks late.
 //! - TIM1/TIM8: complementary outputs with dead time, break input (BKIN,
 //!   BG), COM event (CCPC/CCUS: COMG or TRGI).
 //! - DMA requests on update, CC and trigger events (UDE, CCxDE, TDE), one
@@ -145,6 +147,8 @@ pub struct ChannelPins {
 pub type SharedPwm = Rc<Cell<[Option<f32>; 4]>>;
 
 const PS_PER_S: u128 = 1_000_000_000_000;
+/// Picoseconds of rounding a counter allows in the time since its start.
+const TIME_SLACK_PS: u64 = 2;
 
 const CR1_CEN: u32 = 1 << 0;
 const CR1_UDIS: u32 = 1 << 1;
@@ -176,6 +180,15 @@ const BDTR_MOE: u32 = 1 << 15;
 /// Timer clocks from an output edge until its own channel input captures it
 /// (measured: toggle on CCR1 = 500, CH2 captures 512).
 const LOOPBACK_CLOCKS: u64 = 12;
+/// Timer clocks from setting CEN by software until the counter counts: a
+/// master started by software runs one clock behind a slave it starts in
+/// trigger mode, and gates a slave for its pulse + 1 clock (HwCheck
+/// `timsync`, TIM2/TIM3).
+const START_CLOCKS: u64 = 1;
+/// Timer clocks after UG or a reset by TRGI during which CNT still reads its
+/// old value: a read right after the EGR write sees it, one about 7 clocks
+/// later the new one (HwCheck `timsync`, TIM3; fitted between those bounds).
+const UG_READ_CLOCKS: u64 = 5;
 
 pub use crate::rcc::ApbBus;
 
@@ -272,6 +285,11 @@ pub struct GpTimer {
     base_ps: u64,
     /// Ticks after `base_ps` up to which compare matches have been flagged.
     checked: u128,
+    /// After UG or a slave reset: CNT reads its old value until this time.
+    reinit_read: Option<(u64, u32)>,
+    /// Count of the prescaler (in picoseconds of its tick) while the counter
+    /// is stopped: it holds it and continues from there (UG clears it).
+    psc_held_ps: u64,
     /// Next update or compare interrupt in CPU cycles.
     next_event: Option<u64>,
     warned: bool,
@@ -343,6 +361,8 @@ impl GpTimer {
             cnt_base: 0,
             base_ps: 0,
             checked: 0,
+            reinit_read: None,
+            psc_held_ps: 0,
             next_event: None,
             warned: false,
             warned_clock: false,
@@ -533,6 +553,8 @@ impl GpTimer {
         (self.rcr, self.rep_left, self.bdtr, self.dcr, self.or) = (0, 0, 0, 0, 0);
         (self.cnt_base, self.base_ps, self.checked, self.next_event, self.warned) = (0, 0, 0, None, false);
         self.warned_clock = false;
+        self.reinit_read = None;
+        self.psc_held_ps = 0;
         self.dma_index = 0;
         if let Some((dma, lines)) = &self.dma {
             for l in lines {
@@ -724,15 +746,16 @@ impl GpTimer {
                 self.event(SR_TIF);
                 self.advance_to(ctx, t);
                 let flag = self.cr1 & CR1_URS == 0;
-                self.reinit(ctx, t, flag);
+                self.reinit_late(ctx, t, flag);
             }
             5 => {
                 // gated: counts while TRGI is high; TIF on both edges
                 self.event(SR_TIF);
                 self.advance_to(ctx, t);
                 let phase = self.phase_now(t).min(u128::from(u32::MAX)) as u32;
+                let held = self.prescaler_ps(t);
                 self.gate = level;
-                self.rebase(t, phase);
+                self.restart(t, phase, held);
                 self.sync_enable_trgo(ctx.clock.cycle_at_ps(t));
             }
             6 if rising => {
@@ -740,7 +763,7 @@ impl GpTimer {
                 self.advance_to(ctx, t);
                 if !self.running() {
                     self.cr1 |= CR1_CEN;
-                    self.base_ps = t;
+                    self.base_ps = t - self.psc_held_ps.min(t);
                     self.checked = 0;
                     self.sync_enable_trgo(ctx.clock.cycle_at_ps(t));
                 }
@@ -862,6 +885,7 @@ impl GpTimer {
         self.update_event(flag);
         self.rebase(t_ps, 0);
         self.base_ps = t_ps;
+        self.psc_held_ps = 0;
         for ch in 0..self.channels {
             self.oc_wrap(ch, 0);
         }
@@ -870,6 +894,18 @@ impl GpTimer {
         } else if self.mms() == 0 {
             self.itr_event(ctx.clock.cycle_at_ps(t_ps), TrgoEvent::Pulse); // MMS = reset: UG on TRGO
         }
+    }
+
+    /// [`Self::reinit`] by UG or TRGI, which CNT reads show a few clocks late.
+    fn reinit_late(&mut self, ctx: &DeviceCtx, t_ps: u64, flag: bool) {
+        let old = self.cnt(t_ps);
+        self.reinit(ctx, t_ps, flag);
+        self.reinit_read = Some((t_ps + self.clocks_ps(UG_READ_CLOCKS), old));
+    }
+
+    /// Duration of `n` timer clocks in picoseconds.
+    fn clocks_ps(&self, n: u64) -> u64 {
+        (u128::from(n) * PS_PER_S / u128::from(self.kernel_hz().max(1))) as u64
     }
 
     /// Over- or underflow of an edge-clocked counter at `cycle`.
@@ -941,7 +977,7 @@ impl GpTimer {
             }
         }
         drop(g);
-        let delay_ps = (u128::from(LOOPBACK_CLOCKS) * PS_PER_S / u128::from(self.kernel_hz().max(1))) as u64;
+        let delay_ps = self.clocks_ps(LOOPBACK_CLOCKS);
         for ch in 0..4 {
             let Some(src) = self.capture_source(ch) else { continue };
             let (rise, fall, edge_ps) = edges[src];
@@ -1297,7 +1333,9 @@ impl GpTimer {
         if !self.running() || self.edge_clocked() {
             return (0, 0);
         }
-        let dt = u128::from(now_ps.saturating_sub(self.base_ps)) * u128::from(self.kernel_hz());
+        // Times are whole picoseconds, rounded down: a tick that falls on
+        // `now_ps` counts though both ends may be up to a picosecond off.
+        let dt = u128::from((now_ps + TIME_SLACK_PS).saturating_sub(self.base_ps)) * u128::from(self.kernel_hz());
         let tick = self.tick_ps_num();
         (dt / tick, dt % tick)
     }
@@ -1412,6 +1450,31 @@ impl GpTimer {
         self.base_ps = now_ps - (rem / hz) as u64;
         self.cnt_base = cnt;
         self.checked = 0;
+    }
+
+    /// The prescaler's count at `now_ps` in picoseconds: running, the part of
+    /// a tick elapsed; stopped, the count it holds.
+    fn prescaler_ps(&self, now_ps: u64) -> u64 {
+        if !self.running() || self.edge_clocked() {
+            return self.psc_held_ps;
+        }
+        let (_, rem) = self.elapsed_ticks(now_ps);
+        (rem / u128::from(self.kernel_hz().max(1))) as u64
+    }
+
+    /// Re-anchors the counter at `now_ps` at phase `cnt` after a change of
+    /// whether it runs: a running one continues with the prescaler count
+    /// `held` (taken before the change), a stopped one keeps it.
+    fn restart(&mut self, now_ps: u64, cnt: u32, held: u64) {
+        self.cnt_base = cnt;
+        self.checked = 0;
+        if self.running() && !self.edge_clocked() {
+            self.base_ps = now_ps - held.min(now_ps);
+            self.psc_held_ps = 0;
+        } else {
+            self.base_ps = now_ps;
+            self.psc_held_ps = held;
+        }
     }
 
     /// Output compare channel `ch` with CCR preload (OCxPE).
@@ -1725,7 +1788,10 @@ impl GpTimer {
             0x18 => self.com_pre.map_or(self.ccmr[0], |(_, m)| m[0]),
             0x1C => self.com_pre.map_or(self.ccmr[1], |(_, m)| m[1]),
             0x20 => self.com_pre.map_or(self.ccer, |(c, _)| c),
-            0x24 => self.cnt(now_ps),
+            0x24 => match self.reinit_read {
+                Some((until, old)) if now_ps < until => old,
+                _ => self.cnt(now_ps),
+            },
             0x28 => self.psc,
             0x2C => self.arr,
             0x30 => self.rcr,
@@ -1824,11 +1890,16 @@ impl Peripheral for GpTimer {
         match aligned {
             0x00 => {
                 let (cnt, down) = (self.cnt(now_ps), self.dir_now(now_ps));
+                let started = self.cr1 & CR1_CEN == 0 && v & CR1_CEN != 0;
+                let held = self.prescaler_ps(now_ps);
                 // DIR is read-only in encoder and center-aligned mode
                 let dir = if self.encoder() || self.center() != 0 { self.cr1 & CR1_DIR } else { v & CR1_DIR };
                 self.cr1 = (v & self.cr1_mask & !CR1_DIR) | dir;
                 let down = if self.center() != 0 { down } else { self.counts_down() };
-                self.rebase(now_ps, self.phase_of(cnt, down).min(u128::from(u32::MAX)) as u32);
+                self.restart(now_ps, self.phase_of(cnt, down).min(u128::from(u32::MAX)) as u32, held);
+                if started && self.running() && !self.edge_clocked() {
+                    self.base_ps += self.clocks_ps(START_CLOCKS);
+                }
                 if self.cr1 & CR1_ARPE == 0 {
                     self.arr_active = self.arr;
                 }
@@ -1882,7 +1953,7 @@ impl Peripheral for GpTimer {
                 if v & 1 != 0 {
                     // UG: re-initialise counter and prescaler, update shadow registers.
                     let flag = self.cr1 & CR1_URS == 0;
-                    self.reinit(ctx, now_ps, flag);
+                    self.reinit_late(ctx, now_ps, flag);
                 }
                 // CCxG, COMG, TG, BG: set their flags
                 let channels = (0x1Eu32 >> (4 - self.channels)) & 0x1E;
@@ -1937,6 +2008,7 @@ impl Peripheral for GpTimer {
                 let phase = self.phase_of(v & mask, down).min(u128::from(u32::MAX)) as u32;
                 self.rebase(now_ps, phase);
                 self.base_ps = now_ps;
+                self.reinit_read = None;
             }
             0x28 => self.psc = v & 0xFFFF,
             0x2C => {
@@ -2061,7 +2133,8 @@ mod tests {
             t2.write(&mut ctx, 0x2C, 4, 899); // 10 us
             t2.write(&mut ctx, 0x00, 4, 1);
         }
-        sweep_to([&mut t3, &mut t2], &mut clock, &mut nvic, 180_000_000 / 1000); // 1 ms
+        // 1 ms and the clock the master starts after its CEN
+        sweep_to([&mut t3, &mut t2], &mut clock, &mut nvic, 180_000_000 / 1000 + 2);
         let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
         assert_eq!(t3.read(&mut ctx, 0x24, 4), 100);
         assert_ne!(t3.read(&mut ctx, 0x10, 4) & SR_TIF, 0, "TIF");
@@ -2086,7 +2159,8 @@ mod tests {
         sweep_to([&mut t3, &mut t2], &mut clock, &mut nvic, 1000 + 180_000);
         let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
         assert_eq!(t3.read(&mut ctx, 0x00, 4) & CR1_CEN, CR1_CEN, "trigger mode sets CEN");
-        assert_eq!(t3.read(&mut ctx, 0x24, 4), t2.read(&mut ctx, 0x24, 4) & 0xFFFF);
+        // the master counts from a clock after its CEN, the slave at once (HwCheck timsync)
+        assert_eq!(t3.read(&mut ctx, 0x24, 4), (t2.read(&mut ctx, 0x24, 4) + 1) & 0xFFFF);
     }
 
     #[test]
@@ -2105,7 +2179,7 @@ mod tests {
         sweep_to([&mut t3, &mut t2], &mut clock, &mut nvic, 180_000_000 / 1000);
         let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
         assert_eq!(t2.read(&mut ctx, 0x00, 4) & CR1_CEN, 0, "one pulse");
-        assert_eq!(t3.read(&mut ctx, 0x24, 4), 9000, "counted for 100 us");
+        assert_eq!(t3.read(&mut ctx, 0x24, 4), 9001, "counted for 100 us and the master's start clock");
     }
 
     #[test]
@@ -2121,10 +2195,11 @@ mod tests {
             t2.write(&mut ctx, 0x2C, 4, 899); // 10 us
             t2.write(&mut ctx, 0x00, 4, 1);
         }
-        // 1 ms + 2.5 us: the last reset was 2.5 us (225 ticks) ago
+        // 1 ms + 2.5 us: the last reset was 2.5 us (225 ticks) ago, less the
+        // clock the master starts after its CEN
         sweep_to([&mut t3, &mut t2], &mut clock, &mut nvic, 180_000 + 450);
         let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
-        assert_eq!(t3.read(&mut ctx, 0x24, 4), 225);
+        assert_eq!(t3.read(&mut ctx, 0x24, 4), 224);
         assert_ne!(t3.read(&mut ctx, 0x10, 4) & SR_UIF, 0, "reset is an update event");
     }
 
@@ -2216,10 +2291,11 @@ mod tests {
             t2.write(&mut ctx, 0x2C, 4, 899); // 10 us
             t2.write(&mut ctx, 0x00, 4, 1);
         }
-        // 1 ms + 2.5 us: the last match was 900 - 300 + 225 ticks ago
+        // 1 ms + 2.5 us: the last match was 900 - 300 + 225 ticks ago (less
+        // the master's start clock)
         sweep_to([&mut t3, &mut t2], &mut clock, &mut nvic, 180_000 + 450);
         let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
-        assert_eq!(t3.read(&mut ctx, 0x24, 4), 825);
+        assert_eq!(t3.read(&mut ctx, 0x24, 4), 824);
         assert_ne!(t2.read(&mut ctx, 0x10, 4) & 2, 0, "CC1IF");
     }
 
@@ -2256,7 +2332,7 @@ mod tests {
         }
         clock.advance(180_000_000 / 1000); // 1 ms
         let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
-        assert_eq!(t.read(&mut ctx, 0x24, 4), 90_000);
+        assert_eq!(t.read(&mut ctx, 0x24, 4), 89_999, "counting from a clock after CEN");
     }
 
     #[test]
@@ -2329,7 +2405,7 @@ mod tests {
         t.write(&mut ctx, 0x14, 4, 1);
         t.write(&mut ctx, 0x10, 4, 0);
         t.write(&mut ctx, 0x00, 4, 1);
-        ctx.clock.advance(180 * 250); // 250 us
+        ctx.clock.advance(1 + 180 * 250); // the start clock and 250 us
         gpio.borrow_mut().drive(port('F'), 6, Some(false)); // pressed: falling edge
         t.update(&mut ctx);
         assert_eq!(t.read(&mut ctx, 0x10, 4), 2, "CC1IF");
@@ -2549,12 +2625,13 @@ mod tests {
             t.write(&mut ctx, 0x0C, 4, 1); // UIE
             t.write(&mut ctx, 0x00, 4, 1); // CEN
         }
+        // 1 ms after the clock the counter starts after CEN
         let ev = t.next_event().unwrap();
-        assert_eq!(ev, 180_000);
+        assert_eq!(ev, 180_002);
         clock.advance(ev);
         let mut ctx = DeviceCtx { clock: &mut clock, nvic: &mut nvic };
         t.update(&mut ctx);
         assert!(nvic.is_pending(emu_core::nvic::IRQ0 + 28));
-        assert_eq!(t.next_event(), Some(360_000));
+        assert_eq!(t.next_event(), Some(360_002));
     }
 }

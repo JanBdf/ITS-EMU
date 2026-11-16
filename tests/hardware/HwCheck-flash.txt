@@ -1,0 +1,6 @@
+F erase128k_x32 165147201 sr 00
+F prog_word avg 2554 min 2546 max 2572
+F prog_half avg 2564 min 2553 max 2590
+F prog_byte avg 2558 min 2551 max 2564
+F verify 1
+F erase128k_x8 367169587 erased ffffffff
