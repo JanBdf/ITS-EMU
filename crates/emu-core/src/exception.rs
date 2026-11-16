@@ -302,8 +302,8 @@ mod tests {
             lr: 0x0800_0055,
             ..Default::default()
         };
-        for i in 0..13 {
-            c.r[i] = 0x100 + i as u32;
+        for (i, r) in c.r.iter_mut().enumerate().take(13) {
+            *r = 0x100 + i as u32;
         }
         c.mem.insert(0x0800_0000 + 4 * nvic::SYSTICK, 0x0800_0201);
         c

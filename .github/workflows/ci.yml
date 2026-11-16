@@ -66,6 +66,12 @@ jobs:
         run: cargo build --release --workspace --locked ${{ env.TARGET }}
       - name: Test
         run: cargo test --release --workspace --locked ${{ env.TARGET }}
+      # The harness hides what the emulator thread printed when a test aborts.
+      - name: GDB server tests again, with their output
+        if: failure() && matrix.experimental
+        env:
+          RUST_BACKTRACE: 1
+        run: cargo test --release -p emu-core --test gdb --locked ${{ env.TARGET }} -- --nocapture --test-threads 1
 
       # The GUI starts and draws a frame (Xvfb, Mesa's software OpenGL):
       # start-up and renderer problems that the tests do not see.
