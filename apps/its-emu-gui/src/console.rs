@@ -300,20 +300,26 @@ impl Console {
             }
             job
         };
-        egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).max_height(height).show(
-            ui,
-            |ui| {
-                let cols = ((ui.available_width() / char_w).floor() as usize).saturating_sub(stamp).max(8);
-                // where each line's rows start
-                let mut starts = Vec::with_capacity(self.lines.len() + 1);
-                let mut total = 0;
-                for line in &self.lines {
-                    starts.push(total);
-                    total += line.chars.div_ceil(cols).max(1);
-                }
-                starts.push(total);
-                ui.spacing_mut().item_spacing.y = 0.0;
-                egui::ScrollArea::neither().show_rows(ui, row_h, total, |ui, rows| {
+        // one scroll area that lays out only the visible rows (inside another
+        // scroll area show_rows saw only the first screenful: blank rows
+        // once the text was longer)
+        let width = ui.available_width() - ui.spacing().scroll.allocated_width();
+        let cols = ((width / char_w).floor() as usize).saturating_sub(stamp).max(8);
+        // where each line's rows start
+        let mut starts = Vec::with_capacity(self.lines.len() + 1);
+        let mut total = 0;
+        for line in &self.lines {
+            starts.push(total);
+            total += line.chars.div_ceil(cols).max(1);
+        }
+        starts.push(total);
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            egui::ScrollArea::vertical()
+                .stick_to_bottom(true)
+                .auto_shrink([false, false])
+                .max_height(height)
+                .show_rows(ui, row_h, total, |ui, rows| {
                     let mut n = starts.partition_point(|&s| s <= rows.start).saturating_sub(1);
                     for row in rows {
                         while n + 1 < starts.len() && starts[n + 1] <= row {
@@ -324,8 +330,7 @@ impl Console {
                         ui.add(egui::Label::new(job).selectable(true).wrap_mode(egui::TextWrapMode::Extend));
                     }
                 });
-            },
-        );
+        });
     }
 
     /// Line ending, single keys, echo; `rtl`: added in a right-to-left
