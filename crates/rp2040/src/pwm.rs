@@ -307,8 +307,7 @@ impl Block for Pwm {
             }
             0xA0 => {
                 let en = op.apply(self.read(ctx, 0xA0), value);
-                for n in 0..8 {
-                    let s = &mut self.slices[n];
+                for (n, s) in self.slices.iter_mut().enumerate() {
                     let on = en & (1 << n) != 0;
                     if on != s.running() {
                         s.csr ^= CSR_EN;

@@ -83,7 +83,8 @@ jobs:
             echo "### Throughput on ${{ matrix.name }}"
             echo '```'
             echo "bench.elf (compute phase, then MMIO polling phase):"
-            $BIN/its-emu tests/fixtures/micro/bench.elf --no-fonts --continue-on-bkpt --seconds 30 2>/dev/null | grep MIPS
+            # ends at its last BKPT: exit status 2
+            ( $BIN/its-emu tests/fixtures/micro/bench.elf --no-fonts --continue-on-bkpt --seconds 30 2>/dev/null || test $? -eq 2 ) | grep MIPS
             echo "TestNewFont.axf (5 s virtual, display output):"
             $BIN/its-emu tests/fixtures/ac6/TestNewFont.axf --seconds 5 2>/dev/null | grep MIPS
             echo '```'

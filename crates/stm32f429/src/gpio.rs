@@ -185,9 +185,9 @@ impl PortState {
         let before = self.idr();
         self.odr = odr & 0xFFFF;
         let rising = self.idr() & !before;
-        for pin in 0..16 {
+        for (pin, rises) in self.rises.iter_mut().enumerate() {
             if rising & (1 << pin) != 0 {
-                self.rises[pin] = self.rises[pin].wrapping_add(1);
+                *rises = rises.wrapping_add(1);
             }
         }
     }
