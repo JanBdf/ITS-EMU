@@ -606,7 +606,7 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
         if let Some(d) = dac {
             hover += &format!(", DAC1 output {d:.2} V");
         }
-        hover += " — scroll: ±0.05 V, right click: set or open";
+        hover += " — scroll: ±0.05 V, double click: open ↔ 3.3 V, right click: set or open";
         let resp = ui.interact(
             pcb.r(x - 10.0, y - 10.0, x + 10.0, y + 10.0),
             ui.scope_id().with(("analog", n)),
@@ -622,13 +622,17 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
                     .sum()
             });
             if scroll != 0.0 {
-                let v = (volts.unwrap_or(1.65) + 0.05 * scroll.signum()).clamp(0.0, 3.3);
+                // an open pad starts from 0 V
+                let v = (volts.unwrap_or(0.0) + 0.05 * scroll.signum()).clamp(0.0, 3.3);
                 input.analog = Some((n, Some((v * 100.0).round() / 100.0)));
             }
         }
+        if resp.double_clicked() {
+            input.analog = Some((n, if volts.is_some() { None } else { Some(3.3) }));
+        }
         resp.context_menu(|ui| {
             ui.label(format!("{name} (P{port}{pin})"));
-            let mut v = volts.unwrap_or(1.65);
+            let mut v = volts.unwrap_or(0.0);
             if ui.add(egui::Slider::new(&mut v, 0.0..=3.3).suffix(" V").fixed_decimals(2)).changed() {
                 input.analog = Some((n, Some(v)));
             }

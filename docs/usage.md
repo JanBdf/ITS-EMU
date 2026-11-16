@@ -13,8 +13,9 @@ cargo run --release -p its-emu -- path/to/Program.axf --seconds 10 \
 **GUI.** F1 lists all controls. The main ones:
 
 - Keys `0`–`7` press S0–S7; right click latches a button. Clicking the
-  display touches it; clicking an AUX pad ties it to GND/3V3; mouse wheel or
-  right click on an Analog header pad sets a voltage.
+  display touches it; clicking an AUX pad ties it to GND/3V3; mouse wheel
+  (from 0 V) or right click on an Analog header pad sets a voltage, a double
+  click switches it between open and 3.3 V.
 - Drop a firmware file onto the window or click the empty display; Ctrl+O
   opens one (*File* lists recent files and saves the display as PNG, Ctrl+S).
   A rebuilt firmware file is reloaded automatically unless a debugger is

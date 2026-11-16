@@ -956,7 +956,10 @@ impl App {
                     row("Touch the display", "Click or drag on the display".into());
                     row("Display alone, and back", format!("Right click on the display · {} · Esc", key(&DISPLAY)));
                     row("AUX0–5: open → GND → 3V3", "Click on the pad".into());
-                    row("Voltage on an Analog pad", "Mouse wheel (±0.05 V) or right click on the pad".into());
+                    row(
+                        "Voltage on an Analog pad",
+                        "Mouse wheel (±0.05 V from 0 V), double click (open ↔ 3.3 V) or right click on the pad".into(),
+                    );
                     row("Load a firmware file", format!("Drop it onto the window · {} · File menu", key(&OPEN)));
                     row("Run / pause", key(&RUN));
                     row("Reset", key(&RESET));
