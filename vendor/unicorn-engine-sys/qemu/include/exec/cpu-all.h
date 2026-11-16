@@ -437,6 +437,12 @@ static inline CPUNegativeOffsetState *cpu_neg(CPUState *cpu)
     return &arch_cpu->neg;
 }
 
+/* ITS-EMU: forgets the targets of indirect jumps (see ItsJumpCacheEntry) */
+static inline void its_jc_clear(CPUState *cpu)
+{
+    memset(cpu_neg(cpu)->its_jc, 0, sizeof(cpu_neg(cpu)->its_jc));
+}
+
 /**
  * env_tlb(env)
  * @env: The architecture environment

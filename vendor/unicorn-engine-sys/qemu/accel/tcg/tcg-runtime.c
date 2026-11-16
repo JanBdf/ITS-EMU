@@ -160,6 +160,29 @@ void *HELPER(lookup_tb_ptr)(CPUArchState *env)
     return tb->tc.ptr;
 }
 
+/*
+ * ITS-EMU: lookup_tb_ptr for the indirect jump with the number `site`, which
+ * found nothing for the pc in its_jc: remembers the block for that site.
+ */
+void *HELPER(its_lookup_tb_ptr)(CPUArchState *env, uint32_t site)
+{
+    CPUState *cpu = env_cpu(env);
+    TranslationBlock *tb;
+    target_ulong cs_base, pc;
+    uint32_t flags;
+    struct uc_struct *uc = (struct uc_struct *)cpu->uc;
+    ItsJumpCacheEntry *e;
+
+    tb = tb_lookup__cpu_state(cpu, &pc, &cs_base, &flags, curr_cflags());
+    if (tb == NULL) {
+        return uc->tcg_ctx->code_gen_epilogue;
+    }
+    e = &env_neg(env)->its_jc[(pc >> 1) & ((1 << ITS_JC_BITS) - 1)];
+    e->key = (uint64_t)site << 32 | pc;
+    e->host = tb->tc.ptr;
+    return tb->tc.ptr;
+}
+
 void HELPER(exit_atomic)(CPUArchState *env)
 {
     cpu_loop_exit_atomic(env_cpu(env), GETPC());

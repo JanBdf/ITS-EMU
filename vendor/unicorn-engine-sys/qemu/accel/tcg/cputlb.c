@@ -301,6 +301,7 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
     }
 
     cpu_tb_jmp_cache_clear(cpu);
+    its_jc_clear(cpu);
 
     if (to_clean == ALL_MMUIDX_BITS) {
         env_tlb(env)->c.full_flush_count = env_tlb(env)->c.full_flush_count + 1;

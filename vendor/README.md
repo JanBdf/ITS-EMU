@@ -57,6 +57,33 @@ crates.io (GPL-2.0, see `unicorn-engine-sys/COPYING`), used through
   the next block (`helper_lookup_tb_ptr`) in busy code.
 - `cpu_get_tb_cpu_state` is inline (`target/arm/cpu.h`): every lookup of the
   next translation block after an indirect branch (function returns) calls it.
+- Blocks account for their cycles themselves (`uc_its_account`,
+  `its_gen_account` in `accel/tcg/translator.c`): code at the start of each
+  translated block adds its cycles to the emulator's clock and records how
+  it ends, and calls the block hook only at the end of a slice, at the idle
+  detector's loop heads and for blocks the emulator keeps for the hook
+  (asked once the block is translated). The hook cost 60–70 % of the time
+  of busy code on an arm64 host. The PC is written at the start of a block
+  for the hook only.
+- Indirect jumps (function returns, calls through pointers, table branches)
+  look their target up inline (`its_gen_goto_ptr` in `target/arm/translate.c`):
+  a table per CPU (`its_jc`, 256 entries) holds the translated code for
+  (jump site, pc), filled by `helper_its_lookup_tb_ptr` and emptied whenever
+  a block is invalidated. QEMU's `lookup_tb_ptr` recomputes the CPU state
+  the next block is translated for on every jump (about 80 host
+  instructions); at these jumps only the pc and the Thumb bit are dynamic
+  (`DISAS_JUMP`), the rest is the same each time the jump runs, as for the
+  direct jumps QEMU chains.
+- On Apple Silicon the JIT area stays executable between translated blocks
+  (`cpu_tb_exec`): Unicorn made it writable after every run of translated
+  code and executable before the next (`pthread_jit_write_protect_np`
+  twice). What writes to the area switches by itself, and `uc_emu_start`
+  restores the thread's state. Reading the protection state
+  (`read_sprr_perm`, in every API call such as `uc_reg_read`) no longer
+  starts with an `isb`, and the consistency check `assert_executable` is
+  for `CONFIG_DEBUG_TCG` only. Together a third of the time of firmware
+  that leaves the translated code often (I2cLm75: an interrupt pending
+  while masked, slices of 1000 cycles).
 - Only the Arm guest: the other targets' sources are removed (`uc.c` still
   includes their `unicorn.h`).
 

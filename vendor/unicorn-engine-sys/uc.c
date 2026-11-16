@@ -712,6 +712,24 @@ int uc_its_stop_exception(uc_engine *uc)
     return uc->its_stop_excp;
 }
 
+// ITS-EMU: inline cycle accounting. Blocks translated from now on charge
+// their cycles themselves and call the block hook only when `block` says
+// they cannot or when the cycle counter reaches the limit (see
+// its_gen_account in accel/tcg/translator.c). The
+// caller flushes the translation cache. block == NULL switches it off.
+UNICORN_EXPORT
+void uc_its_account(uc_engine *uc, const struct uc_its_layout *layout,
+                    uc_its_block_cb block, void *opaque)
+{
+    if (layout && block) {
+        uc->its_acct = *layout;
+        uc->its_block = block;
+        uc->its_block_opaque = opaque;
+    } else {
+        uc->its_block = NULL;
+    }
+}
+
 UNICORN_EXPORT
 uc_err uc_reg_read(uc_engine *uc, int regid, void *value)
 {

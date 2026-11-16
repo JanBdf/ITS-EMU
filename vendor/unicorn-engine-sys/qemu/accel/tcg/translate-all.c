@@ -1370,6 +1370,7 @@ static void do_tb_flush(CPUState *cpu, run_on_cpu_data tb_flush_count)
 #else
     cpu_tb_jmp_cache_clear(cpu);
 #endif
+    its_jc_clear(cpu);
 
     qht_reset_size(cpu->uc, &cpu->uc->tcg_ctx->tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
     page_flush_tb(cpu->uc);
@@ -1527,6 +1528,7 @@ static void do_tb_phys_invalidate(TCGContext *tcg_ctx, TranslationBlock *tb, boo
     if (cpu->tb_jmp_cache[h] == tb) {
         cpu->tb_jmp_cache[h] = NULL;
     }
+    its_jc_clear(cpu);
 
     /* suppress this TB from the two jump lists */
     tb_remove_from_jmp_list(tb, 0);
@@ -2163,6 +2165,7 @@ void tb_flush_jmp_cache(CPUState *cpu, target_ulong addr)
        overlap the flushed page.  */
     tb_jmp_cache_clear_page(cpu, addr - TARGET_PAGE_SIZE);
     tb_jmp_cache_clear_page(cpu, addr);
+    its_jc_clear(cpu);
 }
 
 /* This is a wrapper for common code that can not use CONFIG_SOFTMMU */

@@ -269,6 +269,31 @@ static inline bool _hook_exists_bounded(struct list_item *cur, uint64_t addr)
 typedef struct TargetPageBits TargetPageBits;
 typedef struct TCGContext TCGContext;
 
+// ITS-EMU: inline cycle accounting (uc_its_account). The emulator's
+// variables, as offsets from `base`: the cycle counter, the cycle at which
+// the block hook has to run (0: at every block) and how the previous block
+// ended (the "edge"). With `idle`, also the idle detector's loop head, its
+// block counter and its flags (bytes).
+struct uc_its_layout {
+    void *base;
+    int32_t clock, limit, edge;
+    int32_t idle;
+    int32_t idle_head, idle_blocks, idle_stored, idle_clean, idle_delay_clean;
+};
+
+// What the emulator says about a translated block that accounts for itself:
+// its cycles, the extra cycles when a branch enters it, the edge it leaves,
+// and whether it stores or has side effects (idle detection).
+struct uc_its_block {
+    uint64_t post;
+    uint32_t cycles, penalty;
+    uint8_t stores, side_effects;
+};
+
+// false: the block always calls the block hook.
+typedef bool (*uc_its_block_cb)(void *opaque, uint64_t pc, uint32_t size,
+                                struct uc_its_block *out);
+
 struct uc_struct {
     uc_arch arch;
     uc_mode mode;
@@ -403,6 +428,13 @@ struct uc_struct {
     // ITS-EMU: the CPU exception that stopped emulation as an invalid
     // instruction (uc_its_stop_exception)
     int its_stop_excp;
+    // ITS-EMU: inline cycle accounting at the start of translated blocks
+    // (uc_its_account); its_block == NULL: off
+    struct uc_its_layout its_acct;
+    uc_its_block_cb its_block;
+    void *its_block_opaque;
+    // ITS-EMU: number of the last indirect jump site (its_gen_goto_ptr)
+    uint32_t its_jump_sites;
     // ITS-EMU: find_memory_mapping results per 1 KiB page, valid while
     // address_space_memory.generation is unchanged.
     struct uc_mapping_cache_entry {

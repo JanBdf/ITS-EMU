@@ -81,14 +81,36 @@ Known gaps:
 
 Speed (Unicorn is vendored with patches, `vendor/README.md`):
 
-- Remaining cost in busy programs: per-block hook (~45–50 %; registered
-  directly with Unicorn, `block_hook` in `machine.rs`, as the binding's
-  proxy cost a quarter of it), next-block lookup after function returns
-  (~15 %; direct branches now chain across pages), MMIO through QEMU's memory
-  API (~20 % when polling), and the sweep over all ~55 peripherals at every
-  event (`update`/`next_event`, ~15 % while drawing). A per-peripheral
-  next-event cache would cut the sweeps, but `update` re-asserts IRQ levels
-  and some `next_event`s read shared state, so every model needs an audit.
+- Blocks charge their cycles in translated code (`FastAccount` in
+  `machine.rs`, `uc_its_account`); the block hook (`block_hook`), which was
+  60–70 % of busy code on an arm64 host, runs only at slice ends, at the idle
+  detector's loop heads, after exceptions and for blocks with divisions, SEV
+  or a fall-through end. The hook stays the reference:
+  `tools/perf/same-cycles.sh` compares against a build without the inline
+  code. With a second core (`set_end_run_signals`) a raised wake signal
+  sends the next block to the hook, which ends the run there.
+- Indirect jumps find their target in a table per jump site (`its_jc`,
+  `vendor/README.md`) instead of QEMU's `lookup_tb_ptr` (18–34 % of busy
+  code after the change above).
+- Both together, on an Apple M-series host: busy fixtures run 2.0–2.2× as
+  fast (3 s of HwCheck with `--no-idle-skip`: 1.56 s → 0.71 s), the default
+  mode about 1.15×.
+- Remaining cost (same host): busy code is translated code only, including
+  the accounting at each block start (some 25 host instructions). While
+  drawing, 95 % is outside translated code: MMIO through QEMU's memory API
+  and the sweep over all ~55 peripherals at every event
+  (`update`/`next_event`). A per-peripheral next-event cache would cut the
+  sweeps, but `update` re-asserts IRQ levels and some `next_event`s read
+  shared state, so every model needs an audit.
+- While an enabled interrupt is pending but masked, slices are 1000 cycles
+  (`masked_quantum`) so that unmasking is noticed: I2cLm75 runs 1.8 million
+  slices in 10 s. Entering and leaving `emu_start` is cheap now on macOS
+  (`vendor/README.md`: 3.5 s → 2.1 s), and the block hook starts the next
+  slice itself when the run loop would do nothing else (`renew_slice`:
+  1.9 s); what remains per slice is the peripheral sweep twice
+  (`sync_devices`, `next_slice_end`). Noticing CPSIE
+  and BASEPRI writes at their block instead would remove the short slices,
+  but takes the interrupt earlier than now: a change of behaviour.
 - In place: idle detection via Unicorn's first-write path per RAM page;
   delay-loop skipping (`machine/delay.rs`: a small affine Thumb interpreter
   checked against Unicorn solves for the exit iteration; off with

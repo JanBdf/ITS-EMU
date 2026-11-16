@@ -58,10 +58,13 @@ static inline tcg_target_ulong cpu_tb_exec(CPUState *cpu, TranslationBlock *itb)
     UC_TRACE_START(UC_TRACE_TB_EXEC);
     tb_exec_lock(cpu->uc);
     ret = tcg_qemu_tb_exec(env, tb_ptr);
-    if (cpu->uc->nested_level == 1) {
-        // Only unlock (allow writing to JIT area) if we are the outmost uc_emu_start
-        tb_exec_unlock(cpu->uc);
-    }
+    /* ITS-EMU: the JIT area stays executable between blocks. Unicorn made
+     * it writable after each run of translated code and executable again
+     * before the next one (two pthread_jit_write_protect_np calls on Apple
+     * Silicon, a quarter of the time of firmware that leaves the translated
+     * code often). What writes to the area switches by itself: tb_gen_code,
+     * tb_add_jump (tb_find), do_tb_phys_invalidate, uc_tb_flush; and
+     * uc_emu_start restores the thread's state when it returns. */
     UC_TRACE_END(UC_TRACE_TB_EXEC, "[uc] exec tb 0x%" PRIx64 ": ", itb->pc);
 
     cpu->can_do_io = 1;
