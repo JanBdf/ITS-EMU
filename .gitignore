@@ -25,3 +25,6 @@
 # Claude Code (worktrees of parallel sessions)
 /.claude/
 __pycache__/
+
+# Agent instructions (local only)
+/CLAUDE.md
