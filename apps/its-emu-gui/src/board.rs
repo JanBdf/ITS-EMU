@@ -274,43 +274,6 @@ pub struct BoardInput {
     pub focus_toggled: bool,
     /// The empty display was clicked (open a firmware file).
     pub open_requested: bool,
-    /// Where the parts are on the screen (for the tutorial).
-    pub spots: Spots,
-}
-
-/// Screen rectangles of the parts the tutorial points at (`None`: not shown).
-#[derive(Default, Clone, Copy)]
-pub struct Spots {
-    /// S0..S7.
-    pub buttons: Option<Rect>,
-    pub user: Option<Rect>,
-    /// AUX0..AUX5.
-    pub aux: Option<Rect>,
-    /// The ADC pads of the Analog header (without DAC1).
-    pub analog: Option<Rect>,
-    pub display: Option<Rect>,
-    /// Screen position of design point (0, 0) and points per unit.
-    pub to_screen: Option<(Pos2, f32)>,
-}
-
-impl Spots {
-    /// Screen position of the design point `(x, y)`.
-    pub fn point(&self, x: f32, y: f32) -> Option<Pos2> {
-        self.to_screen.map(|(o, s)| o + Vec2::new(x, y) * s)
-    }
-
-    /// Without the spots outside `visible` (a zoomed board).
-    fn clipped(self, visible: Rect) -> Self {
-        let clip = |r: Option<Rect>| r.filter(|r| visible.contains_rect(*r));
-        Spots {
-            buttons: clip(self.buttons),
-            user: clip(self.user),
-            aux: clip(self.aux),
-            analog: clip(self.analog),
-            display: clip(self.display),
-            to_screen: self.to_screen,
-        }
-    }
 }
 
 /// Maps design units to screen coordinates.
@@ -731,16 +694,6 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
     let glass = pcb.r(xs[0].max(xs[3]), ys[0].max(ys[1]), xs[1].min(xs[2]), ys[2].min(ys[3]));
     let touch = ui.interact(glass, ui.scope_id().with("display"), Sense::click_and_drag());
     let touch = named(touch, egui::Role::Image, "Display (touch screen)");
-    let analog_x = |n: usize| ANALOG_X[ANALOG_SIGNAL[n]];
-    input.spots = Spots {
-        buttons: Some(pcb.r(BUTTON_X[7] - 14.0, BUTTON_Y - 14.0, BUTTON_X[0] + 14.0, BUTTON_Y + 14.0)),
-        user: Some(pcb.r(USER.0 - 13.0, USER.1 - 13.0, USER.0 + 13.0, USER.1 + 13.0)),
-        aux: Some(pcb.r(AUX_X - 10.0, AUX_Y[0] - 10.0, AUX_X + 30.0, AUX_Y[5] + 10.0)),
-        analog: Some(pcb.r(analog_x(1) - 10.0, ANALOG_Y - 10.0, analog_x(7) + 10.0, ANALOG_Y + 10.0)),
-        display: Some(glass),
-        to_screen: Some((pcb.p(0.0, 0.0), s)),
-    }
-    .clipped(panel_rect);
     if let Some(hint) = state.open_hint {
         draw_open_hint(&painter, glass, hint, touch.hovered());
         input.open_requested = touch.clicked();

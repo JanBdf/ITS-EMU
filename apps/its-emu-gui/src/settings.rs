@@ -44,7 +44,7 @@ pub struct Settings {
     pub bounce: bool,
     /// Window size and position of the last run (logical points).
     pub window: Option<WindowState>,
-    /// The tutorial was finished or ended (it starts on the first run).
+    /// The tutorial program was loaded (it is on the first run).
     pub tutorial_done: bool,
 }
 
