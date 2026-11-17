@@ -36,6 +36,31 @@ const RESIZE_SETTLE: f64 = 0.15;
 const LED_YELLOW: Color32 = Color32::from_rgb(0xFF, 0xC4, 0x10);
 const LED_BLUE: Color32 = Color32::from_rgb(0x30, 0x70, 0xFF);
 const LED_RED: Color32 = Color32::from_rgb(0xFF, 0x20, 0x30);
+/// A device's wire end on a pad and the tag beside it.
+pub const DEVICE_WIRE: Color32 = Color32::from_rgb(0x2F, 0xB8, 0x6E);
+const DEVICE_TAG: Color32 = Color32::from_rgba_premultiplied(0x10, 0x4a, 0x2c, 0xe0);
+/// Marks a button latched by right click (not yellow: that would look like a lit part).
+const LATCH: Color32 = Color32::from_rgb(0x7F, 0xE3, 0xFF);
+
+#[derive(Clone, Copy, PartialEq)]
+enum CableKind {
+    MicroUsb,
+    Ethernet,
+}
+
+/// Body, strain relief, cable and highlight of the cables.
+const CABLE_BLACK: [Color32; 4] = [
+    Color32::from_rgb(0x26, 0x26, 0x28),
+    Color32::from_rgb(0x1d, 0x1d, 0x1f),
+    Color32::from_rgb(0x1a, 0x1a, 0x1c),
+    Color32::from_rgb(0x48, 0x48, 0x4c),
+];
+const CABLE_GREY: [Color32; 4] = [
+    Color32::from_rgb(0xc9, 0xcd, 0xd1),
+    Color32::from_rgb(0x8d, 0x93, 0x99),
+    Color32::from_rgb(0x96, 0x9c, 0xa2),
+    Color32::from_rgb(0xc4, 0xc9, 0xce),
+];
 
 /// OUT0..OUT15 LEDs (D8..D23), x of the package centre; all at `LED_Y`.
 /// These positions are shared with tools/hw/boarddraw.py, which reads them from here.
@@ -56,6 +81,36 @@ const AUX_Y: [f32; 6] = [285.5, 317.0, 348.6, 380.1, 411.7, 448.6];
 const ANALOG_X: [f32; 10] = [440.3, 471.82, 503.34, 534.86, 566.38, 597.9, 629.42, 660.94, 692.46, 723.98];
 const ANALOG_Y: f32 = 448.6;
 const ANALOG_SIGNAL: [usize; 8] = [0, 2, 3, 4, 5, 6, 7, 8];
+/// Pads of the rows below the LEDs, all at `ROW_Y` (measured, Hough circles):
+/// GND, OUT15..OUT0, GND from `OUT_PAD0` and GND, IN7..IN0, GND from
+/// `IN_PAD0`, each `*_PITCH` apart.
+const OUT_PAD0: f32 = 74.8;
+const OUT_PITCH: f32 = 31.65;
+const IN_PAD0: f32 = 655.2;
+const IN_PITCH: f32 = 31.76;
+const ROW_Y: f32 = 575.0;
+/// Timer pads along the top edge, all at `TIM_Y`: GND at `TIM_GND`, then
+/// PE8, PE10, PE14, PB10, PB11, PB0, PC6, PC7, PC8, PC9 from `TIM_PAD0`.
+#[expect(dead_code, reason = "only tools/hw/boarddraw.py reads it")]
+const TIM_GND: f32 = 355.7;
+const TIM_PAD0: f32 = 387.1;
+const TIM_PITCH: f32 = 31.73;
+const TIM_Y: f32 = 32.3;
+/// Pads of the I2C (x `I2C_PAD_X`: PB8, PB9, 3V3, GND) and SPI3 sections
+/// (x `SPI_PAD_X`: PC10, PC12, PC11, PA15), at these y.
+const HDR_PADS_Y: [f32; 4] = [359.4, 390.8, 422.2, 453.7];
+const I2C_PAD_X: f32 = 155.4;
+const SPI_PAD_X: f32 = 239.4;
+/// Openings of the Nucleo's jacks, from tools/hw/boarddraw.py (photo
+/// coordinates of the Nucleo's layer taken to the top view with
+/// `ortho(x, y, M_NUCLEO)`): CN1 (ST-LINK USB, micro B, under the display,
+/// opening to the right), CN13 (USB OTG FS, micro B, opening to the left) and
+/// CN14 (Ethernet, RJ45, opening to the left).
+const CN1_OPENING: (f32, f32) = (852.9, 265.6);
+const CN13_OPENING: (f32, f32) = (287.1, 147.4);
+const CN14_OPENING: (f32, f32) = (273.7, 242.7);
+/// Right edge of the display module (where the ST-LINK cable comes out from under it).
+const SHIELD_RIGHT: f32 = 888.7;
 /// Nucleo buttons B1 (USER, blue) and B2 (RESET, black).
 const USER: (f32, f32) = (321.2, 92.4);
 const RESET: (f32, f32) = (321.2, 318.3);
@@ -63,6 +118,82 @@ const RESET: (f32, f32) = (321.2, 318.3);
 /// right, bottom right, bottom left.  The board is drawn as seen from straight
 /// above, so this is a rectangle.
 const GLASS: [(f32, f32); 4] = [(532.1, 86.5), (878.9, 86.5), (878.9, 317.7), (532.1, 317.7)];
+
+/// Signals of the timer pads, in the order of the pads after GND.
+const TIM_PINS: [(&str, char, u32); 10] = [
+    ("TIM1_1N", 'E', 8),
+    ("TIM1_2N", 'E', 10),
+    ("TIM1_4", 'E', 14),
+    ("TIM2_3", 'B', 10),
+    ("TIM2_4", 'B', 11),
+    ("TIM3_3", 'B', 0),
+    ("TIM8_1", 'C', 6),
+    ("TIM8_2", 'C', 7),
+    ("TIM8_3", 'C', 8),
+    ("TIM8_4", 'C', 9),
+];
+/// Signals of the I2C and SPI3 pads, in the order of `HDR_PADS_Y`.
+const I2C_PINS: [(&str, char, u32); 2] = [("I2C1_SCL", 'B', 8), ("I2C1_SDA", 'B', 9)];
+const SPI_PINS: [(&str, char, u32); 4] =
+    [("SPI3_SCK", 'C', 10), ("SPI3_MOSI", 'C', 12), ("SPI3_MISO", 'C', 11), ("SPI3_CS", 'A', 15)];
+
+/// The pad of the carrier a pin is on: its silkscreen name and centre.
+pub fn pad(port: char, pin: u32) -> Option<(String, (f32, f32))> {
+    let n = pin as usize;
+    match (port, pin) {
+        ('F', 0..=7) => return Some((format!("IN{pin}"), (IN_PAD0 + (8 - n) as f32 * IN_PITCH, ROW_Y))),
+        ('D', 0..=7) => return Some((format!("OUT{pin}"), (OUT_PAD0 + (16 - n) as f32 * OUT_PITCH, ROW_Y))),
+        ('E', 0..=7) => return Some((format!("OUT{}", pin + 8), (OUT_PAD0 + (8 - n) as f32 * OUT_PITCH, ROW_Y))),
+        ('G', 0..=5) => return Some((format!("AUX{pin}"), (AUX_X, AUX_Y[n]))),
+        _ => {}
+    }
+    let find = |pins: &[(&str, char, u32)]| pins.iter().position(|&(_, p, i)| (p, i) == (port, pin));
+    if let Some(i) = find(&TIM_PINS) {
+        return Some((TIM_PINS[i].0.to_owned(), (TIM_PAD0 + i as f32 * TIM_PITCH, TIM_Y)));
+    }
+    if let Some(i) = find(&I2C_PINS) {
+        return Some((I2C_PINS[i].0.to_owned(), (I2C_PAD_X, HDR_PADS_Y[i])));
+    }
+    if let Some(i) = find(&SPI_PINS) {
+        return Some((SPI_PINS[i].0.to_owned(), (SPI_PAD_X, HDR_PADS_Y[i])));
+    }
+    let i = itsboard::ANALOG_PADS.iter().position(|&(_, p, i)| (p, i) == (port, pin))?;
+    Some((itsboard::ANALOG_PADS[i].0.to_owned(), (ANALOG_X[ANALOG_SIGNAL[i]], ANALOG_Y)))
+}
+
+/// A device's wire on a board pin.
+pub struct PinMark {
+    pub port: char,
+    pub pin: u32,
+    /// Short tag drawn next to the pad ("ENC A", "GP0").
+    pub tag: String,
+    /// What is connected, for the tooltip.
+    pub text: String,
+}
+
+/// State of a cable on one of the Nucleo's jacks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Plug {
+    /// No cable.
+    #[default]
+    Out,
+    /// The cable is there, but the computer has not taken the device yet
+    /// (exported over USB/IP, not attached): drawn pulled out a little.
+    Waiting,
+    /// Plugged in and in use by the computer.
+    In,
+}
+
+/// Cables on the Nucleo's jacks.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct Cables {
+    /// CN1, the ST-LINK's USB.
+    pub stlink: Plug,
+    /// CN13, the firmware's own USB device (OTG FS).
+    pub otg: Plug,
+    /// CN14 (the network device).
+    pub ethernet: bool,
+}
 
 /// One layer of the board drawing and its rendering at the current size.
 struct Layer {
@@ -253,6 +384,11 @@ pub struct BoardState<'a> {
     pub nucleo_duty: &'a [f32; 3],
     /// No firmware: what the display says about opening one.
     pub open_hint: Option<&'a str>,
+    /// Wires of the connected devices.
+    pub marks: &'a [PinMark],
+    pub cables: Cables,
+    /// Tooltip of the ST-LINK's cable.
+    pub stlink_text: &'a str,
 }
 
 /// What the user did on the board in this frame.
@@ -274,6 +410,8 @@ pub struct BoardInput {
     pub focus_toggled: bool,
     /// The empty display was clicked (open a firmware file).
     pub open_requested: bool,
+    /// The ST-LINK's USB cable was clicked (plug it in or out).
+    pub stlink_clicked: bool,
 }
 
 /// Maps design units to screen coordinates.
@@ -368,6 +506,91 @@ impl Pcb<'_> {
         );
     }
 
+    /// A cable plugged into the jack whose opening is at `at` (the plug points
+    /// into the jack against `dir`: +1 = the cable leaves to the right, -1 to
+    /// the left), bent to `end` (design units).  Waiting: pulled out a little.
+    fn cable(&self, kind: CableKind, plug: Plug, at: (f32, f32), dir: f32, end: [(f32, f32); 3], alpha: f32) {
+        let k = if plug == Plug::Waiting { 0.7 * alpha } else { alpha };
+        let c = |c: Color32| c.gamma_multiply(k);
+        // pulled out by this much while the computer has not taken the device
+        let gap = if plug == Plug::Waiting { 9.0 } else { 0.0 };
+        let x0 = at.0 + dir * gap;
+        let y = at.1;
+        // body (overmold or the RJ45's clear plug and its boot), strain relief, cable
+        let (body, relief, w_body, w_relief, w_cable, colors) = match kind {
+            CableKind::MicroUsb => (60.0, 43.0, 20.0, (15.0, 8.0), 6.5, CABLE_BLACK),
+            CableKind::Ethernet => (22.0, 30.0, 22.0, (17.0, 11.0), 11.0, CABLE_GREY),
+        };
+        let r = |a: f32, b: f32, h: f32| {
+            let (xa, xb) = (x0 + dir * a, x0 + dir * b);
+            self.r(xa.min(xb), y - h, xa.max(xb), y + h)
+        };
+        let [body_color, relief_color, cable_color, shine] = colors;
+        // the cable first, so that the plug lies on its end
+        let start = self.p(x0 + dir * (body + relief - 2.0), y);
+        let [c1, c2, e] = end.map(|(x, y)| self.p(x, y));
+        let cable = |width: f32, color: Color32, offset: f32| {
+            let o = Vec2::new(0.0, self.len(offset));
+            egui::epaint::CubicBezierShape::from_points_stroke(
+                [start + o, c1 + o, c2 + o, e + o],
+                false,
+                Color32::TRANSPARENT,
+                Stroke::new(self.len(width), color),
+            )
+        };
+        self.painter.add(cable(2.0 * w_cable, c(cable_color), 0.0));
+        self.painter.add(cable(w_cable * 0.5, c(shine), -w_cable * 0.4));
+        // strain relief: tapering, with ribs
+        let steps = 6;
+        for i in 0..steps {
+            let t = i as f32 / steps as f32;
+            let h = w_relief.0 + (w_relief.1 - w_relief.0) * t;
+            let a = body + relief * t;
+            let b = body + relief * (i + 1) as f32 / steps as f32;
+            self.painter.rect_filled(r(a, b, h), 0.0, c(relief_color));
+            if kind == CableKind::MicroUsb && i > 0 {
+                self.painter.rect_filled(r(a, a + 2.2, h * 0.92), 0.0, c(Color32::from_gray(12)));
+            }
+        }
+        self.painter.rect_filled(r(0.0, body, w_body), self.len(2.0), c(body_color));
+        // highlight along the top of the body
+        self.painter.rect_filled(
+            r(1.5, body - 1.5, 1.2).translate(Vec2::new(0.0, -self.len(w_body - 3.0))),
+            0.0,
+            c(shine),
+        );
+        if kind == CableKind::Ethernet {
+            // the clear plug shows its gold contacts and the latch
+            for i in 0..8 {
+                let yy = y - 9.0 + i as f32 * 2.6;
+                let xa = x0 + dir * 2.0;
+                let xb = x0 + dir * 9.0;
+                self.painter.rect_filled(
+                    self.r(xa.min(xb), yy - 0.5, xa.max(xb), yy + 0.5),
+                    0.0,
+                    c(Color32::from_rgb(0xd6, 0xa5, 0x4e)),
+                );
+            }
+            self.painter.rect_filled(r(body - 4.0, body + 6.0, 8.0), 0.0, c(Color32::from_rgb(0x6f, 0x75, 0x7b)));
+        }
+    }
+
+    /// A device's wire on a pad: its end on the pad and a tag with what it is.
+    fn wire_mark(&self, x: f32, y: f32, tag: &str) {
+        self.painter.circle_filled(self.p(x, y), self.len(4.6), DEVICE_WIRE);
+        self.painter.circle_stroke(
+            self.p(x, y),
+            self.len(4.6),
+            Stroke::new(self.len(0.8), Color32::from_white_alpha(170)),
+        );
+        let galley =
+            self.painter.layout_no_wrap(tag.to_owned(), egui::FontId::proportional(self.len(7.0)), Color32::WHITE);
+        let at = self.p(x, y - 15.0) - galley.size() / 2.0;
+        let bg = Rect::from_min_size(at, galley.size()).expand(self.len(1.2));
+        self.painter.rect_filled(bg, egui::CornerRadius::same(self.len(2.0) as u8), DEVICE_TAG);
+        self.painter.galley(at, galley, Color32::WHITE);
+    }
+
     /// Shading of a pressed tact switch / latch marker.
     fn pressed(&self, x: f32, y: f32, r: f32) {
         self.painter.circle_filled(self.p(x, y), self.len(r), Color32::from_black_alpha(95));
@@ -383,6 +606,15 @@ impl Pcb<'_> {
 fn named(resp: egui::Response, role: egui::Role, label: impl ToString) -> egui::Response {
     let label = label.to_string();
     resp.widget_info(|| egui::WidgetInfo::labeled(role, true, &label));
+    resp
+}
+
+/// A tooltip above the spot: the board's rows lie close together, and one
+/// below the spot would cover the next row (the buttons under the LEDs).
+fn tip(resp: egui::Response, text: impl Into<egui::WidgetText>) -> egui::Response {
+    let mut tooltip = egui::Tooltip::for_enabled(&resp);
+    tooltip.popup = tooltip.popup.align(egui::RectAlign::TOP);
+    tooltip.show(|ui| ui.label(text));
     resp
 }
 
@@ -481,7 +713,47 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
 
     ui.set_clip_rect(panel_rect);
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    // the ST-LINK's cable comes out from under the display: clicking it plugs it in or out
+    let stlink = ui.interact(
+        pcb.r(SHIELD_RIGHT, 250.0, BOARD_W + BOARD_ORIGIN.0, 280.0),
+        ui.scope_id().with("stlink"),
+        Sense::click(),
+    );
+    let stlink = named(stlink, egui::Role::Button, "ST-LINK USB cable (CN1)");
+    input.stlink_clicked = stlink.clicked();
+    let stlink_ghost = state.cables.stlink == Plug::Out && stlink.hovered();
+    tip(stlink.on_hover_cursor(egui::CursorIcon::PointingHand), state.stlink_text);
     for (n, (id, at)) in tex.layers(ui.ctx(), size).into_iter().enumerate() {
+        if n == SHIELD {
+            // cables on the Nucleo's jacks, under the display
+            let c = &state.cables;
+            if c.stlink != Plug::Out || stlink_ghost {
+                let (plug, alpha) = if stlink_ghost { (Plug::In, 0.35) } else { (c.stlink, 1.0) };
+                let end = [(960.0, 265.6), (990.0, 266.5), (1030.0, 268.0)];
+                pcb.cable(CableKind::MicroUsb, plug, CN1_OPENING, 1.0, end, alpha);
+            }
+            if c.otg != Plug::Out {
+                // to the top edge, over the RS232 jack
+                pcb.cable(
+                    CableKind::MicroUsb,
+                    c.otg,
+                    CN13_OPENING,
+                    -1.0,
+                    [(190.0, 147.4), (182.0, 110.0), (182.0, -25.0)],
+                    1.0,
+                );
+            }
+            if c.ethernet {
+                pcb.cable(
+                    CableKind::Ethernet,
+                    Plug::In,
+                    CN14_OPENING,
+                    -1.0,
+                    [(150.0, 242.7), (80.0, 246.0), (-25.0, 248.0)],
+                    1.0,
+                );
+            }
+        }
         let alpha = match n {
             NUCLEO => view.nucleo_opacity,
             SHIELD => view.shield_opacity,
@@ -520,7 +792,7 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
             ui.scope_id().with(("out", bit)),
             Sense::hover(),
         );
-        named(resp, egui::Role::Label, &text).on_hover_text(text);
+        tip(named(resp, egui::Role::Label, &text), text);
     }
 
     // ---- In: IN7..IN0 (PF7..PF0), red LEDs show the line level, buttons S7..S0
@@ -533,7 +805,7 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
             ui.scope_id().with(("in", bit)),
             Sense::hover(),
         );
-        named(resp, egui::Role::Label, &text).on_hover_text(text);
+        tip(named(resp, egui::Role::Label, &text), text);
 
         let (x, y) = (BUTTON_X[bit], BUTTON_Y);
         let resp = ui.interact(
@@ -541,8 +813,11 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
             ui.scope_id().with(("button", bit)),
             Sense::click_and_drag(),
         );
-        let resp = named(resp, egui::Role::Button, format!("Button S{bit}"))
-            .on_hover_text(format!("S{bit} → IN{bit} (PF{bit}) · key {bit} · right click latches"));
+        let latch = if state.latched[bit] { "latched: right click releases" } else { "right click latches" };
+        let resp = tip(
+            named(resp, egui::Role::Button, format!("Button S{bit}")),
+            format!("S{bit} → IN{bit} (PF{bit})\nclick or key {bit} · {latch}"),
+        );
         let held = resp.is_pointer_button_down_on() && primary_down(ui);
         input.buttons[bit] = held;
         input.latch_toggled[bit] = resp.secondary_clicked();
@@ -550,11 +825,7 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
             pcb.pressed(x, y, BUTTON_CAP_R);
         }
         if state.latched[bit] {
-            painter.circle_stroke(
-                pcb.p(x, y),
-                pcb.len(16.5),
-                Stroke::new(pcb.len(1.6).max(1.0), Color32::from_rgb(0xFF, 0xE0, 0x40)),
-            );
+            painter.circle_stroke(pcb.p(x, y), pcb.len(16.5), Stroke::new(pcb.len(1.6).max(1.0), LATCH));
         }
     }
 
@@ -580,8 +851,10 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
             ui.scope_id().with(("aux", n)),
             Sense::click(),
         );
-        let hit = named(hit, egui::Role::Button, format!("AUX{n} pad: {txt}"))
-            .on_hover_text(format!("AUX{n} / INT{n} = PG{n}: {txt} — click: open → GND → 3V3"));
+        let hit = tip(
+            named(hit, egui::Role::Button, format!("AUX{n} pad: {txt}")),
+            format!("AUX{n} / INT{n} = PG{n}: {txt}\nclick: open → GND → 3V3"),
+        );
         if hit.clicked() {
             input.int_clicked = Some(n);
         }
@@ -616,11 +889,11 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
                 ui.scope_id().with(("analog", n)),
                 Sense::hover(),
             );
-            named(resp, egui::Role::Label, &hover).on_hover_text(hover);
+            tip(named(resp, egui::Role::Label, &hover), hover);
             continue;
         }
         let hover = format!(
-            "{name} = P{port}{pin}: {} — scroll: ±0.05 V, double click: open ↔ 3.3 V, right click: set or open",
+            "{name} = P{port}{pin}: {}\nscroll: ±0.05 V · double click: open ↔ 3.3 V · right click: set",
             volts.map_or_else(|| "open".to_owned(), |v| format!("{v:.2} V applied"))
         );
         let resp = ui.interact(
@@ -628,7 +901,7 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
             ui.scope_id().with(("analog", n)),
             Sense::click(),
         );
-        let resp = named(resp, egui::Role::Button, hover.clone()).on_hover_text(hover);
+        let resp = tip(named(resp, egui::Role::Button, hover.replace('\n', ", ")), hover);
         if resp.hovered() {
             let scroll: f32 = ui.input(|i| {
                 i.raw
@@ -664,6 +937,16 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
                 }
             });
         });
+    }
+
+    // ---- devices' wires on the pads (over the other spots, so that their tooltip wins)
+    for (i, m) in state.marks.iter().enumerate() {
+        let Some((name, (x, y))) = pad(m.port, m.pin) else { continue };
+        pcb.wire_mark(x, y, &m.tag);
+        let text = format!("{name} = P{}{}: {}", m.port, m.pin, m.text);
+        let resp =
+            ui.interact(pcb.r(x - 8.0, y - 22.0, x + 8.0, y + 8.0), ui.scope_id().with(("mark", i)), Sense::hover());
+        tip(named(resp, egui::Role::Label, &text), text);
     }
 
     // ---- Nucleo buttons
@@ -730,7 +1013,7 @@ fn primary_down(ui: &egui::Ui) -> bool {
 /// board in a row below it.
 pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
     let mut input = BoardInput::default();
-    const STRIP: f32 = 58.0;
+    const STRIP: f32 = 78.0;
     let avail = ui.available_rect_before_wrap();
     let rim = 0.035; // black border of the panel around the active area, relative to its width
     let area = Vec2::new(avail.width(), (avail.height() - STRIP).max(40.0));
@@ -742,9 +1025,16 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
     let glass = Rect::from_center_size(((center.to_vec2() * ppp).round() / ppp).to_pos2(), size);
     let glass = Rect::from_min_size(((glass.min.to_vec2() * ppp).round() / ppp).to_pos2(), size);
     let painter = ui.painter_at(avail);
+    // the module as on the board: the touch panel's light edge around the dark border
     let frame = glass.expand(480.0 * rim * s);
-    painter.rect_filled(frame.expand(2.0), 6.0, Color32::from_rgb(0x3a, 0x3d, 0x40));
-    painter.rect_filled(frame, 3.0, Color32::from_rgb(0x1f, 0x25, 0x28));
+    painter.rect_filled(frame.expand((480.0 * 0.01 * s).max(2.0)), 2.0, Color32::from_rgb(0xbd, 0xb3, 0x9f));
+    painter.rect_filled(frame, 1.0, Color32::from_rgb(0x1c, 0x1e, 0x20));
+    painter.rect_stroke(
+        frame.shrink(480.0 * 0.006 * s),
+        0.0,
+        Stroke::new(1.0, Color32::from_rgb(0x5d, 0x5a, 0x52)),
+        egui::StrokeKind::Inside,
+    );
     match state.display {
         Some(t) => {
             let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
@@ -784,16 +1074,26 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
     // ---- LEDs and buttons below: OUT15..OUT0, IN7..IN0 with S7..S0,
     // USER and RESET, LD1–LD3 (slots of width d)
     const SLOTS: f32 = 36.0;
-    let d = 18.0_f32.min(frame.width() / (SLOTS + 1.0));
+    let d = 21.0_f32.min(frame.width() / (SLOTS + 1.0));
     let y = (frame.bottom() + 6.0 + STRIP / 2.0).min(avail.bottom() - STRIP / 2.0) - d * 0.4;
     let x0 = avail.center().x - SLOTS * d / 2.0 + d / 2.0;
-    let label = |x: f32, text: &str| {
+    // a name under each part, as on the silkscreen, and one under each group
+    let name = |x: f32, text: &str| {
         painter.text(
-            Pos2::new(x, y + d * 1.4),
+            Pos2::new(x, y + d * 1.25),
             egui::Align2::CENTER_CENTER,
             text,
-            egui::FontId::proportional(d * 0.7),
-            Color32::from_gray(175),
+            egui::FontId::proportional(d * 0.5),
+            Color32::from_gray(200),
+        );
+    };
+    let label = |x: f32, text: &str| {
+        painter.text(
+            Pos2::new(x, y + d * 1.95),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(d * 0.62),
+            Color32::from_gray(160),
         );
     };
     for bit in (0..16).rev() {
@@ -805,15 +1105,9 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
         let text = format!("OUT{bit}: {:.0} %", duty * 100.0);
         named(ui.interact(r, ui.scope_id().with(("lcd-out", bit)), Sense::hover()), egui::Role::Label, &text)
             .on_hover_text(text);
-        painter.text(
-            Pos2::new(x, y + d * 0.45),
-            egui::Align2::CENTER_CENTER,
-            bit.to_string(),
-            egui::FontId::proportional(d * 0.55),
-            Color32::from_gray(185),
-        );
+        name(x, &bit.to_string());
     }
-    label(x0 + 7.5 * d, "Out 15–0");
+    label(x0 + 7.5 * d, "OUT15 … OUT0 (LEDs D23 … D8)");
     let x1 = x0 + 18.0 * d;
     for bit in (0..8).rev() {
         let x = x1 + (7 - bit) as f32 * d;
@@ -825,27 +1119,29 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
             ui.scope_id().with(("lcd-button", bit)),
             Sense::click_and_drag(),
         );
+        let latch = if state.latched[bit] { "latched: right click releases" } else { "right click latches" };
         let resp = named(resp, egui::Role::Button, format!("Button S{bit}"))
-            .on_hover_text(format!("S{bit} → IN{bit} (PF{bit}) · key {bit} · right click latches"));
+            .on_hover_text(format!("S{bit} → IN{bit} (PF{bit}), LED D{bit}\nclick or key {bit} · {latch}"));
         let held = resp.is_pointer_button_down_on() && primary_down(ui);
         input.buttons[bit] = held;
         input.latch_toggled[bit] = resp.secondary_clicked();
+        name(x, &format!("S{bit}"));
         let down = held || state.latched[bit] || !high;
         strip_button(&painter, c, d, Color32::from_rgb(0xd9, 0x43, 0x4b), down);
         if state.latched[bit] {
             painter.rect_stroke(
                 Rect::from_center_size(c, Vec2::splat(d * 0.92)),
                 d * 0.18,
-                Stroke::new(1.5, Color32::from_rgb(0xFF, 0xE0, 0x40)),
+                Stroke::new(1.5, LATCH),
                 egui::StrokeKind::Outside,
             );
         }
     }
-    label(x1 + 3.5 * d, "In 7–0 · S7–S0");
+    label(x1 + 3.5 * d, "IN7 … IN0 (LEDs D7 … D0)");
     // the Nucleo's buttons
     let x2 = x1 + 10.0 * d;
-    for (n, (name, color)) in
-        [("User", Color32::from_rgb(0x2a, 0x8b, 0xd8)), ("Reset", Color32::from_gray(25))].into_iter().enumerate()
+    for (n, (label_text, color)) in
+        [("USER", Color32::from_rgb(0x2a, 0x8b, 0xd8)), ("RESET", Color32::from_gray(25))].into_iter().enumerate()
     {
         let c = Pos2::new(x2 + n as f32 * 2.4 * d, y + d * 0.5);
         let resp = ui.interact(
@@ -866,21 +1162,23 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
             input.reset_clicked = resp.clicked();
         }
         strip_button(&painter, c, d * 1.1, color, down);
-        label(c.x, name);
+        name(c.x, label_text);
     }
     // the Nucleo's LEDs (under the display on the real board)
     let x3 = x2 + 5.2 * d;
-    for (i, (name, color)) in [("LD1", NUCLEO_GREEN), ("LD2", NUCLEO_BLUE), ("LD3", NUCLEO_RED)].into_iter().enumerate()
+    for (i, (name_text, color)) in
+        [("LD1", NUCLEO_GREEN), ("LD2", NUCLEO_BLUE), ("LD3", NUCLEO_RED)].into_iter().enumerate()
     {
-        let x = x3 + i as f32 * d;
+        let x = x3 + i as f32 * d * 1.3;
         let duty = state.nucleo_duty[i];
-        strip_led(&painter, Pos2::new(x, y + d * 0.1), d, color, duty);
+        strip_led(&painter, Pos2::new(x, y - d * 0.45), d, color, duty);
+        name(x, name_text);
         let r = Rect::from_center_size(Pos2::new(x, y), Vec2::new(d, 2.0 * d));
-        let text = format!("Nucleo {name}: {:.0} %", duty * 100.0);
+        let text = format!("Nucleo {name_text}: {:.0} %", duty * 100.0);
         named(ui.interact(r, ui.scope_id().with(("lcd-ld", i)), Sense::hover()), egui::Role::Label, &text)
             .on_hover_text(text);
     }
-    label(x3 + d, "Nucleo LD1–3");
+    label(x3 + 1.3 * d, "Nucleo");
     input
 }
 

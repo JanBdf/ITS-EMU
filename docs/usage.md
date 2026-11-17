@@ -25,14 +25,23 @@ controls. The main ones:
   A rebuilt firmware file is reloaded automatically unless a debugger is
   attached (*Emulation* menu).
 - Space runs/pauses, Ctrl+R resets.
-- *Display* (Ctrl+D, or right click on it) shows the display alone with the
-  LEDs and buttons below; *See-through* (Ctrl+T) makes Nucleo and display
-  transparent; *Pins* (Ctrl+P) shows mode, level and wiring of ports A–G.
+- The buttons at the right of the tool bar choose what is shown: *Display*
+  (Ctrl+D, or right click on it) shows the display alone with the LEDs and
+  buttons below; *Pins* (Ctrl+P) shows mode, level and wiring of ports A–G,
+  *Devices* and *Console* open in the same column right of the board.
+  (*View → Board drawing check → See-through*, Ctrl+T, makes Nucleo and
+  display transparent, for comparing the drawing with the real board.)
+- The cables in the Nucleo's USB jacks show what is plugged in: the ST-LINK
+  (CN1, right of the display; a click on it or on its state in the status
+  bar plugs it in or out), the firmware's own USB device (CN13) and the
+  Ethernet cable when the network is connected. The status bar shows the
+  same, the GDB server and the Nucleo's LEDs LD1–LD3.
 - The serial console (Ctrl+L) can echo, choose the line end, send each key
   at once, show the virtual time at which each line began (*Time*), and
   copy or save its text.
 - Ctrl + mouse wheel zooms the board at the pointer; the middle button or
-  Shift + drag pans it; Home fits it to the window again.
+  Shift + drag pans it; Home fits it to the window again. Ctrl + / Ctrl − /
+  Ctrl 0 change the size of the whole interface (*View → Interface size*).
 - The buttons S0–S7, USER and the contacts of a rotary encoder bounce now
   and then when they change, as measured on the real board (S0–S7 in about
   1 % of the presses and releases; USER in about 4 % of the presses and
@@ -44,7 +53,8 @@ controls. The main ones:
 - *Devices* (Ctrl+E) connects devices on the header pins while the board
   runs: a [Pico](#raspberry-pi-pico), a rotary encoder (buttons for 1 or 10
   detents, or scroll over the knob), DS18B20 sensors and the
-  [network](#network). They persist across firmware loads and restarts.
+  [network](#network). They persist across firmware loads and restarts;
+  green tags on the board's pads show which pins they use.
 
 **Command line.** `its-emu Program.axf` runs 10 s of virtual time as fast
 as possible (`--seconds`, `--realtime`), prints the virtual COM port's

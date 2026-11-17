@@ -9,14 +9,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 
-use eframe::egui::{self, Color32, Key, RichText};
+use eframe::egui::{self, Key, RichText};
 use itsboard::pico::PicoSpec;
 use itsboard::spec::{DeviceSpec, pin_name};
 
 use crate::emu::{Command, DeviceState, DeviceView, EmuHandle};
 use crate::settings::Settings;
 
-const ERR_RED: Color32 = Color32::from_rgb(0xFF, 0x5B, 0x50);
 const MAX_TERMINAL: usize = 32_000;
 /// Runs a Python program written for the Pico on the emulated one's port.
 const RUN_GUI_PY: &str = include_str!("../../../tools/pico/run_gui.py");
@@ -70,12 +69,12 @@ struct Program {
 
 pub struct DevicesPanel {
     kind: Kind,
-    encoder_pins: String,
-    sensor_pin: String,
-    lm75_addr: String,
+    encoder_pins: [(char, u32); 2],
+    sensor_pin: (char, u32),
+    lm75_addr: u8,
     net_forwards: String,
     pico_firmware: String,
-    pico_wiring: String,
+    pico_wiring: Vec<(u8, (char, u32))>,
     add_error: Option<String>,
     terminals: HashMap<u64, Terminal>,
     programs: HashMap<u64, Program>,
@@ -88,12 +87,12 @@ impl DevicesPanel {
     pub fn new(bootrom_override: Option<PathBuf>) -> Self {
         Self {
             kind: Kind::Pico,
-            encoder_pins: "PF0,PF1".to_owned(),
-            sensor_pin: "PG2".to_owned(),
-            lm75_addr: "0x48".to_owned(),
+            encoder_pins: [('F', 0), ('F', 1)],
+            sensor_pin: ('G', 2),
+            lm75_addr: 0x48,
             net_forwards: "tcp:8080=80".to_owned(),
             pico_firmware: String::new(),
-            pico_wiring: wiring_text(&itsboard::pico::DEFAULT_WIRING),
+            pico_wiring: itsboard::pico::DEFAULT_WIRING.to_vec(),
             add_error: None,
             terminals: HashMap::new(),
             programs: HashMap::new(),
@@ -123,26 +122,35 @@ impl DevicesPanel {
         })
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, devices: &[DeviceView], settings: &mut Settings, emu: &EmuHandle) {
+    /// The panel, at most `max_height` high.
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        devices: &[DeviceView],
+        settings: &mut Settings,
+        emu: &EmuHandle,
+        max_height: f32,
+    ) {
         self.poll_programs();
-        ui.heading("Devices");
-        ui.label(RichText::new("On the header pins; they keep running when other firmware is loaded.").small().weak());
-        ui.separator();
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            if devices.is_empty() {
-                ui.label(RichText::new("No devices connected").weak());
-            }
-            for d in devices {
-                self.show_device(ui, d, devices, settings, emu);
-            }
-            ui.add_space(8.0);
-            ui.separator();
-            self.show_add(ui, devices, settings, emu);
-            if devices.iter().any(|d| matches!(d.spec, DeviceSpec::Pico(_))) || self.kind == Kind::Pico {
+        crate::app::section_header(ui, "Devices", "on the board's pins, kept across firmware loads");
+        egui::ScrollArea::vertical().id_salt("devices").auto_shrink([false, true]).max_height(max_height).show(
+            ui,
+            |ui| {
+                if devices.is_empty() {
+                    ui.label(RichText::new("No devices connected").weak());
+                }
+                for d in devices {
+                    self.show_device(ui, d, devices, settings, emu);
+                }
+                ui.add_space(8.0);
                 ui.separator();
-                self.show_pico_options(ui, settings, emu);
-            }
-        });
+                self.show_add(ui, devices, settings, emu);
+                if devices.iter().any(|d| matches!(d.spec, DeviceSpec::Pico(_))) || self.kind == Kind::Pico {
+                    ui.separator();
+                    self.show_pico_options(ui, settings, emu);
+                }
+            },
+        );
     }
 
     fn show_device(
@@ -165,7 +173,7 @@ impl DevicesPanel {
             |ui| {
                 match (&d.spec, &d.state) {
                     (_, DeviceState::Failed(e)) => {
-                        ui.label(RichText::new(e).color(ERR_RED));
+                        ui.label(RichText::new(e).color(crate::app::err_color(ui)));
                     }
                     (DeviceSpec::Encoder(..), _) => show_encoder(ui, d.id, emu),
                     (DeviceSpec::Network(_), DeviceState::Network(bound)) => {
@@ -286,7 +294,9 @@ impl DevicesPanel {
                 match p.exit {
                     None => ui.label(format!("{} runs", p.name)),
                     Some(status) if status.success() => ui.label(format!("{} ended", p.name)),
-                    Some(status) => ui.label(RichText::new(format!("{} ended: {status}", p.name)).color(ERR_RED)),
+                    Some(status) => {
+                        ui.label(RichText::new(format!("{} ended: {status}", p.name)).color(crate::app::err_color(ui)))
+                    }
                 };
                 if p.exit.is_none() {
                     if ui.button("■ Stop").clicked() {
@@ -336,7 +346,7 @@ impl DevicesPanel {
             }
         });
         if let Some(e) = &self.program_error {
-            ui.label(RichText::new(e).color(ERR_RED));
+            ui.label(RichText::new(e).color(crate::app::err_color(ui)));
         }
     }
 
@@ -362,7 +372,7 @@ impl DevicesPanel {
 
     fn show_add(&mut self, ui: &mut egui::Ui, devices: &[DeviceView], settings: &mut Settings, emu: &EmuHandle) {
         ui.label(RichText::new("Connect a device").strong());
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             for (kind, label) in [
                 (Kind::Pico, "Pico"),
                 (Kind::Encoder, "Rotary encoder"),
@@ -370,7 +380,7 @@ impl DevicesPanel {
                 (Kind::Lm75, "LM75"),
                 (Kind::Network, "Network"),
             ] {
-                if ui.selectable_label(self.kind == kind, label).clicked() {
+                if crate::app::toggle_button(ui, self.kind == kind, label).clicked() {
                     self.kind = kind;
                     self.add_error = None;
                 }
@@ -378,31 +388,39 @@ impl DevicesPanel {
         });
         let text = match self.kind {
             Kind::Encoder => {
-                ui.horizontal(|ui| {
-                    ui.label("Pins A, B:");
-                    ui.text_edit_singleline(&mut self.encoder_pins);
-                })
-                .response
-                .on_hover_text("Contacts A and B (to GND, pull-ups on the module); clockwise, A falls first");
-                format!("encoder@{}", self.encoder_pins)
+                for (n, name) in ["A", "B"].into_iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Contact {name}:"));
+                        pin_picker(ui, ("encoder", n), &mut self.encoder_pins[n]);
+                    })
+                    .response
+                    .on_hover_text("Contacts A and B (to GND, pull-ups on the module); clockwise, A falls first");
+                }
+                format!("encoder@{},{}", pin_name(self.encoder_pins[0]), pin_name(self.encoder_pins[1]))
             }
             Kind::Ds18b20 => {
                 ui.horizontal(|ui| {
-                    ui.label("Pin:");
-                    ui.text_edit_singleline(&mut self.sensor_pin);
+                    ui.label("Data:");
+                    pin_picker(ui, "ds18b20", &mut self.sensor_pin);
                 })
                 .response
                 .on_hover_text("1-Wire data line (pull-up on the module); several sensors may share a pin");
-                format!("ds18b20@{}", self.sensor_pin)
+                format!("ds18b20@{}", pin_name(self.sensor_pin))
             }
             Kind::Lm75 => {
                 ui.horizontal(|ui| {
                     ui.label("Address:");
-                    ui.text_edit_singleline(&mut self.lm75_addr);
+                    egui::ComboBox::from_id_salt("lm75-addr")
+                        .selected_text(format!("0x{:02X}", self.lm75_addr))
+                        .show_ui(ui, |ui| {
+                            for a in 0x48..=0x4F_u8 {
+                                ui.selectable_value(&mut self.lm75_addr, a, format!("0x{a:02X}"));
+                            }
+                        });
                 })
                 .response
                 .on_hover_text("I2C address 0x48..0x4F (A2..A0) on the I2C header: I2C1, SCL PB8, SDA PB9");
-                format!("lm75@{}", self.lm75_addr)
+                format!("lm75@0x{:02X}", self.lm75_addr)
             }
             Kind::Network => {
                 ui.label("Ethernet: gateway 192.168.33.1, DHCP gives the board 192.168.33.99");
@@ -431,22 +449,42 @@ impl DevicesPanel {
                 });
                 ui.add(
                     egui::TextEdit::singleline(&mut self.pico_firmware)
-                        .hint_text("FIRMWARE.uf2")
+                        .hint_text("no file chosen (or paste the path of a .uf2 file)")
                         .desired_width(f32::INFINITY),
                 );
-                ui.horizontal(|ui| {
-                    ui.label("Wiring:");
-                    ui.add(egui::TextEdit::singleline(&mut self.pico_wiring).desired_width(f32::INFINITY));
-                })
-                .response
-                .on_hover_text(
-                    "Pico GPIOs and the board pins they are wired to: GP0=PF0,GP5=PF1 \
-                     (the square wave generator's A0, A5 on S0, S1)",
+                ui.label("Wires:").on_hover_text(
+                    "Pico GPIOs and the board pins they are wired to (the square wave generator: \
+                     GP0 → PF0 = IN0, GP5 → PF1 = IN1)",
                 );
-                format!("pico={}@{}", self.pico_firmware.trim(), self.pico_wiring)
+                let mut remove = None;
+                for (i, (gp, pin)) in self.pico_wiring.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt(("pico-gp", i))
+                            .width(56.0)
+                            .selected_text(format!("GP{gp}"))
+                            .show_ui(ui, |ui| {
+                                for g in 0..=29_u8 {
+                                    ui.selectable_value(gp, g, format!("GP{g}"));
+                                }
+                            });
+                        ui.label("→");
+                        pin_picker(ui, ("pico-pin", i), pin);
+                        if ui.small_button("✖").on_hover_text("Remove this wire").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove {
+                    self.pico_wiring.remove(i);
+                }
+                if ui.small_button("+ Wire").clicked() {
+                    let gp = (0..=29).find(|g| self.pico_wiring.iter().all(|w| w.0 != *g)).unwrap_or(0);
+                    self.pico_wiring.push((gp, ('F', 2)));
+                }
+                format!("pico={}@{}", self.pico_firmware.trim(), wiring_text(&self.pico_wiring))
             }
         };
-        if ui.button("➕ Connect").clicked() {
+        if ui.button("Connect").clicked() {
             match DeviceSpec::parse(&text).and_then(|spec| check_pins(&spec, devices).map(|()| spec)) {
                 Ok(spec) => {
                     self.add_error = None;
@@ -458,7 +496,7 @@ impl DevicesPanel {
             }
         }
         if let Some(e) = &self.add_error {
-            ui.label(RichText::new(e).color(ERR_RED));
+            ui.label(RichText::new(e).color(crate::app::err_color(ui)));
         }
     }
 
@@ -572,6 +610,29 @@ fn show_wiring(ui: &mut egui::Ui, spec: &PicoSpec) {
     ui.label(wires.join(" · ")).on_hover_text(spec.firmware.display().to_string());
 }
 
+/// A board pin: port and number, and the name of its pad on the carrier.
+fn pin_picker(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug + Copy, pin: &mut (char, u32)) {
+    egui::ComboBox::from_id_salt((id, "port")).width(44.0).selected_text(format!("P{}", pin.0)).show_ui(ui, |ui| {
+        for c in 'A'..='G' {
+            ui.selectable_value(&mut pin.0, c, format!("P{c}"));
+        }
+    });
+    egui::ComboBox::from_id_salt((id, "pin")).width(40.0).selected_text(pin.1.to_string()).show_ui(ui, |ui| {
+        ui.set_min_width(110.0);
+        for n in 0..16 {
+            let label = match crate::board::pad(pin.0, n) {
+                Some((name, _)) => format!("{n}  {name}"),
+                None => n.to_string(),
+            };
+            ui.selectable_value(&mut pin.1, n, label);
+        }
+    });
+    match crate::board::pad(pin.0, pin.1) {
+        Some((name, _)) => ui.label(name),
+        None => ui.label(RichText::new("Morpho header").weak()).on_hover_text("No pad on the carrier for this pin"),
+    };
+}
+
 /// `GP0=PF0,GP5=PF1`
 fn wiring_text(wiring: &[(u8, (char, u32))]) -> String {
     wiring.iter().map(|&(gp, pin)| format!("GP{gp}={}", pin_name(pin))).collect::<Vec<_>>().join(",")
@@ -608,7 +669,7 @@ fn show_pico_usb(ui: &mut egui::Ui, usb: Option<&(String, bool)>) {
     ui.horizontal(|ui| {
         ui.label("USB device:");
         if *attached {
-            ui.label(RichText::new(format!("plugged in ({busid})")).color(crate::app::OK_GREEN)).on_hover_text(
+            ui.label(RichText::new(format!("plugged in ({busid})")).color(crate::app::ok_color(ui))).on_hover_text(
                 "Programs on this computer find it like a real Pico (e.g. /dev/ttyACM*); \
                  the pseudo terminal below is idle meanwhile",
             );

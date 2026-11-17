@@ -114,8 +114,21 @@ const LABEL_W: f32 = 28.0;
 const MIN_CELL: f32 = 18.0;
 const MAX_CELL: f32 = 34.0;
 
-pub fn show(ui: &mut egui::Ui, pins: &PinsView) {
-    ui.label(egui::RichText::new("Pins").strong());
+/// Marks pins the board uses (light) and pins a device is wired to (green), top left of the cell.
+const BOARD_MARK: Color32 = Color32::from_rgb(0xf2, 0xe8, 0xc8);
+
+fn corner_mark(painter: &egui::Painter, r: Rect, color: Color32) {
+    let s = (r.width() * 0.38).max(5.0);
+    painter.add(egui::Shape::convex_polygon(
+        vec![r.left_top(), r.left_top() + Vec2::new(s, 0.0), r.left_top() + Vec2::new(0.0, s)],
+        color,
+        Stroke::new(1.0, Color32::from_black_alpha(160)),
+    ));
+}
+
+/// `devices`: what a device wired to a pin is (port, pin, text).
+pub fn show(ui: &mut egui::Ui, pins: &PinsView, devices: &[(char, u32, String)]) {
+    crate::app::section_header(ui, "Pins", "mode and level of ports A–G");
     // the cells grow with the panel
     let cell = ((ui.available_width() - LABEL_W) / 16.0).clamp(MIN_CELL, MAX_CELL).floor();
     let (rect, _) =
@@ -150,21 +163,16 @@ pub fn show(ui: &mut egui::Ui, pins: &PinsView) {
                 );
                 painter.rect_filled(bar, CornerRadius::same(1), Color32::from_black_alpha(150));
             }
+            let port_char = (b'A' + port as u8) as char;
+            let device = devices.iter().find(|(p, i, _)| (*p, *i as usize) == (port_char, pin)).map(|d| &d.2);
             let used = board_use(port, pin);
-            if used.is_some() {
-                painter.rect_stroke(
-                    r,
-                    CornerRadius::same(3),
-                    Stroke::new(1.5, Color32::from_white_alpha(170)),
-                    egui::StrokeKind::Inside,
-                );
+            if device.is_some() {
+                corner_mark(&painter, r, crate::board::DEVICE_WIRE);
+            } else if used.is_some() {
+                corner_mark(&painter, r, BOARD_MARK);
             }
-            let letter = match v.mode {
-                PinMode::Input => "I".to_owned(),
-                PinMode::Output => "O".to_owned(),
-                PinMode::Alternate => format!("{:X}", v.af),
-                PinMode::Analog => "~".to_owned(),
-            };
+            // a letter for the mode (I, O, A, ~) that no digit looks like;
+            // the alternate function's number small beside the A
             let ink = if high {
                 Color32::BLACK
             } else if ui.visuals().dark_mode {
@@ -173,7 +181,25 @@ pub fn show(ui: &mut egui::Ui, pins: &PinsView) {
                 Color32::from_gray(245)
             };
             let at = r.center() - Vec2::new(0.0, if high { 1.0 } else { 0.0 });
-            painter.text(at, egui::Align2::CENTER_CENTER, letter, FontId::monospace(cell * 0.6), ink);
+            let font = FontId::proportional(cell * 0.62);
+            match v.mode {
+                PinMode::Alternate => {
+                    let a = painter.layout_no_wrap("A".to_owned(), font, ink);
+                    let n = painter.layout_no_wrap(v.af.to_string(), FontId::proportional(cell * 0.42), ink);
+                    let w = a.size().x + n.size().x;
+                    let left = at.x - w / 2.0;
+                    painter.galley(Pos2::new(left, at.y - a.size().y / 2.0), a.clone(), ink);
+                    painter.galley(Pos2::new(left + a.size().x, at.y - a.size().y / 2.0 + a.size().y * 0.42), n, ink);
+                }
+                mode => {
+                    let letter = match mode {
+                        PinMode::Input => "I",
+                        PinMode::Output => "O",
+                        _ => "~",
+                    };
+                    painter.text(at, egui::Align2::CENTER_CENTER, letter, font, ink);
+                }
+            }
             let mut hover = format!("{name}{pin}: {mode}");
             if v.mode == PinMode::Alternate {
                 hover += &format!(" AF{}", v.af);
@@ -192,6 +218,9 @@ pub fn show(ui: &mut egui::Ui, pins: &PinsView) {
             if let Some(u) = used {
                 hover += &format!("\n{u}");
             }
+            if let Some(d) = device {
+                hover += &format!("\nwired to: {d}");
+            }
             let resp = ui.interact(r, ui.scope_id().with(("pin", port, pin)), Sense::hover());
             let label = hover.replace('\n', ", ");
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &label));
@@ -199,16 +228,38 @@ pub fn show(ui: &mut egui::Ui, pins: &PinsView) {
         }
     }
     ui.add_space(4.0);
+    // the legend: what each mark looks like, drawn like the cells
     ui.horizontal_wrapped(|ui| {
         for (color, text) in
-            [(IN_HI, "I input"), (OUT_HI, "O output"), (AF_HI, "0–F alternate function"), (ANALOG, "~ analog")]
+            [(IN_HI, "I input"), (OUT_HI, "O output"), (AF_HI, "A7 alt. function 7"), (ANALOG, "~ analog")]
         {
-            let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
             ui.painter().rect_filled(r, CornerRadius::same(2), color);
-            ui.label(egui::RichText::new(text).small());
+            ui.label(text);
         }
     });
-    ui.label(
-        egui::RichText::new("bright with a bar: high · dark: low · white frame: used on the board").small().weak(),
-    );
+    ui.horizontal_wrapped(|ui| {
+        let swatch = |ui: &mut egui::Ui, fill: Color32, bar: bool, mark: Option<Color32>| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+            ui.painter().rect_filled(r, CornerRadius::same(2), fill);
+            if bar {
+                let bar = Rect::from_min_max(
+                    Pos2::new(r.left() + 2.0, r.bottom() - 3.0),
+                    Pos2::new(r.right() - 2.0, r.bottom() - 1.0),
+                );
+                ui.painter().rect_filled(bar, CornerRadius::same(1), Color32::from_black_alpha(150));
+            }
+            if let Some(c) = mark {
+                corner_mark(ui.painter(), r, c);
+            }
+        };
+        swatch(ui, IN_HI, true, None);
+        ui.label("high");
+        swatch(ui, IN_HI.gamma_multiply(0.32), false, None);
+        ui.label("low");
+        swatch(ui, IN_HI.gamma_multiply(0.32), false, Some(BOARD_MARK));
+        ui.label("used on the board");
+        swatch(ui, IN_HI.gamma_multiply(0.32), false, Some(crate::board::DEVICE_WIRE));
+        ui.label("device");
+    });
 }

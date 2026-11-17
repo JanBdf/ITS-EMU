@@ -239,7 +239,7 @@ impl Console {
                     self.clear();
                 }
                 if ui
-                    .toggle_value(&mut self.timestamps, "Time")
+                    .checkbox(&mut self.timestamps, "Time")
                     .on_hover_text("Show the virtual time at which each line began")
                     .changed()
                 {
@@ -374,7 +374,7 @@ impl Console {
         let hint = if self.send_keys {
             "every key is sent at once · Esc: keys to the board"
         } else {
-            "Enter sends · ↑↓ history · Esc: keys to the board"
+            "Type a line · ↑↓ history · Esc: keys to the board"
         };
         let mut out = egui::TextEdit::singleline(&mut self.input).hint_text(hint).desired_width(f32::INFINITY).show(ui);
         let edit = out.response.clone();
