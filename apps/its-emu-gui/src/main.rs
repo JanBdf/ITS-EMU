@@ -35,7 +35,7 @@ struct Args {
 
     /// Plug in the board's ST-LINK (debug probe and virtual COM port) over
     /// USB/IP at ADDR (default 127.0.0.1:3240), whatever the toolbar setting
-    /// says. On Linux it is attached with `usbip attach` (vhci-hcd module);
+    /// says (also instead of the ST-LINK for pyOCD, Emulation menu). On Linux it is attached with `usbip attach` (vhci-hcd module);
     /// then pyOCD (the course's STLink@pyOCD configurations), OpenOCD and
     /// terminal programs use it like the real board's
     #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:3240")]
@@ -146,6 +146,9 @@ fn run(args: Args, renderer: eframe::Renderer) -> eframe::Result {
             }
             let usb = emu::UsbConfig {
                 enabled: if args.no_usb { false } else { args.usb.is_some() || settings.usb },
+                // --usb: USB/IP this time, whatever the setting says
+                pyocd: settings.pyocd == Some(true) && args.usb.is_none(),
+                pyocd_addr: format!("127.0.0.1:{}", stlink::tcp::DEFAULT_PORT),
                 addr: args.usb.unwrap_or_else(|| format!("127.0.0.1:{}", stlink::DEFAULT_PORT)),
                 attach: !args.no_usb_attach,
             };

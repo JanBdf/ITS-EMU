@@ -3604,6 +3604,7 @@ name = "stlink"
 version = "0.1.1"
 dependencies = [
  "emu-core",
+ "libc",
  "log",
  "stm32f429",
  "usbip",

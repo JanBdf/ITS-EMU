@@ -16,7 +16,7 @@ use itsboard::spec::DeviceSpec;
 struct Args {
     /// Firmware image (.axf / .elf). Without one (only with --gdb or --usb)
     /// the flash is empty and the debugger loads the program
-    #[arg(required_unless_present_any = ["gdb", "usb"])]
+    #[arg(required_unless_present_any = ["gdb", "usb", "pyocd", "install_pyocd_plugin", "uninstall_pyocd_plugin"])]
     firmware: Option<PathBuf>,
 
     /// Font table to flash at 0x0810_0000 instead of the built-in fonts.bin of ITS_BRD_LIB
@@ -128,6 +128,23 @@ struct Args {
     /// With --usb: run `sudo usbip attach` for the ST-LINK, CN13 and the Picos
     #[arg(long, requires = "usb")]
     usb_attach: bool,
+
+    /// Serve the board's ST-LINK to pyOCD over TCP (default address
+    /// 127.0.0.1:3241) instead of USB, where USB/IP is not available
+    /// (macOS, Windows). Needs the emulator's pyOCD plugin (the GUI installs
+    /// it; see --install-pyocd-plugin); the virtual COM port is a
+    /// pseudo-terminal whose path is printed
+    #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:3241", conflicts_with = "usb")]
+    pyocd: Option<String>,
+
+    /// Install the pyOCD plugin into the pyOCD of VS Code's CMSIS Debugger
+    /// extension (and the Arm Environment Manager's), then exit
+    #[arg(long, exclusive = true)]
+    install_pyocd_plugin: bool,
+
+    /// Remove the pyOCD plugin again, then exit
+    #[arg(long, exclusive = true)]
+    uninstall_pyocd_plugin: bool,
 }
 
 /// Virtual time slice while a debugger is attached (Ctrl-C latency).
@@ -250,6 +267,21 @@ const REALTIME_SLICE_NS: u64 = 2_000_000;
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let args = Args::parse();
+    if args.install_pyocd_plugin || args.uninstall_pyocd_plugin {
+        let report =
+            if args.install_pyocd_plugin { stlink::pyocd_plugin::install() } else { stlink::pyocd_plugin::uninstall() };
+        let what = if args.install_pyocd_plugin { "installed into" } else { "removed from" };
+        for dir in &report.done {
+            println!("pyOCD plugin {what} {}", dir.display());
+        }
+        for (dir, e) in &report.failed {
+            eprintln!("{}: {e}", dir.display());
+        }
+        if report.done.is_empty() && report.failed.is_empty() {
+            eprintln!("no pyOCD found (VS Code's CMSIS Debugger extension, Arm Environment Manager)");
+        }
+        std::process::exit(i32::from(!report.failed.is_empty() || report.done.is_empty()));
+    }
 
     let fonts = match &args.fonts {
         Some(path) => Some(std::fs::read(path).with_context(|| format!("reading {}", path.display()))?),
@@ -312,11 +344,22 @@ fn main() -> Result<()> {
     };
     // Requests from the USB host wake the loop while the core is halted.
     let (wake_tx, wake_rx) = std::sync::mpsc::sync_channel::<()>(1);
-    let mut usb = match &args.usb {
-        Some(addr) => {
-            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                let _ = wake_tx.try_send(());
-            });
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        let _ = wake_tx.try_send(());
+    });
+    let mut usb = match (&args.usb, &args.pyocd) {
+        (_, Some(addr)) => {
+            let probe = stlink::UsbProbe::start_tcp(addr, Some(mcu.usart3.clone()), wake.clone())
+                .with_context(|| format!("starting the ST-LINK for pyOCD on {addr}"))?;
+            println!("ST-LINK for pyOCD on {} (pyocd --probe stlink:)", probe.local_addr());
+            if let Some(path) = probe.vcp_path() {
+                println!("virtual COM port: {path}");
+            }
+            // CN13 and the Picos' USB need USB/IP
+            let otg = stm32f429::otg_fs::OtgUsbDevice::new(mcu.otg.clone(), wake.clone());
+            Some((probe, Vec::new(), otg))
+        }
+        (Some(addr), None) => {
             let probe = stlink::UsbProbe::start(addr, Some(mcu.usart3.clone()), wake.clone())
                 .with_context(|| format!("starting the USB/IP server on {addr}"))?;
             println!(
@@ -331,7 +374,7 @@ fn main() -> Result<()> {
             let otg = stm32f429::otg_fs::OtgUsbDevice::new(mcu.otg.clone(), wake.clone());
             Some((probe, pico_usb, otg))
         }
-        None => None,
+        (None, None) => None,
     };
     // Like the board on the desk: in real time while plugged in, and a BKPT
     // without a debugger is a HardFault (the probe may leave the core on one).
@@ -487,7 +530,8 @@ type UsbDevices = (stlink::UsbProbe, Vec<itsboard::pico_usb::PicoUsbDevice>, stm
 fn poll_usb((probe, pico_usb, otg): &mut UsbDevices, machine: &mut Machine, attach: bool) {
     probe.poll(machine);
     let addr = probe.local_addr();
-    if let Some(busid) = otg.poll(probe.server()) {
+    let Some(server) = probe.server() else { return };
+    if let Some(busid) = otg.poll(server) {
         println!(
             "USB OTG FS (CN13): device exported as {busid}; attach it with: {}",
             stlink::attach_command(addr, &busid)
@@ -497,7 +541,7 @@ fn poll_usb((probe, pico_usb, otg): &mut UsbDevices, machine: &mut Machine, atta
         }
     }
     for (n, device) in pico_usb.iter_mut().enumerate() {
-        if let Some(busid) = device.poll(probe.server()) {
+        if let Some(busid) = device.poll(server) {
             println!(
                 "Pico {n}: USB device exported as {busid}; attach it with: {}",
                 stlink::attach_command(addr, &busid)

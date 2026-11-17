@@ -21,8 +21,9 @@ programs: it writes sections at their run addresses, so AC6's `.data` initial
 values (`RW_IRAM1`) land in RAM instead of flash, where startup copies them from.
 
 The course's VS Code configurations start pyOCD with `--probe stlink:`,
-which only finds a USB ST-LINK. On Linux the emulator can be one
-([below](#the-boards-st-link-on-usb-linux)); otherwise add this to the
+which only finds an ST-LINK. The emulator can be one: on USB on Linux
+([below](#the-boards-st-link-on-usb-linux)), through a pyOCD plugin elsewhere
+([below](#the-boards-st-link-for-pyocd-macos-windows)). Otherwise add this to the
 course project's `.vscode/launch.json` (CDT GDB adapter). Like
 **STLink@pyOCD (launch)**, it loads the active CMSIS project's last build,
 resets and stops at `main`:
@@ -97,6 +98,39 @@ udev rules pyOCD/OpenOCD install for the real probe (e.g. `60-openocd.rules`)
 cover the emulated one. Other machines can attach it with `--usb
 0.0.0.0:3240` and `usbip attach -r HOST -b 1-1` (usbip-win2 on Windows,
 untested).
+
+## The board's ST-LINK for pyOCD (macOS, Windows)
+
+Where USB/IP devices cannot be attached, the GUI serves the same ST-LINK
+to pyOCD over TCP (127.0.0.1:3241). At its first start (outside Linux) it
+asks whether to; **Emulation → ST-LINK for pyOCD (VS Code)** switches it
+later (`pyocd_stlink` in `gui.conf`; `--usb` uses USB/IP for one run).
+
+Switched on, the emulator adds a plugin (`its_emu_pyocd.py` and a
+`.dist-info` directory) to the frozen pyOCD of VS Code's Arm CMSIS
+Debugger extension (`~/.vscode/extensions/arm.vscode-cmsis-debugger-*/tools/pyocd/_internal`,
+also `.vscode-insiders`, `.cursor` …, and pyOCDs of the Arm Environment
+Manager in `~/.vcpkg/artifacts`), at every start, since an update of the
+extension comes without it. Switched off, it removes the plugin again. The
+plugin adds the emulator to the devices of pyOCD's own `stlink` probe type,
+so *CMSIS Load* and *STLink@pyOCD* work unchanged; real ST-LINKs keep
+working, and without a running emulator it finds nothing.
+`ITS_EMU_STLINK=HOST:PORT` points it elsewhere, `ITS_EMU_STLINK=off`
+disables it. The protocol is in `crates/stlink/src/tcp.rs`.
+
+The virtual COM port is a pseudo-terminal (`/dev/ttys…`, shown in the
+status bar; click copies it). Like `/dev/ttyACM0` it starts with echo and
+line editing each time a program opens it; terminal programs set raw mode.
+Windows has no pseudo-terminals: use the serial console there.
+
+```sh
+its-emu --install-pyocd-plugin          # the CLI: install / --uninstall-pyocd-plugin
+its-emu Program.axf --pyocd             # serve the ST-LINK (prints the COM port)
+```
+
+The plugin patches a method of pyOCD's ST-LINK driver
+(`STLinkUSBInterface.get_all_connected_devices`); it warns and does nothing
+if a pyOCD version lacks it. Tested with the extension's pyOCD 0.46.1.
 
 While the probe halts the core, peripherals and the flash interface keep
 running (only the core, SysTick and DWT->CYCCNT stop, as on the chip), so

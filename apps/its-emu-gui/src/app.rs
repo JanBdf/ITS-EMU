@@ -8,7 +8,7 @@ use itsboard::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
 use crate::board::{self, BoardState, NUCLEO_BLUE, NUCLEO_GREEN, NUCLEO_RED};
 use crate::console::Console;
-use crate::emu::{self, Command, EmuHandle, RunState, Speed, UsbStatus};
+use crate::emu::{self, Command, EmuHandle, RunState, Speed, UsbStatus, Via};
 use crate::files::FilePicker;
 use crate::settings::{ConsoleSide, Settings, Theme, WindowState};
 
@@ -65,6 +65,12 @@ pub struct App {
     self_screenshot: Option<SelfScreenshot>,
     /// The toolbar switch of the ST-LINK.
     usb_on: bool,
+    /// The ST-LINK is served to pyOCD through the plugin (not USB/IP).
+    pyocd_on: bool,
+    /// Ask whether to use the pyOCD plugin (first start, where USB/IP does not work).
+    pyocd_ask: bool,
+    /// Where the plugin was installed last, or why not.
+    pyocd_report: Option<stlink::pyocd_plugin::Report>,
     settings: Settings,
     /// Only the display, as large as the window allows (right click on the display).
     lcd_focus: bool,
@@ -176,20 +182,47 @@ fn usb_hover(usb: &UsbStatus) -> String {
              computer, for pyOCD (the course's STLink@pyOCD configurations), OpenOCD and terminal programs. \
              Switch on to plug it in."
             .to_owned(),
-        UsbStatus::PluggedIn { addr, debugging } => format!(
-            "Plugged in over USB/IP ({addr}).{}",
-            if *debugging {
+        UsbStatus::PluggedIn { addr, debugging, via } => {
+            let using = if *debugging {
                 " A debugger (pyOCD) uses it; the emulator's GDB server leaves port 3333 to it."
             } else {
                 ""
+            };
+            match via {
+                Via::Usbip => format!("Plugged in over USB/IP ({addr}).{using}"),
+                Via::Pyocd { vcp } => format!(
+                    "Served to pyOCD through the emulator's plugin ({addr}): `--probe stlink:` and the \
+                     course's STLink@pyOCD configurations find it like the board's ST-LINK.{using}\n\n{}",
+                    vcp.as_ref().map_or_else(
+                        || "No virtual COM port on this system: use the serial console.".to_owned(),
+                        |p| format!("Virtual COM port: {p} (open it in a terminal program; click to copy)")
+                    )
+                ),
             }
-        ),
+        }
         UsbStatus::Unplugged { addr, cmd, error } => {
             let why = error.as_ref().map_or_else(String::new, |e| format!("Attaching failed: {e}\n\n"));
             format!("{why}Exported over USB/IP on {addr}. Plug it in with\n{cmd}\n(needs the vhci-hcd kernel module)")
         }
         UsbStatus::Unavailable(e) => format!("The USB/IP server cannot start: {e}"),
     }
+}
+
+/// Tooltip of the pyOCD switch: what it does and where the plugin went.
+fn pyocd_hover(report: Option<&stlink::pyocd_plugin::Report>) -> String {
+    let mut text = "Serve the ST-LINK to pyOCD through a plugin the emulator adds to the pyOCD of VS Code's \
+                    Arm CMSIS Debugger extension, instead of as a USB device (USB/IP works on Linux only). \
+                    The virtual COM port becomes a terminal device."
+        .to_owned();
+    if let Some(r) = report {
+        for dir in &r.done {
+            text += &format!("\n\nPlugin: {}", dir.display());
+        }
+        for (dir, e) in &r.failed {
+            text += &format!("\n\nFailed: {}: {e}", dir.display());
+        }
+    }
+    text
 }
 
 /// The Run/Pause button for `state`: label, enabled, tooltip.
@@ -234,6 +267,7 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         apply_theme(&ctx, settings.theme);
         let usb_on = usb.enabled;
+        let pyocd_on = usb.pyocd;
         let bootrom = bootrom_override.clone().or_else(|| settings.pico_bootrom.clone());
         let emu = emu::spawn(move || ctx.request_repaint(), gdb_addr, usb, settings.devices.clone(), bootrom);
         if ideal_colors {
@@ -269,6 +303,10 @@ impl App {
             analog: [None; 8],
             self_screenshot: SelfScreenshot::from_env(),
             usb_on,
+            pyocd_on,
+            // USB/IP attaches the probe on Linux; elsewhere the plugin is the way
+            pyocd_ask: settings.pyocd.is_none() && !cfg!(target_os = "linux"),
+            pyocd_report: None,
             settings,
             // ITS_EMU_GUI_VIEW=lcd, see-through, pins, help (comma separated):
             // start in that view (documentation, visual checks)
@@ -288,6 +326,10 @@ impl App {
             board_view: board::Zoom::default(),
             saved_window: None,
         };
+        if app.pyocd_on {
+            // again at every start: an update of VS Code's extension comes without it
+            app.pyocd_report = Some(stlink::pyocd_plugin::install());
+        }
         if let Some(path) = firmware {
             app.load(path);
         }
@@ -376,6 +418,80 @@ impl App {
         self.settings.save();
     }
 
+    /// Serves the ST-LINK to pyOCD through the plugin (installs it into the
+    /// pyOCD copies found) or back over USB/IP (removes the plugin).
+    fn set_pyocd(&mut self, ctx: &egui::Context, on: bool) {
+        self.pyocd_on = on;
+        self.settings.pyocd = Some(on);
+        self.emu.send(Command::SetPyocd(on));
+        let report = if on { stlink::pyocd_plugin::install() } else { stlink::pyocd_plugin::uninstall() };
+        if let Some((dir, e)) = report.failed.first() {
+            self.notify(ctx, format!("pyOCD plugin: {}: {e}", dir.display()), true);
+        } else if on && report.done.is_empty() {
+            self.notify(
+                ctx,
+                "No pyOCD found: install VS Code's Arm CMSIS Debugger extension, then switch this on again".into(),
+                true,
+            );
+        } else if on {
+            self.notify(ctx, "ST-LINK ready for pyOCD (VS Code)".into(), false);
+        }
+        self.pyocd_report = Some(report);
+        // USB/IP only plugs the probe in on Linux
+        if on != self.usb_on && (on || !cfg!(target_os = "linux")) {
+            self.set_usb(on);
+        }
+        self.settings.save();
+    }
+
+    /// The question at the first start.
+    fn pyocd_question(&mut self, ctx: &egui::Context) {
+        if !self.pyocd_ask {
+            return;
+        }
+        let mut answer = None;
+        let modal = egui::Modal::new(egui::Id::unique("pyocd-question")).show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            ui.heading("ST-LINK for VS Code");
+            ui.add_space(4.0);
+            ui.label(
+                "The course's VS Code configurations (CMSIS Load, STLink@pyOCD) flash and debug the board \
+                 through its ST-LINK. The emulator can be that ST-LINK: it adds a small plugin to the pyOCD \
+                 of VS Code's Arm CMSIS Debugger extension, which then finds the emulated board like a real \
+                 one. Real ST-LINKs keep working; without a running emulator the plugin does nothing.",
+            );
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(
+                    "The board's virtual COM port becomes a terminal device whose path the status bar shows. \
+                     You can change this later in the Emulation menu.",
+                )
+                .weak(),
+            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button(RichText::new("Use the emulator's ST-LINK").strong()).clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Not now").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if let Some(on) = answer {
+            self.pyocd_ask = false;
+            if on {
+                self.set_pyocd(ctx, true);
+            } else {
+                self.settings.pyocd = Some(false);
+                self.settings.save();
+            }
+        } else if modal.should_close() {
+            // dismissed (Esc, click outside): asked again next time
+            self.pyocd_ask = false;
+        }
+    }
+
     fn set_see_through(&mut self, on: bool) {
         if let Some(opacity) = self.see_through {
             self.see_through_opacity = opacity;
@@ -462,8 +578,17 @@ impl App {
                 }
                 ui.separator();
                 let mut on = self.usb_on;
-                if ui.checkbox(&mut on, "USB ST-LINK plugged in").changed() {
+                let label = if self.pyocd_on { "ST-LINK plugged in" } else { "USB ST-LINK plugged in" };
+                if ui.checkbox(&mut on, label).changed() {
                     self.set_usb(on);
+                }
+                let mut pyocd = self.pyocd_on;
+                if ui
+                    .checkbox(&mut pyocd, "ST-LINK for pyOCD (VS Code)")
+                    .on_hover_text(pyocd_hover(self.pyocd_report.as_ref()))
+                    .changed()
+                {
+                    self.set_pyocd(ctx, pyocd);
                 }
                 let mut bounce = self.settings.bounce;
                 if ui
@@ -607,7 +732,8 @@ impl App {
             }
             ui.separator();
             let mut on = self.usb_on;
-            if ui.toggle_value(&mut on, "USB ST-LINK").on_hover_text(usb_hover(usb)).changed() {
+            let label = if self.pyocd_on { "ST-LINK" } else { "USB ST-LINK" };
+            if ui.toggle_value(&mut on, label).on_hover_text(usb_hover(usb)).changed() {
                 self.set_usb(on);
             }
             ui.separator();
@@ -758,6 +884,7 @@ impl App {
             let (text, color) = match usb {
                 UsbStatus::Off => (None, OK_GREEN),
                 UsbStatus::PluggedIn { debugging: true, .. } => (Some("ST-LINK in use by a debugger"), OK_GREEN),
+                UsbStatus::PluggedIn { via: Via::Pyocd { .. }, .. } => (Some("ST-LINK ready for pyOCD"), OK_GREEN),
                 UsbStatus::PluggedIn { .. } => (Some("ST-LINK plugged in"), OK_GREEN),
                 UsbStatus::Unplugged { error: None, .. } => (Some("ST-LINK: waiting for usbip attach"), WARN_YELLOW),
                 UsbStatus::Unplugged { error: Some(_), .. } if stlink::restart_needed() => {
@@ -770,6 +897,14 @@ impl App {
             if let Some(text) = text {
                 ui.separator();
                 ui.label(RichText::new(text).color(color)).on_hover_text(usb_hover(usb));
+            }
+            if let UsbStatus::PluggedIn { via: Via::Pyocd { vcp: Some(path) }, .. } = usb {
+                ui.separator();
+                let label = egui::Label::new(format!("COM: {path}")).sense(egui::Sense::click());
+                if ui.add(label).on_hover_text(usb_hover(usb)).clicked() {
+                    ui.ctx().copy_text(path.clone());
+                    self.notify(ui.ctx(), format!("Copied {path}"), false);
+                }
             }
             // the firmware's own USB device on CN13 (USB OTG FS)
             if let Some((busid, attached)) = otg {
@@ -1098,6 +1233,7 @@ impl eframe::App for App {
         }
 
         self.help_window(&ctx);
+        self.pyocd_question(&ctx);
 
         // ---- drag & drop of firmware files: a hint while a file is over the window
         if ctx.input(|i| !i.raw.hovered_files.is_empty()) {

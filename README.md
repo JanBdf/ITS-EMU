@@ -40,7 +40,9 @@ The macOS app is signed ad hoc, so macOS refuses the first start; allow it
 once in *System Settings → Privacy & Security → Open Anyway*. The CLI is
 inside the app:
 `ln -s '/Applications/ITS-Board Emulator.app/Contents/MacOS/its-emu' /usr/local/bin/`.
-The USB ST-LINK is Linux only; on macOS use the [GDB server](docs/debugging.md).
+On first start the GUI offers to be the board's ST-LINK for VS Code's pyOCD
+(a plugin it adds to Arm's CMSIS Debugger extension), so the course's *CMSIS Load* and
+*STLink@pyOCD* work unchanged; see [debugging](docs/debugging.md#the-boards-st-link-for-pyocd-macos-windows).
 
 Other platforms: [build from source](docs/development.md), or take the Linux, Windows
 and macOS binaries the CI keeps as workflow artifacts for 14 days.

@@ -45,6 +45,9 @@ pub enum Command {
     IdealColors(bool),
     /// Plug the board's ST-LINK in (USB/IP) or unplug it.
     SetUsb(bool),
+    /// Serve the ST-LINK to the pyOCD plugin over TCP instead of USB/IP
+    /// (plugs it in again if it is).
+    SetPyocd(bool),
     /// Load the firmware file again when it changes on disk (a new build).
     SetAutoReload(bool),
     /// The pin inspector is shown: include the pins in the snapshot.
@@ -105,11 +108,14 @@ pub enum DeviceState {
 /// Temperature of a newly connected DS18B20.
 pub const DEFAULT_CELSIUS: f32 = 21.0;
 
-/// The board's ST-LINK on USB/IP.
+/// The board's ST-LINK on USB/IP, or over TCP for the pyOCD plugin.
 #[derive(Debug, Clone)]
 pub struct UsbConfig {
     /// USB/IP server address.
     pub addr: String,
+    /// Served to the pyOCD plugin over TCP at `pyocd_addr` instead.
+    pub pyocd: bool,
+    pub pyocd_addr: String,
     /// Plug it in at start.
     pub enabled: bool,
     /// Attach it to this computer (`usbip attach`, through the packaged
@@ -134,6 +140,17 @@ pub enum UsbStatus {
     PluggedIn {
         addr: String,
         debugging: bool,
+        via: Via,
+    },
+}
+
+/// How the plugged-in ST-LINK reaches the computer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Via {
+    Usbip,
+    /// TCP for the pyOCD plugin; the virtual COM port's pseudo-terminal.
+    Pyocd {
+        vcp: Option<String>,
     },
 }
 
@@ -488,8 +505,8 @@ impl Worker {
             for d in &mut self.devices {
                 d.pico_usb = None;
             }
-            if let (Some(otg), Some(usb)) = (self.otg_usb.take(), &mut self.usb) {
-                otg.unplug(usb.server());
+            if let (Some(otg), Some(server)) = (self.otg_usb.take(), self.usb.as_mut().and_then(|u| u.server())) {
+                otg.unplug(server);
             }
             if self.usb.take().is_some() {
                 log::info!("ST-LINK unplugged");
@@ -505,6 +522,22 @@ impl Worker {
             return;
         }
         if self.usb.is_some() {
+            return;
+        }
+        if self.usb_config.pyocd {
+            let addr = self.usb_config.pyocd_addr.clone();
+            match stlink::UsbProbe::start_tcp(&addr, None, self.wake.clone()) {
+                Ok(probe) => {
+                    log::info!("ST-LINK for pyOCD on {}", probe.local_addr());
+                    self.usb = Some(probe);
+                    self.usb_server_error = None;
+                    self.adopt_sim();
+                }
+                Err(e) => {
+                    log::warn!("cannot serve the ST-LINK for pyOCD on {addr}: {e}");
+                    self.usb_server_error = Some(format!("{addr}: {e}"));
+                }
+            }
             return;
         }
         match stlink::UsbProbe::start(&self.usb_config.addr, None, self.wake.clone()) {
@@ -530,9 +563,11 @@ impl Worker {
     fn usb_status(&self) -> UsbStatus {
         match &self.usb {
             None => self.usb_server_error.clone().map_or(UsbStatus::Off, UsbStatus::Unavailable),
-            Some(p) if p.is_attached() => {
-                UsbStatus::PluggedIn { addr: p.local_addr().to_string(), debugging: p.debug_active() }
-            }
+            Some(p) if p.is_attached() => UsbStatus::PluggedIn {
+                addr: p.local_addr().to_string(),
+                debugging: p.debug_active(),
+                via: if p.is_tcp() { Via::Pyocd { vcp: p.vcp_path().map(String::from) } } else { Via::Usbip },
+            },
             Some(p) => UsbStatus::Unplugged {
                 addr: p.local_addr().to_string(),
                 cmd: p.attach_command(),
@@ -858,6 +893,14 @@ impl Worker {
                 self.published_generation = u64::MAX;
             }
             Command::SetUsb(on) => self.set_usb(on),
+            Command::SetPyocd(on) if on != self.usb_config.pyocd => {
+                self.usb_config.pyocd = on;
+                if self.usb.is_some() {
+                    self.set_usb(false);
+                    self.set_usb(true);
+                }
+            }
+            Command::SetPyocd(_) => {}
             cmd @ (Command::AddDevice(_)
             | Command::RemoveDevice(_)
             | Command::RestartDevice(_)
@@ -932,8 +975,8 @@ impl Worker {
 
     /// Withdraws a Pico's USB device from the computer.
     fn unplug_pico(&mut self, device: Option<PicoUsbDevice>) {
-        if let (Some(mut device), Some(usb)) = (device, &mut self.usb) {
-            device.unplug(usb.server());
+        if let (Some(mut device), Some(server)) = (device, self.usb.as_mut().and_then(|u| u.server())) {
+            device.unplug(server);
         }
     }
 
@@ -942,14 +985,15 @@ impl Worker {
     fn poll_otg_usb(&mut self) {
         let (Some(usb), Some(otg)) = (&mut self.usb, &mut self.otg_usb) else { return };
         let addr = usb.local_addr();
-        let attached = otg.busid().is_some_and(|b| usb.device_attached(b));
-        if let Some(busid) = otg.poll(usb.server()) {
+        let Some(server) = usb.server() else { return };
+        let attached = otg.busid().is_some_and(|b| server.is_attached(b));
+        if let Some(busid) = otg.poll(server) {
             log::info!("USB OTG FS (CN13): device on {}", stlink::attach_command(addr, &busid));
             if self.usb_config.attach {
                 let _ = stlink::spawn_attach(addr, &busid, "OTG FS (CN13)");
             }
             self.publish(true);
-        } else if attached != otg.busid().is_some_and(|b| usb.device_attached(b)) {
+        } else if attached != otg.busid().is_some_and(|b| server.is_attached(b)) {
             self.publish(true);
         }
     }
@@ -959,18 +1003,19 @@ impl Worker {
     fn poll_pico_usb(&mut self) {
         let Some(usb) = &mut self.usb else { return };
         let addr = usb.local_addr();
+        let Some(server) = usb.server() else { return };
         let mut changed = false;
         for d in &mut self.devices {
             let Some(device) = &mut d.pico_usb else { continue };
-            let attached = device.busid().is_some_and(|b| usb.server().is_attached(b));
-            if let Some(busid) = device.poll(usb.server()) {
+            let attached = device.busid().is_some_and(|b| server.is_attached(b));
+            if let Some(busid) = device.poll(server) {
                 log::info!("Pico ({}): USB device on {}", d.spec, stlink::attach_command(addr, &busid));
                 if self.usb_config.attach {
                     let _ = stlink::spawn_attach(addr, &busid, "Pico");
                 }
                 changed = true;
             }
-            changed |= attached != device.busid().is_some_and(|b| usb.server().is_attached(b));
+            changed |= attached != device.busid().is_some_and(|b| server.is_attached(b));
         }
         if changed {
             self.publish(true);

@@ -9,3 +9,6 @@ emu-core.workspace = true
 stm32f429.workspace = true
 usbip.workspace = true
 log.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

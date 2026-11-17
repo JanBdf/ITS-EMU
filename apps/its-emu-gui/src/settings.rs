@@ -10,6 +10,10 @@ use itsboard::spec::DeviceSpec;
 pub struct Settings {
     /// The ST-LINK is plugged in (USB/IP) at start.
     pub usb: bool,
+    /// The ST-LINK is served to pyOCD through the emulator's plugin (TCP and
+    /// a pseudo-terminal) instead of USB/IP. `None`: not decided yet (the
+    /// GUI asks at the first start where USB/IP does not work).
+    pub pyocd: Option<bool>,
     /// The firmware file is loaded again when a new build replaces it.
     pub auto_reload: bool,
     /// Firmware files opened last, the latest first.
@@ -118,6 +122,7 @@ impl Default for Settings {
         // Like the real board: the probe is there when the emulator runs.
         Self {
             usb: cfg!(target_os = "linux"),
+            pyocd: None,
             auto_reload: true,
             recent: Vec::new(),
             devices: Vec::new(),
@@ -162,6 +167,7 @@ impl Settings {
             let on = matches!(value, "true" | "1" | "yes" | "on");
             match key.trim() {
                 "usb" => self.usb = on,
+                "pyocd_stlink" => self.pyocd = Some(on),
                 "auto_reload" => self.auto_reload = on,
                 "console" => self.console = on,
                 "echo" => self.echo = on,
@@ -220,6 +226,9 @@ impl Settings {
             self.speed,
             self.bounce,
         );
+        if let Some(on) = self.pyocd {
+            text += &format!("pyocd_stlink = {on}\n");
+        }
         if let Some(w) = &self.window {
             text += &format!("window = {:.0} {:.0}", w.size[0], w.size[1]);
             if let Some([x, y]) = w.pos {
@@ -271,6 +280,9 @@ mod tests {
         assert_eq!(s.recent, [PathBuf::from("/d.axf"), PathBuf::from("/a/b c.axf")]);
         s.parse("usb=on");
         assert!(s.usb);
+        assert_eq!(s.pyocd, None);
+        s.parse("pyocd_stlink = yes");
+        assert_eq!(s.pyocd, Some(true));
         s.parse("theme = light\nspeed = 10\nbounce = off\nwindow = 1200 900 10 20 max\n");
         assert_eq!(s.theme, Theme::Light);
         assert_eq!(s.speed, 10.0);

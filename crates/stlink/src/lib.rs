@@ -1,13 +1,19 @@
 //! The on-board ST-LINK/V2-1 of the NUCLEO-F429ZI as a USB device: the
 //! debug interface (ST-LINK protocol, as spoken by pyOCD, OpenOCD and the
 //! STM32 tools) on the emulated MCU's debug port, and the virtual COM port
-//! (CDC-ACM) on USART3. Exported over USB/IP ([`usbip`]).
+//! (CDC-ACM) on USART3. Exported over USB/IP ([`usbip`]), or, where the
+//! computer cannot attach USB/IP devices, the debug interface over TCP for
+//! a pyOCD plugin ([`tcp`]) and the COM port as a pseudo-terminal.
 //!
 //! It identifies as an ST-LINK/V2-1 without mass storage (PID 0x3752) with
 //! firmware V2J40M27. The protocol follows pyOCD's `probe/stlink` driver
 //! and OpenOCD's `stlink_usb.c`.
 
 mod commands;
+#[cfg(unix)]
+mod pty;
+pub mod pyocd_plugin;
+pub mod tcp;
 mod vcp;
 
 use std::collections::VecDeque;
@@ -37,11 +43,24 @@ const IF_VCP_COMM: u16 = 1;
 const STRINGS: [&str; 6] =
     ["STMicroelectronics", "STM32 STLink", "", "ST-Link Debug", "ST-Link VCP Ctrl", "ST-Link VCP Data"];
 
-/// The ST-LINK exported over USB/IP: the host polls it between emulation
-/// slices. Its server also exports the other USB devices of the emulation
-/// ([`UsbProbe::server`]).
+/// How the probe reaches the computer.
+enum Transport {
+    Usbip(UsbipServer),
+    Tcp {
+        server: tcp::TcpServer,
+        /// The virtual COM port (none where pseudo-terminals do not exist, or it failed).
+        #[cfg(unix)]
+        vcp: Option<pty::Pty>,
+        /// The device is plugged in yet ([`Stlink::plug`] on the first poll).
+        plugged: bool,
+    },
+}
+
+/// The ST-LINK exported over USB/IP or TCP: the host polls it between
+/// emulation slices. Its USB/IP server also exports the other USB devices of
+/// the emulation ([`UsbProbe::server`]).
 pub struct UsbProbe {
-    server: UsbipServer,
+    server: Transport,
     device: Stlink,
 }
 
@@ -56,26 +75,85 @@ impl UsbProbe {
         let mut server = UsbipServer::bind(addr, wake)?;
         let device = Stlink::new(serial);
         server.export(BUSID, &device);
-        Ok(Self { server, device })
+        Ok(Self { server: Transport::Usbip(server), device })
+    }
+
+    /// Listens on `addr` (e.g. `127.0.0.1:3241`) for the pyOCD plugin
+    /// ([`tcp`]); the virtual COM port becomes a pseudo-terminal
+    /// ([`Self::vcp_path`]). The probe counts as plugged in from the start.
+    pub fn start_tcp(
+        addr: &str,
+        serial: Option<SharedSerial>,
+        wake: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) -> std::io::Result<Self> {
+        let server = tcp::TcpServer::bind(addr, wake.clone())?;
+        #[cfg(unix)]
+        let vcp = match pty::Pty::open(wake) {
+            Ok(p) => {
+                log::info!("ST-LINK virtual COM port: {}", p.path());
+                Some(p)
+            }
+            Err(e) => {
+                log::warn!("cannot open a pseudo-terminal for the virtual COM port: {e}");
+                None
+            }
+        };
+        #[cfg(not(unix))]
+        drop(wake);
+        let server = Transport::Tcp {
+            server,
+            #[cfg(unix)]
+            vcp,
+            plugged: false,
+        };
+        Ok(Self { server, device: Stlink::new(serial) })
     }
 
     pub fn local_addr(&self) -> std::net::SocketAddr {
-        self.server.local_addr()
+        match &self.server {
+            Transport::Usbip(s) => s.local_addr(),
+            Transport::Tcp { server, .. } => server.local_addr(),
+        }
     }
 
-    /// The USB/IP server, for exporting further devices (bus ids from `1-2`).
-    pub fn server(&mut self) -> &mut UsbipServer {
-        &mut self.server
+    /// The USB/IP server, for exporting further devices (bus ids from `1-2`);
+    /// none for the TCP probe.
+    pub fn server(&mut self) -> Option<&mut UsbipServer> {
+        match &mut self.server {
+            Transport::Usbip(s) => Some(s),
+            Transport::Tcp { .. } => None,
+        }
     }
 
-    /// A host has the device exported as `busid` attached.
+    /// A host has the device exported as `busid` attached (never over TCP).
     pub fn device_attached(&self, busid: &str) -> bool {
-        self.server.is_attached(busid)
+        match &self.server {
+            Transport::Usbip(s) => s.is_attached(busid),
+            Transport::Tcp { .. } => false,
+        }
     }
 
-    /// A host has the probe attached.
+    /// Served over TCP for the pyOCD plugin (not USB/IP).
+    pub fn is_tcp(&self) -> bool {
+        matches!(self.server, Transport::Tcp { .. })
+    }
+
+    /// The pseudo-terminal of the virtual COM port (TCP probe only).
+    pub fn vcp_path(&self) -> Option<&str> {
+        match &self.server {
+            #[cfg(unix)]
+            Transport::Tcp { vcp: Some(p), .. } => Some(p.path()),
+            _ => None,
+        }
+    }
+
+    /// A host has the probe attached (always for the TCP probe: plugged in
+    /// while it runs).
     pub fn is_attached(&self) -> bool {
-        self.server.is_attached(BUSID)
+        match &self.server {
+            Transport::Usbip(s) => s.is_attached(BUSID),
+            Transport::Tcp { .. } => true,
+        }
     }
 
     /// A debugger has the probe in debug mode (between JTAG_ENTER and JTAG_EXIT).
@@ -91,7 +169,25 @@ impl UsbProbe {
 
     /// Handles USB requests; returns true if any completed.
     pub fn poll(&mut self, m: &mut Machine) -> bool {
-        self.server.poll(BUSID, &mut self.device, m)
+        match &mut self.server {
+            Transport::Usbip(s) => s.poll(BUSID, &mut self.device, m),
+            Transport::Tcp {
+                server,
+                #[cfg(unix)]
+                vcp,
+                plugged,
+            } => {
+                if !*plugged {
+                    *plugged = true;
+                    self.device.plug(true);
+                }
+                #[cfg(unix)]
+                let serial = vcp.as_mut().is_some_and(|p| p.poll(&mut self.device, m));
+                #[cfg(not(unix))]
+                let serial = false;
+                server.poll(&mut self.device, m) | serial
+            }
+        }
     }
 
     /// The command that attaches the probe to this Linux host.
@@ -148,6 +244,14 @@ impl Stlink {
 
     pub fn serial_number(&self) -> &str {
         &self.serial_number
+    }
+
+    /// Plugged in or out: idle, no half-done command.
+    pub(crate) fn plug(&mut self, attached: bool) {
+        self.mode = commands::MODE_MASS;
+        self.pending_write = None;
+        self.response.clear();
+        self.vcp.attached(attached);
     }
 }
 
@@ -220,10 +324,6 @@ impl UsbDevice<Machine> for Stlink {
     }
 
     fn attached(&mut self, _m: &mut Machine, attached: bool) {
-        // like plugging the probe in: idle, no half-done command
-        self.mode = commands::MODE_MASS;
-        self.pending_write = None;
-        self.response.clear();
-        self.vcp.attached(attached);
+        self.plug(attached);
     }
 }
