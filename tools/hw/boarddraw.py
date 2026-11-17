@@ -104,7 +104,8 @@ LED_BODY = '#f3ecd9'
 HEADER = '#1c1c1e'
 NUCLEO = '#e3e3dd'
 ST_BLUE = '#1f6fd0'
-FELT = '#838479'          # the grey sockets the Morpho pins are bent into
+FELT = '#4b4944'          # the grey sockets the Morpho pins are bent into: about as bright as the
+                          # board around them in 134518 and the rectified photo (luminance ratio 1.0-1.2)
 CAP_RED = '#d9434b'       # caps of S0..S7
 
 FONT_DIRS = ['/usr/share/fonts/OpenSans', '/usr/share/fonts/noto', '/usr/share/fonts/liberation',
@@ -427,12 +428,13 @@ def tact_switch(x, y, cap=CAP_RED):
         for dy in (-1, 1):
             out.append(rect(x + dx * 9.0 - 2.3, y + dy * 12.0 - 3.6, x + dx * 9.0 + 2.3, y + dy * 12.0 + 3.6,
                             GOLD, 0.6))
-    out.append(rect(x - 12.4, y - 12.4, x + 12.4, y + 12.4, '#d9d8da', 1.2))          # metal cover
-    out.append(rect_stroke(x - 12.4, y - 12.4, x + 12.4, y + 12.4, '#a9a8ac', 0.6, 1.2))
-    out.append(rect(x - 10.0, y - 10.0, x + 10.0, y + 10.0, '#eeedef', 0.8))
+    # nickel-plated metal cover (warm grey in the photos, not white plastic)
+    out.append(rect(x - 12.4, y - 12.4, x + 12.4, y + 12.4, '#b9b5ad', 1.2))          # metal cover
+    out.append(rect_stroke(x - 12.4, y - 12.4, x + 12.4, y + 12.4, '#86827a', 0.6, 1.2))
+    out.append(rect(x - 10.0, y - 10.0, x + 10.0, y + 10.0, '#cfcbc3', 0.8))
     for dx in (-1, 1):
         for dy in (-1, 1):
-            out.append(circle(x + dx * 8.0, y + dy * 8.0, 1.3, '#8a898e'))           # rivets
+            out.append(circle(x + dx * 8.0, y + dy * 8.0, 1.9, '#6f6b64'))           # rivets
     out.append(circle(x, y, 7.4, '#a3313a'))
     out.append(circle(x, y, 6.5, cap))
     return '\n'.join(out)
@@ -468,12 +470,14 @@ def lit_led(x, y, color='#ff9a1c'):
 # Carrier board
 
 # pads of the rows (measured, Hough circles)
-OUT_PADS = [74.8 + i * 31.65 for i in range(18)]      # GND, OUT15..OUT0, GND
-IN_PADS = [655.2 + i * 31.76 for i in range(10)]      # GND, IN7..IN0, GND
+OUT_PADS = [rs_const('OUT_PAD0') + i * rs_const('OUT_PITCH') for i in range(18)]   # GND, OUT15..OUT0, GND
+IN_PADS = [rs_const('IN_PAD0') + i * rs_const('IN_PITCH') for i in range(10)]      # GND, IN7..IN0, GND
 AN_PADS = rs_const('ANALOG_X')
 AUX_PADS = AUX_Y
-I2C_PADS = [359.4, 390.8, 422.2, 453.7]
-ROW_Y = 575.0
+I2C_PADS = rs_const('HDR_PADS_Y')  # I2C and SPI3 pads
+I2C_PAD_X = rs_const('I2C_PAD_X')
+SPI_PAD_X = rs_const('SPI_PAD_X')
+ROW_Y = rs_const('ROW_Y')
 PITCH = 10.548         # 2.54 mm
 # The female headers are drawn on their footprint (their tops lean away from
 # the camera in the photo; the pitches below follow the silkscreen).
@@ -490,8 +494,8 @@ SPI_HDR_X = 312.8
 # timer pads along the top edge (GND, then the channels) and CN8
 TIM = [('1_1N', 'PE8'), ('1_2N', 'PE10'), ('1_4', 'PE14'), ('2_3', 'PB10'), ('2_4', 'PB11'), ('3_3', 'PB0'),
        ('8_1', 'PC6'), ('8_2', 'PC7'), ('8_3', 'PC8'), ('8_4', 'PC9')]
-TIM_PADS = [355.7] + [387.1 + i * 31.73 for i in range(10)]
-TIM_Y = 32.3
+TIM_PADS = [rs_const('TIM_GND')] + [rs_const('TIM_PAD0') + i * rs_const('TIM_PITCH') for i in range(10)]
+TIM_Y = rs_const('TIM_Y')
 CN8_X = [716.1 + i * PITCH for i in range(12)]
 CN8_Y = 29.0
 # the grey sockets the Morpho pins are bent into (photo coordinates of the
@@ -831,8 +835,8 @@ def carrier():
     for y in AUX_PADS:
         out.append(pad(AUX_X, y))
     for y in I2C_PADS:
-        out.append(pad(155.4, y))
-        out.append(pad(239.4, y))
+        out.append(pad(I2C_PAD_X, y))
+        out.append(pad(SPI_PAD_X, y))
     # unpopulated SMD footprints: U6, C9 is fitted
     for x in [71.4, 76.7, 81.9, 87.2]:
         out.append(rect(x - 1.0, 76.3, x + 1.0, 81.2, TIN, 0.3))
@@ -1486,7 +1490,7 @@ def nucleo_caps():
     out = []
     for (x, y), rim, cap in [(USER, '#155c9c', '#2a8bd8'), (RESET, '#060607', '#1f1f21')]:
         out.append(rect(x - 12.0, y - 12.0, x + 12.0, y + 12.0, '#2b2c2f', 1.2))     # body
-        out.append(rect(x - 10.2, y - 10.2, x + 10.2, y + 10.2, '#c3c5c8', 0.8))     # metal top
+        out.append(rect(x - 10.2, y - 10.2, x + 10.2, y + 10.2, '#3a3b3f', 0.8))     # top (black, 031702)
         out.append(circle(x, y, 7.6, rim))
         out.append(circle(x, y, 6.6, cap))
     return '\n'.join(out)
@@ -1528,7 +1532,10 @@ def morpho_sockets():
     out = []
     for x0, y0, x1, y1 in (FELT_TOP, FELT_BOTTOM):
         out.append(rect(x0, y0, x1, y1, FELT, 1.0))
-        out.append(rect_stroke(x0, y0, x1, y1, '#5f6058', 0.7, 1.0))
+        # the felt shows faint grooves at the pitch of the openings below it
+        grooves = ''.join(f'M{f(x)},{f(y0 + 2.0)}V{f(y1 - 2.0)}' for x in MORPHO_SOCKET_X[1:])
+        out.append(path(grooves, 'none', ' stroke="#55534d" stroke-width="0.6"'))
+        out.append(rect_stroke(x0, y0, x1, y1, '#64625b', 0.7, 1.0))
     return '\n'.join(out)
 
 
@@ -1539,9 +1546,12 @@ def morpho_sockets():
 
 def shield():
     """The display module (photo coordinates, drawn inside layer(M_SHIELD))."""
-    out = [rect(475.5, 50.6, 908.6, 330.8, '#1c1e20', 1.0, ' stroke="#4a4945" stroke-width="0.4"'),  # glass rim
-           rect_stroke(477.4, 52.5, 906.7, 328.9, '#85827a', 1.0, 0.6),    # edge of the touch panel
-           rect(478.6, 53.7, 905.5, 327.7, '#15191b', 0.4)]                # border of the LCD
+    # the touch panel's light edge (beige in the rectified photo, 134518 and
+    # the bare module 031900), then the dark border of the LCD
+    out = [rect(475.5, 50.6, 908.6, 330.8, '#bdb39f', 1.0, ' stroke="#8f887a" stroke-width="0.5"'),  # panel edge
+           rect(478.8, 53.9, 905.3, 327.5, '#1c1e20', 0.6),                # glass over the border
+           rect_stroke(480.4, 55.5, 903.7, 325.9, '#5d5a52', 0.5, 0.4),    # edge of the touch film
+           rect(481.6, 56.7, 902.5, 324.7, '#15191b', 0.4)]                # border of the LCD
     out.append(rect(479.8, 150.0, 488.6, 327.0, '#101112', 0.8))           # FPC tape
     out.append(nt(484.2, 293.5, 'H1043  5 2', 3.2, 90, '#9a9a96'))
     # the folded FPC of the touch panel along the left edge
