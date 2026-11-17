@@ -71,7 +71,7 @@ jobs:
         if: failure() && matrix.experimental
         env:
           RUST_BACKTRACE: 1
-        run: cargo test --release -p emu-core --test gdb --locked ${{ env.TARGET }} -- --nocapture --test-threads 1
+        run: cargo test --release -p emu-core --features gdb --test gdb --locked ${{ env.TARGET }} -- --nocapture
 
       # The GUI starts and draws a frame (Xvfb, Mesa's software OpenGL):
       # start-up and renderer problems that the tests do not see.
