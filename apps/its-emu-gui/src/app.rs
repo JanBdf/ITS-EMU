@@ -630,101 +630,100 @@ impl App {
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, state: &RunState) {
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                if menu_item(ui, "Open firmware…", &OPEN) {
-                    self.files.open(ctx, false);
-                }
-                if ui.button("Open with the built-in file browser…").clicked() {
-                    self.files.open(ctx, true);
-                }
-                let mut open = None;
-                ui.add_enabled_ui(!self.settings.recent.is_empty(), |ui| {
-                    ui.menu_button("Open recent", |ui| {
-                        for path in &self.settings.recent {
-                            let name = path.file_name().unwrap_or_default().to_string_lossy();
-                            let dir = path.parent().and_then(|d| d.file_name()).unwrap_or_default();
-                            let label = format!("{name}  ({})", dir.to_string_lossy());
-                            if ui.button(label).on_hover_text(path.display().to_string()).clicked() {
-                                open = Some(path.clone());
-                            }
+        ui.menu_button("File", |ui| {
+            if menu_item(ui, "Open firmware…", &OPEN) {
+                self.files.open(ctx, false);
+            }
+            if ui.button("Open with the built-in file browser…").clicked() {
+                self.files.open(ctx, true);
+            }
+            let mut open = None;
+            ui.add_enabled_ui(!self.settings.recent.is_empty(), |ui| {
+                ui.menu_button("Open recent", |ui| {
+                    for path in &self.settings.recent {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy();
+                        let dir = path.parent().and_then(|d| d.file_name()).unwrap_or_default();
+                        let label = format!("{name}  ({})", dir.to_string_lossy());
+                        if ui.button(label).on_hover_text(path.display().to_string()).clicked() {
+                            open = Some(path.clone());
                         }
-                    });
-                });
-                if let Some(path) = open {
-                    self.load(path);
-                }
-                ui.separator();
-                if menu_item(ui, "Save display as PNG…", &SAVE) {
-                    self.save_display_dialog(ctx);
-                }
-                if ui.button("Save serial console…").clicked() {
-                    self.save_console_dialog(ctx);
-                }
-                ui.separator();
-                if menu_item(ui, "Quit", &QUIT) {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            });
-            ui.menu_button("Emulation", |ui| {
-                let (label, enabled, _) = run_button(state);
-                let shortcut = ctx.format_shortcut(&RUN);
-                if ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(shortcut)).clicked() {
-                    self.toggle_run(state);
-                }
-                if menu_item(ui, "Reset", &RESET) {
-                    self.emu.send(Command::Reset);
-                }
-                ui.separator();
-                ui.label(RichText::new("Speed").weak());
-                for (label, s) in SPEEDS {
-                    if ui.radio(self.speed == s, label).clicked() {
-                        self.set_speed(s);
                     }
+                });
+            });
+            if let Some(path) = open {
+                self.load(path);
+            }
+            ui.separator();
+            if menu_item(ui, "Save display as PNG…", &SAVE) {
+                self.save_display_dialog(ctx);
+            }
+            if ui.button("Save serial console…").clicked() {
+                self.save_console_dialog(ctx);
+            }
+            ui.separator();
+            if menu_item(ui, "Quit", &QUIT) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        });
+        ui.menu_button("Emulation", |ui| {
+            let (label, enabled, _) = run_button(state);
+            let shortcut = ctx.format_shortcut(&RUN);
+            if ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(shortcut)).clicked() {
+                self.toggle_run(state);
+            }
+            if menu_item(ui, "Reset", &RESET) {
+                self.emu.send(Command::Reset);
+            }
+            ui.separator();
+            ui.label(RichText::new("Speed").weak());
+            for (label, s) in SPEEDS {
+                if ui.radio(self.speed == s, label).clicked() {
+                    self.set_speed(s);
                 }
-                ui.separator();
-                let mut on = self.usb_on;
-                let label = if self.pyocd_on { "ST-LINK plugged in" } else { "USB ST-LINK plugged in" };
-                if ui.checkbox(&mut on, label).changed() {
-                    self.set_usb(on);
-                }
-                let mut pyocd = self.pyocd_on;
-                if ui
-                    .checkbox(&mut pyocd, "ST-LINK for pyOCD (VS Code)")
-                    .on_hover_text(pyocd_hover(self.pyocd_report.as_ref()))
-                    .changed()
-                {
-                    self.set_pyocd(ctx, pyocd);
-                }
-                let mut bounce = self.settings.bounce;
-                if ui
-                    .checkbox(&mut bounce, "Contact bounce of the buttons")
-                    .on_hover_text(
-                        "The buttons S0–S7, USER and the encoder contacts bounce now and then when pressed \
+            }
+            ui.separator();
+            let mut on = self.usb_on;
+            let label = if self.pyocd_on { "ST-LINK plugged in" } else { "USB ST-LINK plugged in" };
+            if ui.checkbox(&mut on, label).changed() {
+                self.set_usb(on);
+            }
+            let mut pyocd = self.pyocd_on;
+            if ui
+                .checkbox(&mut pyocd, "ST-LINK for pyOCD (VS Code)")
+                .on_hover_text(pyocd_hover(self.pyocd_report.as_ref()))
+                .changed()
+            {
+                self.set_pyocd(ctx, pyocd);
+            }
+            let mut bounce = self.settings.bounce;
+            if ui
+                .checkbox(&mut bounce, "Contact bounce of the buttons")
+                .on_hover_text(
+                    "The buttons S0–S7, USER and the encoder contacts bounce now and then when pressed \
                          or released, as measured on the real board (S0–S7 rarely, USER on about one release \
                          in four): a program without debouncing sometimes sees several edges",
-                    )
-                    .changed()
-                {
-                    self.settings.bounce = bounce;
-                    self.settings.save();
-                    self.emu.send(Command::SetBounce(bounce));
-                }
-                let mut auto = self.settings.auto_reload;
-                if ui
-                    .checkbox(&mut auto, "Reload the firmware when it is rebuilt")
-                    .on_hover_text(
-                        "Load the .axf file again (and restart) when a new build replaces it — \
+                )
+                .changed()
+            {
+                self.settings.bounce = bounce;
+                self.settings.save();
+                self.emu.send(Command::SetBounce(bounce));
+            }
+            let mut auto = self.settings.auto_reload;
+            if ui
+                .checkbox(&mut auto, "Reload the firmware when it is rebuilt")
+                .on_hover_text(
+                    "Load the .axf file again (and restart) when a new build replaces it — \
                          not while a debugger is attached",
-                    )
-                    .changed()
-                {
-                    self.settings.auto_reload = auto;
-                    self.settings.save();
-                    self.emu.send(Command::SetAutoReload(auto));
-                }
-            });
-            ui.menu_button("View", |ui| {
+                )
+                .changed()
+            {
+                self.settings.auto_reload = auto;
+                self.settings.save();
+                self.emu.send(Command::SetAutoReload(auto));
+            }
+        });
+        ui.menu_button("View", |ui| {
                 menu_toggle(ui, &mut self.lcd_focus, "Display alone", Some(&DISPLAY));
                 let mut pins = self.show_pins;
                 if menu_toggle(ui, &mut pins, "Pins", Some(&PINS)) {
@@ -815,19 +814,24 @@ impl App {
                     });
                 });
             });
-            ui.menu_button("Help", |ui| {
-                if menu_item(ui, "Controls and mouse actions", &HELP) {
-                    self.show_help = true;
-                }
-                if ui.button("Tutorial").on_hover_text("Loads the tutorial program, which leads through the inputs").clicked() {
-                    self.start_tutorial(ctx);
-                }
-            });
+        ui.menu_button("Help", |ui| {
+            if menu_item(ui, "Controls and mouse actions", &HELP) {
+                self.show_help = true;
+            }
+            if ui
+                .button("Tutorial")
+                .on_hover_text("Loads the tutorial program, which leads through the inputs")
+                .clicked()
+            {
+                self.start_tutorial(ctx);
+            }
         });
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, state: &RunState, devices: usize) {
-        ui.horizontal_wrapped(|ui| {
+    fn top_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, state: &RunState, devices: usize) {
+        ui.horizontal(|ui| {
+            self.menu_bar(ui, ctx, state);
+            ui.separator();
             let open = ui.button("Open…").on_hover_text(format!(
                 "Open a firmware file (.axf) · {}\nShift+click: the emulator's own file browser",
                 ctx.format_shortcut(&OPEN)
@@ -1218,9 +1222,8 @@ impl eframe::App for App {
             self.show_help = !self.show_help;
         }
 
-        // ---- menu bar, toolbar
-        egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui, &ctx, &state));
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui, &ctx, &state, devices.len()));
+        // ---- single top bar (menus + controls)
+        egui::Panel::top("toolbar").show(ui, |ui| self.top_bar(ui, &ctx, &state, devices.len()));
 
         // ---- status bar
         egui::Panel::bottom("status").show(ui, |ui| {

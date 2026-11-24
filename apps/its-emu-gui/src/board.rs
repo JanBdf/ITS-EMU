@@ -493,14 +493,13 @@ impl Pcb<'_> {
         self.light(
             x,
             y,
-            8.5,
-            // as photographed: the lens is white-hot, the package around it
-            // and a narrow halo glow in the full colour
+            5.8,
+            // bright lens with a tight coloured rim over the package
             &[
                 (0.0, tint(lerp(color, Color32::WHITE, 0.85), a(1.0))),
-                (0.3, tint(lerp(color, Color32::WHITE, 0.6), a(1.0))),
-                (0.6, tint(color, a(1.0))),
-                (0.8, tint(color, a(0.45))),
+                (0.28, tint(lerp(color, Color32::WHITE, 0.55), a(1.0))),
+                (0.55, tint(color, a(0.95))),
+                (0.78, tint(color, a(0.30))),
                 (1.0, tint(color, 0)),
             ],
         );
