@@ -96,8 +96,8 @@ def ortho(x, y, m):
 MASK = '#1f4271'          # solder mask over bare laminate
 MASK_CU = '#26497a'       # solder mask over copper (traces, planes)
 SILK = '#dde4ea'
-GOLD = '#d6a54e'
-PLATING = '#a8894f'       # plated wall/rim of a hole
+GOLD = '#e4b862'
+PLATING = '#b99a5d'       # plated wall/rim of a hole
 HOLE = '#16193a'
 TIN = '#cdcac2'
 LED_BODY = '#f3ecd9'
@@ -306,7 +306,7 @@ def text_lines(s, x, y, h, anchor='c', rot=0, adv=1.0):
 
 def stext(x, y, s, h, anchor='c', rot=0, sw=None, color=SILK, adv=1.0, extra=''):
     """Silkscreen text in the stroke font (see text_lines); `sw` = stroke width."""
-    sw = sw if sw is not None else 0.2 * h
+    sw = sw if sw is not None else 0.15 * h
     d = ''.join('M' + ' '.join(f'{f(px)},{f(py)}' for px, py in pl) for pl in text_lines(s, x, y, h, anchor, rot, adv))
     return (f'<path d="{d}" fill="none" stroke="{color}" stroke-width="{f(sw)}" '
             f'stroke-linecap="round" stroke-linejoin="round"{extra}/>')
@@ -426,8 +426,12 @@ def tact_switch(x, y, cap=CAP_RED):
     out = []
     for dx in (-1, 1):
         for dy in (-1, 1):
-            out.append(rect(x + dx * 9.0 - 2.3, y + dy * 12.0 - 3.6, x + dx * 9.0 + 2.3, y + dy * 12.0 + 3.6,
+            # solder pad and tinned gull-wing leg extending from the switch body
+            out.append(rect(x + dx * 9.0 - 2.4, y + dy * 12.2 - 3.8, x + dx * 9.0 + 2.4, y + dy * 12.2 + 3.8,
                             GOLD, 0.6))
+            y0, y1 = (y - 15.2, y - 10.5) if dy < 0 else (y + 10.5, y + 15.2)
+            out.append(rect(x + dx * 9.0 - 1.6, y0, x + dx * 9.0 + 1.6, y1, '#d6d3cb', 0.4,
+                            ' stroke="#8c8880" stroke-width="0.35"'))
     # nickel-plated metal cover (warm grey in the photos, not white plastic)
     out.append(rect(x - 12.4, y - 12.4, x + 12.4, y + 12.4, '#b9b5ad', 1.2))          # metal cover
     out.append(rect_stroke(x - 12.4, y - 12.4, x + 12.4, y + 12.4, '#86827a', 0.6, 1.2))
@@ -463,7 +467,7 @@ def lit_led(x, y, color='#ff9a1c'):
                     f'<stop offset="1" stop-color="{color}" stop-opacity="0"/></radialGradient>')
     return '\n'.join([rect(x - 4.5, y - 8.5, x + 4.5, y - 5.5, TIN, 0.5), rect(x - 4.5, y + 5.5, x + 4.5, y + 8.5, TIN, 0.5),
                       rect(x - 4.8, y - 6.5, x + 4.8, y + 6.5, '#f7d27a', 1),
-                      circle(x, y, 7.5, f'url(#{gid})')])
+                      circle(x, y, 5.4, f'url(#{gid})')])
 
 
 # ======================================================================
@@ -540,8 +544,8 @@ SECTIONS = [
     [(330, 382.7), (344.4, 382.7), (344.4, 464.4)],
     [(413, 464.4), (413, 355.8), (418, 350.8), (727, 350.8), (761, 384.8), (761, 469.6)],
     [(895.1, 190.5), (895.1, 469.6)],          # above y = 300 never seen (under the display), assumed
-    [(869.0, -7), (869.0, 53.0), (851.0, 71.0), (738.0, 71.0)],      # Timer frame (bare board)
-    [(339.5, -7), (339.5, 69.7)],
+    # Timer frame: connects left of GND and left of 5V LED above CN11 (bare board 031839)
+    [(339.5, -7), (339.5, 55.0), (353.5, 69.0), (851.0, 69.0), (869.0, 51.0), (869.0, -7)],
 ]
 
 
@@ -564,7 +568,7 @@ def carrier_labels():
             L('RS232', 174.7, 71.4), L('U5', 260.8, 72.0), L('J1', 166.5, 7.2, 4.8)]
     # ---- I2C
     out += [L('J3', 24.7, 375.4), L('I2C1_5V', 51.8, 386.0), L('CN6', 123.7, 327.0), L('I2C1_5V', 123.7, 381.6),
-            L('CN5', 123.7, 400.1), L('I2C1_3V3', 123.7, 455.2), L('I2C1', 59.3, 422.3, 15.0, sw=3.3)]
+            L('CN5', 123.7, 400.1), L('I2C1_3V3', 123.7, 455.2), L('I2C1', 59.3, 422.3, 15.0, sw=2.4)]
     for t, y in zip(['5V', 'SCL', 'GND', 'SDA'], [338.2, 348.9, 359.0, 369.7]):
         out.append(L(t, 131.6, y, P, 'l'))
     for t, y in zip(['3V3', 'SCL', 'GND', 'SDA'], [411.9, 422.0, 432.7, 442.9]):
@@ -575,7 +579,7 @@ def carrier_labels():
         else:
             out.append(L(a, 166.5, y, 4.6, 'l'))
     # ---- SPI
-    out.append(L('SPI3', 249.4, 327.9, 15.5, 'l', sw=3.3))
+    out.append(L('SPI3', 249.4, 327.9, 15.5, 'l', sw=2.4))
     for (a, b), y in zip([('SPI3_SCK', 'PC10'), ('SPI3_MOSI', 'PC12'), ('SPI3_MISO', 'PC11'), ('SPI3_CS', 'PA15')],
                          I2C_PADS):
         out += [L(a, 250.4, y - 5.6, 4.6, 'l'), L(b, 250.4, y + 4.2, P, 'l')]
@@ -583,7 +587,7 @@ def carrier_labels():
     for t, y in zip(['SCK', 'MOSI', 'MISO', 'CS', '3V3', 'GND'], [390.6, 401.2, 411.4, 422.0, 432.7, 442.9]):
         out.append(L(t, 321.3, y, P, 'l'))
     # ---- Out
-    out.append(L('Out', 48.2, 549.1, 14.5, sw=3.0))
+    out.append(L('Out', 48.2, 549.1, 14.5, sw=2.3))
     for i, x in enumerate(OUT_PADS):
         bit = 16 - i
         out.append(L('GND' if i in (0, 17) else f'OUT{bit}', x, 589.4))
@@ -600,7 +604,7 @@ def carrier_labels():
         else:
             out.append(L('GND', x, 506.0, P, 'l', 90))
     # ---- In
-    out.append(L('In', 973.4, 549.0, 15.0, sw=3.0))
+    out.append(L('In', 973.4, 549.0, 15.0, sw=2.3))
     for i, x in enumerate(IN_PADS):
         bit = 8 - i
         out.append(L('GND' if i in (0, 9) else f'IN{bit}', x, 589.4))
@@ -616,7 +620,7 @@ def carrier_labels():
         else:
             out.append(L('GND', x, 505.5, P, 'l', 90))
     # ---- Analog
-    out.append(L('Analog', 687.7, 398.8, 16.0, sw=3.2, adv=0.95))
+    out.append(L('Analog', 687.7, 398.8, 16.0, sw=2.4, adv=0.95))
     names = ['DAC1', 'GNDA', 'ADC123_13', 'ADC123_12', 'ADC123_10', 'ADC12_9', 'ADC3_8', 'ADC3_7', 'ADC3_6', 'GNDA']
     ports = ['PA4', None, 'PC3', 'PC2', 'PC0', 'PB1', 'PF10', 'PF9', 'PF8', None]
     for x, a, b in zip(AN_PADS, names, ports):
@@ -629,7 +633,7 @@ def carrier_labels():
                           'ADC3_6', 'AGND']):
         out.append(L(t, x + 1.5, 408.0, P, 'l', 45))
     # ---- Aux
-    out.append(L('Aux', 925.0, 232.5, 16.0, 'l', sw=3.2))
+    out.append(L('Aux', 925.0, 232.5, 16.0, 'l', sw=2.4))
     for n, y in enumerate(AUX_PADS):
         out += [L(f'AUX{n}', 957.0, y - 5.2, S, 'l'), L(f'PG{n}', 957.0, y + 4.5, P, 'l')]
     for n in range(6):
@@ -638,15 +642,14 @@ def carrier_labels():
     # ---- top right
     out += [L('R50', 925.9, 1.5, 4.6), L('R49', 957.2, 1.5, 4.6), L('5V', 925.0, 27.2), L('3V3', 957.2, 27.2),
             L('D25', 924.3, 58.5), L('D24', 956.4, 58.5)]
-    # ---- Timer: title, the pads along the top edge (names run off the board)
-    # and CN8 with the same signals
-    out.append(L('Timer', 781.0, 47.6, 16.0, 'l', sw=3.2))
-    out.append(L('GND', TIM_PADS[0] + 4.4, TIM_Y - 10.6, S, 'l', -45))
+    # ---- Timer: title, the pads along the top edge and CN8 with the same signals
+    out.append(L('Timer', 781.0, 47.6, 16.0, 'l', sw=2.4))
+    out.append(L('GND', TIM_PADS[0] + 5.2, TIM_Y - 12.6, 4.8, 'l', -45))
     for x, (t, p) in zip(TIM_PADS[1:], TIM):
-        out += [L('TIM' + t, x + 6.8, TIM_Y - 9.8, S, 'l', -45), L(p, x + 11.8, TIM_Y - 3.3, 4.6, 'l', -45)]
+        out += [L('TIM' + t, x + 6.8, TIM_Y - 11.8, 4.8, 'l', -45), L(p, x + 11.6, TIM_Y - 5.4, 4.2, 'l', -45)]
     out.append(L('CN8', 700.8, 31.5, 5.0))
     for x, t in zip(CN8_X, ['GND'] + ['TIM' + t for t, _ in TIM] + ['GND']):
-        out.append(L(t, x - 0.7, 22.8, 3.9, 'l', -45))
+        out.append(L(t, x + 0.5, 19.2, 3.6, 'l', -45))
     # ---- around U5
     out.append(L('C7', 282.0, 144.3))
     return out + hidden_labels()
@@ -717,7 +720,7 @@ def fitted(labels):
         if label_key(l) in fit:
             dx, dy, hs, adv = fit[label_key(l)]
             l.update(x=l['x'] + dx, y=l['y'] + dy, h=l['h'] * hs, adv=adv,
-                     sw=(l['sw'] if l['sw'] is not None else 0.2 * l['h']))
+                     sw=(l['sw'] if l['sw'] is not None else 0.15 * l['h']))
         out.append(l)
     return out
 
@@ -729,12 +732,14 @@ def silk_labels(labels):
     out = []
     for l in fitted(labels):
         x, y = l['x'], l['y']
-        sw = l['sw'] if l['sw'] is not None else 0.2 * l['h']
+        sw = l['sw'] if l['sw'] is not None else 0.15 * l['h']
         pts = [p for pl in text_lines(l['text'], x, y, l['h'], l['anchor'], l['rot'], l['adv']) for p in pl]
         if pts:
+            # rotated labels along the top edge (TIM_*) sit very close to Y0 on the real board
+            gap_y = 0.2 if l['rot'] == -45 else EDGE_GAP
             x += (max(0.0, X0 + EDGE_GAP + sw / 2 - min(p[0] for p in pts))
                   - max(0.0, max(p[0] for p in pts) + sw / 2 + EDGE_GAP - X1))
-            y += (max(0.0, Y0 + EDGE_GAP + sw / 2 - min(p[1] for p in pts))
+            y += (max(0.0, Y0 + gap_y + sw / 2 - min(p[1] for p in pts))
                   - max(0.0, max(p[1] for p in pts) + sw / 2 + EDGE_GAP - Y1))
         out.append(stext(x, y, l['text'], l['h'], l['anchor'], l['rot'], sw, adv=l['adv']))
     return '\n'.join(out)
@@ -744,15 +749,8 @@ TRACES = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'boardtraces.j
 
 
 def traces():
-    """Copper traces under the mask (fine dark lines, vectorised by boardtraces.py)."""
-    import json
-    if not os.path.exists(TRACES):
-        return ''
-    d = ''.join(f'M{f(x0)},{f(y0)}L{f(x1)},{f(y1)}' for x0, y0, x1, y1 in json.load(open(TRACES)))
-    # copper under the mask: a slightly lighter band with darker edges
-    svg.defs.append(f'<path id="traces" d="{d}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>')
-    return ('<use href="#traces" stroke="#132d52" stroke-width="1.4"/>\n'
-            '<use href="#traces" stroke="#23467a" stroke-width="0.7"/>')
+    """Copper traces under the mask (omitted: auto-traced photo lines do not match the real PCB)."""
+    return ''
 
 
 def logo():
@@ -788,10 +786,9 @@ def carrier():
     out.append(polyline([(159.6, 58.6), (159.6, 64.7), (289.5, 64.7), (289.5, 12.4), (282.7, 12.4)], SILK, sw))
     for x in (196.0, 254.0):                       # the D-sub's board locks
         out.append(polyline([(x, 58.6), (x, 64.7)], SILK, sw))
-    # CN8: the edge of its outline beside "Timer" (the rest is under the socket)
-    out.append(polyline([(709.6, 38.0), (837.8, 38.0)], SILK, sw))
-    # C9, U6, JP1, JP2
-    out.append(rect_stroke(48.4, 83.0, 55.8, 97.0, SILK, 0.8))
+    # CN8: full silkscreen outline around the socket (header covers left/right, top and bottom peek out)
+    out.append(rect_stroke(709.6, 22.0, 837.8, 36.2, SILK, sw))
+    # U6, JP1, JP2 (C9 has no silkscreen box on the real board)
     out.append(rect_stroke(68.5, 82.9, 90.1, 96.9, SILK, sw))
     out.append(circle(72.8, 91.6, 1.7, SILK))
     for bx, dot in [((105.7, 84.7, 128.1, 96.2), (126.2, 81.8)), ((137.8, 84.7, 159.9, 96.4), (158.3, 81.8))]:
@@ -858,8 +855,7 @@ def carrier():
     out.append(female_header(SPI_HDR_X, CN7_Y[0], 6, vertical=True))
     for i in range(7):                               # chip parts above CN4
         out.append(smd_r(555.6 + i * 10.85, 384.8, 4.2, 5.4, '#e9e4d8', vertical=True))
-    # C7 beside U5
-    out.append(rect_stroke(274.4, 129.6, 289.0, 137.4, SILK, 0.8))
+    # C7 beside U5 (no silkscreen box on the real board)
     out.append(smd_r(281.7, 133.5, 11.5, 5.4, '#c9b48e'))
     for x in (925.9, 957.2):                         # R50, R49
         out.append(smd_r(x, 9.9, 13.6, 6.0, '#262628'))
@@ -942,11 +938,16 @@ def carrier_hidden():
     out.append(tantalum(693.2, 154.1, 13.6, 25.2))
     out.append(tantalum(777.3, 154.6, 13.6, 26.2))
     out += [line(683.0, 137.7, 701.0, 137.7, SILK, 0.9), line(767.5, 139.0, 787.0, 139.0, SILK, 0.9)]
-    # CN0 (micro USB, opening into the notch)
+    return '\n'.join(out)
+
+
+def carrier_usb():
+    """CN0 (micro USB, drawn outside the board clip so it overhangs into the notch like on the Nucleo)."""
+    out = []
     for i in range(5):
         out.append(rect(824.5, 139.0 + i * 2.7, 830.0, 140.3 + i * 2.7, TIN, 0.2))
-    out.append(rect(828.0, 129.8, 853.5, 163.2, '#bdbab2', 1.2, ' stroke="#8f8c84" stroke-width="0.5"'))
-    out.append(rect(831.0, 133.0, 850.5, 160.0, '#cfccc4', 0.8))
+    out.append(rect(828.0, 129.8, 856.0, 163.2, '#bdbab2', 1.2, ' stroke="#8f8c84" stroke-width="0.5"'))
+    out.append(rect(831.0, 133.0, 853.0, 160.0, '#cfccc4', 0.8))
     for y in (128.5, 160.5):
         out.append(rect(826.5, y - 1.8, 834.0, y + 3.0, TIN, 0.5))
     return '\n'.join(out)
@@ -1016,10 +1017,10 @@ def rs232():
     out.append(rect(cx - 63.5, cy - 25.5, cx + 63.5, cy + 25.5, metal, 7.5,
                     f' stroke="{shade(metal, -0.3)}" stroke-width="0.8"'))
     out.append(rect_stroke(cx - 62.0, cy - 24.0, cx + 62.0, cy + 24.0, shade(metal, 0.25), 0.7, 6.2))
-    out.append(path(d_shape(cx, cy + 0.4, 31.8, 36.8, 19.6, 10.0, 7.0), shade(metal, -0.22)))    # flank
-    out.append(path(d_shape(cx, cy, 29.6, 34.6, 17.6, 9.0, 6.2), shade(metal, 0.2),
+    out.append(path(d_shape(cx, cy + 0.4, 34.4, 35.8, 19.4, 7.0, 5.5), shade(metal, -0.22)))    # flank
+    out.append(path(d_shape(cx, cy, 32.2, 33.6, 17.4, 6.2, 4.8), shade(metal, 0.2),
                     f' stroke="{shade(metal, -0.15)}" stroke-width="0.5"'))                   # rim
-    out.append(path(d_shape(cx, cy, 26.6, 31.6, 14.8, 7.5, 5.0), '#36352f'))                  # insulator
+    out.append(path(d_shape(cx, cy, 29.2, 30.6, 14.6, 5.0, 3.8), '#36352f'))                  # insulator
     for i in range(4):
         out.append(circle(cx - 17.25 + i * 11.5, cy - 6.0, 2.7, '#0b0b0a', ' stroke="#57554c" stroke-width="0.5"'))
     for i in range(5):
@@ -1276,17 +1277,18 @@ def nucleo_hidden():
                 (805.0, 119.5, 845.0, 134.0), (763.0, 81.4, 828.0, 89.1), (760.5, 125.5, 776.0, 133.8),
                 (836.7, 190.0, 855.0, 209.6)]:
         out.append(jumper_block(*box))
+    # orthographic top-down pin tips for straight male headers (CN6 SWD, CN5 RX/TX, JP1, JP3)
     pins = ''
-    for i in range(6):                                                                     # SWD pins, bent
+    for i in range(6):                                                                     # CN6 SWD pins
         x = 768.2 + i * 11.01
-        pins += f'M{f(x - 1.0)},{f(88.0)}L{f(x + 6.0)},{f(80.5)}L{f(x + 7.6)},{f(81.8)}L{f(x + 0.8)},{f(89.0)}Z'
+        pins += f'M{f(x - 1.5)},{f(83.7)}h3v3h-3Z'
     for i in range(2):                                                                     # CN5 RX/TX
         x = 765.0 + i * 11.01
-        pins += f'M{f(x - 1.0)},{f(132.0)}L{f(x + 14.0)},{f(126.0)}L{f(x + 14.6)},{f(127.6)}L{f(x)},{f(133.4)}Z'
+        pins += f'M{f(x - 1.5)},{f(128.2)}h3v3h-3Z'
     for y in (195.0, 205.0):                                                               # JP1
-        pins += f'M855,{f(y - 0.8)}h7v1.6h-7Z'
+        pins += f'M844.5,{f(y - 1.5)}h3v3h-3Z'
     for x in (689.0, 698.0, 707.0, 716.0, 725.0):                                          # JP3 pins
-        pins += f'M{f(x)},{f(264.0)}l6,14l-1.5,0.6l-6,-14Z'
+        pins += f'M{f(x - 1.5)},{f(253.0)}h3v3h-3Z'
     out.append(path(pins, '#d9b25c'))
     # CN1 (ST-LINK USB, micro B)
     out.append(rect(835.3, 246.0, 860.0, 279.6, '#bdbab2', 1.2, ' stroke="#8f8c84" stroke-width="0.5"'))
@@ -1367,17 +1369,20 @@ def nucleo():
     out.append(on_nucleo(2.9, '\n'.join([rect(269.5, 120.1, 294.4, 158.7, '#d9dad8', 2.0),
                                           rect_stroke(271.5, 123.0, 292.4, 155.8, '#a9aaa8', 0.5, 1.5),
                                           nt(281.0, 139.4, '2021', 2.6, 90, '#a8a294')])))
-    # CN14 RJ45 (opening to the left): top of the shield
+    # CN14 RJ45 (opening to the left): top of the shield and dark interior in the latch notch
     n0, n1, depth = 230.0, 247.7, 18.0
     shell = (f'M257,203.2 H321 Q322.5,203.2 322.5,204.7 V273 Q322.5,274.5 321,274.5 H257 Q255.5,274.5 255.5,273 '
              f'V{n1} H{255.5 + depth} V{n0} H255.5 V204.7 Q255.5,203.2 257,203.2 Z')
-    # the cut-out in the middle of the cable side shows what is below; at its
-    # end the latch window of the jack
-    out.append(on_nucleo(13.5, '\n'.join([path(shell, '#c9c3b3', ' stroke="#a39c8a" stroke-width="0.5"'),
-                                           rect(255.5 + depth - 0.2, n0 + 0.6, 255.5 + depth + 2.4, n1 - 0.6,
-                                                '#3d3b36'),
-                                           line(258.0, 207.5, 320.0, 207.5, '#b3ac9a', 0.6),
-                                           line(258.0, 270.2, 320.0, 270.2, '#b3ac9a', 0.6)])))
+    # four solder pins visible along the right edge of the RJ45 shield (031724)
+    for y in (225.5, 234.5, 243.5, 252.5):
+        out.append(circle(323.5, y, 2.2, GOLD))
+        out.append(circle(323.5, y, 1.0, '#7a5c24'))
+    # the notch shows the dark plastic interior of the jack, not the Nucleo PCB below
+    out.append(on_nucleo(13.5, '\n'.join([rect(255.5, n0 - 0.8, 255.5 + depth + 2.5, n1 + 0.8, '#232220'),
+                                           rect(255.5, n0 + 1.4, 255.5 + depth, n1 - 1.4, '#111112'),
+                                           path(shell, '#c9c3b3', ' stroke="#a39c8a" stroke-width="0.5"'),
+                                           rect(255.5 + depth - 0.2, n0 + 0.4, 255.5 + depth + 2.0, n1 - 0.4,
+                                                '#3a3833')])))
     # small parts
     for x, y in [(328.2, 85.8), (328.2, 92.0), (328.2, 105.2), (327.7, 131.5), (309.4, 165.8), (309.4, 172.5),
                  (328.2, 183.5), (309.4, 195.7), (309.4, 199.8), (328.2, 193.3), (328.2, 199.6), (360.5, 181.9),
@@ -1427,7 +1432,7 @@ def nucleo():
         for y in (240.5, 251.5):
             jp.append(rect((x0 + x1) / 2 - 1.8, y - 1.8, (x0 + x1) / 2 + 1.8, y + 1.8, '#d9a23a', 0.4))
         out.append(on_nucleo(8.0, '\n'.join(jp)))
-    out.append(rect_stroke(410.5, 232.5, 422.0, 261.0, '#3a64c4', 0.6))
+    out.append(nt(409.5, 246.0, 'JP7', 3.3))
     # labels
     for x, y, s in [(341.8, 87.5, 'R58'), (341.8, 94.0, 'R59'), (341.8, 100.5, 'C52'), (341.8, 107.0, 'R60'),
                     (309.4, 117.6, 'R70'), (314.3, 130.6, 'D6'), (341.2, 131.0, 'R61'), (341.5, 140.0, 'R62'),
@@ -1475,24 +1480,44 @@ def nucleo():
             (800.4, 330.0)]]
     for pts in esd:
         out.append(poly(pts, N_BLUE, f' stroke="{N_BLUE}" stroke-width="0.6" stroke-linejoin="round"'))
-    # CN3 (2 pins, bent over) with its frame and pin 1 mark
+    # CN3 (unpopulated 2-pin GND header footprint, orthographic; 031719)
     out.append(rect_stroke(823.0, 334.0, 845.5, 344.0, N_SILK, 0.45))
-    for x in (828.5, 839.0):
-        out.append(circle(x, 339.6, 3.0, TIN))
-        out.append(circle(x, 339.6, 1.5, '#9f9a8e'))
-    out.append(path('M829.2,341 L835,345.5 L833.8,346.6 L828,342.2 Z M839.7,341 L846,345.5 L844.8,346.6 L838.8,342.2 Z',
-                    '#b9b4a8'))
+    out.append(rect(825.5, 336.6, 831.5, 342.6, TIN, 0.4))
+    out.append(circle(828.5, 339.6, 1.5, '#9f9a8e'))
+    out.append(circle(839.0, 339.6, 3.0, TIN))
+    out.append(circle(839.0, 339.6, 1.5, '#9f9a8e'))
     return '\n'.join(out)
 
 
 def nucleo_caps():
-    """B1 (USER, blue cap) and B2 (RESET, black cap) seen from above, at the positions in board.rs."""
+    """B1 (USER, dark body + blue cap) and B2 (RESET, silver cover + black cap) with gull-wing legs."""
     out = []
-    for (x, y), rim, cap in [(USER, '#155c9c', '#2a8bd8'), (RESET, '#060607', '#1f1f21')]:
-        out.append(rect(x - 12.0, y - 12.0, x + 12.0, y + 12.0, '#2b2c2f', 1.2))     # body
-        out.append(rect(x - 10.2, y - 10.2, x + 10.2, y + 10.2, '#3a3b3f', 0.8))     # top (black, 031702)
-        out.append(circle(x, y, 7.6, rim))
-        out.append(circle(x, y, 6.6, cap))
+    # B1 (USER): dark plastic housing, blue cap, 4 tinned gull-wing legs
+    ux, uy = USER
+    for dx in (-1, 1):
+        for dy in (-1, 1):
+            y0, y1 = (uy - 15.2, uy - 10.5) if dy < 0 else (uy + 10.5, uy + 15.2)
+            out.append(rect(ux + dx * 8.6 - 1.5, y0, ux + dx * 8.6 + 1.5, y1, '#d6d3cb', 0.4,
+                            ' stroke="#8c8880" stroke-width="0.35"'))
+    out.append(rect(ux - 12.0, uy - 12.0, ux + 12.0, uy + 12.0, '#2b2c2f', 1.2))
+    out.append(rect(ux - 10.2, uy - 10.2, ux + 10.2, uy + 10.2, '#3a3b3f', 0.8))
+    out.append(circle(ux, uy, 7.6, '#155c9c'))
+    out.append(circle(ux, uy, 6.6, '#2a8bd8'))
+    # B2 (RESET): bright metallic cover with 4 rivets, black cap, 4 tinned gull-wing legs (031724)
+    rx, ry = RESET
+    for dx in (-1, 1):
+        for dy in (-1, 1):
+            y0, y1 = (ry - 15.2, ry - 10.5) if dy < 0 else (ry + 10.5, ry + 15.2)
+            out.append(rect(rx + dx * 8.6 - 1.5, y0, rx + dx * 8.6 + 1.5, y1, '#d6d3cb', 0.4,
+                            ' stroke="#8c8880" stroke-width="0.35"'))
+    out.append(rect(rx - 12.0, ry - 12.0, rx + 12.0, ry + 12.0, '#cfccc4', 1.2,
+                    ' stroke="#8c8880" stroke-width="0.55"'))
+    out.append(rect(rx - 9.8, ry - 9.8, rx + 9.8, ry + 9.8, '#dedbd3', 0.8))
+    for dx in (-1, 1):
+        for dy in (-1, 1):
+            out.append(circle(rx + dx * 8.0, ry + dy * 8.0, 1.8, '#2e2d2b'))
+    out.append(circle(rx, ry, 7.6, '#141416'))
+    out.append(circle(rx, ry, 6.6, '#262629'))
     return '\n'.join(out)
 
 
@@ -1546,18 +1571,23 @@ def morpho_sockets():
 
 def shield():
     """The display module (photo coordinates, drawn inside layer(M_SHIELD))."""
-    # the touch panel's light edge (beige in the rectified photo, 134518 and
-    # the bare module 031900), then the dark border of the LCD
-    out = [rect(475.5, 50.6, 908.6, 330.8, '#bdb39f', 1.0, ' stroke="#8f887a" stroke-width="0.5"'),  # panel edge
-           rect(478.8, 53.9, 905.3, 327.5, '#1c1e20', 0.6),                # glass over the border
-           rect_stroke(480.4, 55.5, 903.7, 325.9, '#5d5a52', 0.5, 0.4),    # edge of the touch film
-           rect(481.6, 56.7, 902.5, 324.7, '#15191b', 0.4)]                # border of the LCD
-    out.append(rect(479.8, 150.0, 488.6, 327.0, '#101112', 0.8))           # FPC tape
-    out.append(nt(484.2, 293.5, 'H1043  5 2', 3.2, 90, '#9a9a96'))
-    # the folded FPC of the touch panel along the left edge
-    out.append(line(480.6, 53.5, 480.6, 148.0, '#8d897f', 0.8, cap='butt'))
-    out.append(line(484.0, 56.0, 484.0, 148.0, '#77746c', 0.6, cap='butt'))
-    out.append(rect(472.5, 96.0, 481.0, 145.0, '#d9952e', 1.2, ' opacity="0.8"'))
+    # outer metal/plastic housing, with the black FPC bezel along the left edge
+    # (031900, board-rect.jpg) and the beige resistive touch perimeter framing
+    # the active glass on all four sides (inside the black strip on the left)
+    out = [rect(475.5, 50.6, 908.6, 330.8, '#191b1d', 0.8, ' stroke="#6d6a62" stroke-width="0.5"'),  # outer housing
+           # off-white/beige touch panel border framing the glass (top, right, bottom, and inside the left strip)
+           rect(486.0, 51.4, 907.8, 330.0, '#cfc7b5', 0.5),
+           rect(489.2, 54.6, 904.6, 326.8, '#15191b', 0.3),                                         # inner dark glass border
+           rect_stroke(489.2, 54.6, 904.6, 326.8, '#8a8478', 0.45, 0.3),                            # touch film edge
+           # black left bezel / FPC tape with marking (flush at left edge, outside the beige frame)
+           rect(476.0, 146.5, 486.2, 330.0, '#101112', 0.4),
+           nt(481.2, 293.5, 'H1043  5 2', 3.1, 90, '#b0b0ac'),
+           # upper-left beige frame tab above the FPC + folded orange FPC with 4 silver traces
+           rect(476.0, 51.4, 486.2, 96.5, '#cfc7b5', 0.4),
+           line(480.6, 52.0, 480.6, 96.0, '#9a958a', 0.6, cap='butt'),
+           rect(472.5, 96.0, 486.0, 145.5, '#d9952e', 1.0, ' opacity="0.9"')]
+    for y in (104.5, 114.5, 124.5, 134.5):
+        out.append(rect(476.5, y - 2.2, 486.0, y + 2.2, '#d4ccbc', 0.4))
     return '\n'.join(out)
 
 
@@ -1567,7 +1597,7 @@ def main():
     def carrier_layer():
         board = carrier()
         board_clip()
-        return ['<g clip-path="url(#board)">', board, '</g>']
+        return ['<g clip-path="url(#board)">', board, '</g>', carrier_usb()]
 
     layers = {
         'carrier': carrier_layer,
