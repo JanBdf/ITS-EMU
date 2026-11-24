@@ -333,6 +333,10 @@ impl Peripheral for I2c {
         self.name
     }
 
+    fn idle_until_written(&self) -> bool {
+        true
+    }
+
     fn read_stable_until(&self, _off: u32, _clock: &Clock) -> u64 {
         self.pending.map_or(u64::MAX, |(_, at)| at)
     }

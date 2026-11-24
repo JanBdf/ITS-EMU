@@ -159,6 +159,7 @@ pub struct ItsBoard {
     lcd: Rc<RefCell<Ili9486>>,
     touch: Rc<RefCell<Xpt2046>>,
     devices: SharedDevices,
+    has_extra_devices: Rc<std::cell::Cell<bool>>,
     /// The buttons' (and encoders') contacts, bouncing when asked to.
     contacts: SharedContacts,
     encoders: RefCell<Vec<Rc<RefCell<RotaryEncoder>>>>,
@@ -173,7 +174,7 @@ impl ItsBoard {
     /// later, to its bus).
     pub fn attach(mcu: &Stm32f429, bus: &mut Bus) -> Self {
         let devices = SharedDevices::default();
-        bus.attach_device(Box::new(DeviceHub(devices.clone())));
+        let has_extra_devices = Rc::new(std::cell::Cell::new(false));
         let lcd = Rc::new(RefCell::new(Ili9486::new()));
         let touch = Rc::new(RefCell::new(Xpt2046::new()));
         *mcu.spi1.borrow_mut() = Some(Box::new(Spi1Router {
@@ -185,12 +186,15 @@ impl ItsBoard {
             rst_rises: 0,
         }));
         let contacts = Rc::new(RefCell::new(Contacts::new(mcu.gpio.clone())));
+        let contacts_pending = contacts.borrow().pending_flag();
         devices.borrow_mut().push(contacts.clone());
+        bus.attach_device(Box::new(DeviceHub::new(devices.clone(), contacts_pending, has_extra_devices.clone())));
         let board = Self {
             mcu: mcu.clone(),
             lcd,
             touch,
             devices,
+            has_extra_devices,
             contacts,
             encoders: RefCell::default(),
             sensors: RefCell::default(),
@@ -222,6 +226,7 @@ impl ItsBoard {
         let enc = RotaryEncoder::new(self.mcu.gpio.clone(), a, b).with_contacts(self.contacts.clone());
         let enc = Rc::new(RefCell::new(enc));
         self.devices.borrow_mut().push(enc.clone());
+        self.has_extra_devices.set(true);
         self.device_pins.borrow_mut().extend([a, b]);
         let mut encoders = self.encoders.borrow_mut();
         encoders.push(enc);
@@ -244,6 +249,7 @@ impl ItsBoard {
             None => {
                 let b = Rc::new(RefCell::new(OneWireBus::new(self.mcu.gpio.clone(), pin)));
                 self.devices.borrow_mut().push(b.clone());
+                self.has_extra_devices.set(true);
                 self.device_pins.borrow_mut().push(pin);
                 b
             }
@@ -275,6 +281,7 @@ impl ItsBoard {
         let net = net::VirtualNet::new(self.mcu.eth_link.clone(), config)?;
         let bound = net.bound().to_vec();
         self.devices.borrow_mut().push(Rc::new(RefCell::new(net)));
+        self.has_extra_devices.set(true);
         Ok(bound)
     }
 
@@ -288,6 +295,7 @@ impl ItsBoard {
             wiring.iter().map(|w| w.map(|(p, pin)| ((p, pin), (p == 'F' && pin < 8).then_some(true)))).collect();
         let pins = plugin::PluginPins::new(link, self.mcu.gpio.clone(), wiring);
         self.devices.borrow_mut().push(Rc::new(RefCell::new(pins)));
+        self.has_extra_devices.set(true);
     }
 
     /// Disconnects all devices (encoders, sensors, plugins): their pins
@@ -295,6 +303,7 @@ impl ItsBoard {
     pub fn remove_devices(&self) {
         let contacts: *const RefCell<Contacts> = Rc::as_ptr(&self.contacts);
         self.devices.borrow_mut().retain(|d| std::ptr::addr_eq(Rc::as_ptr(d), contacts));
+        self.has_extra_devices.set(false);
         self.encoders.borrow_mut().clear();
         self.sensors.borrow_mut().clear();
         self.mcu.i2c1.borrow_mut().clear();

@@ -222,6 +222,10 @@ impl Peripheral for FlashInterface {
         "FLASH"
     }
 
+    fn idle_until_written(&self) -> bool {
+        true
+    }
+
     fn read_stable_until(&self, offset: u32, clock: &Clock) -> u64 {
         let s = self.state.borrow();
         match offset & !3 {

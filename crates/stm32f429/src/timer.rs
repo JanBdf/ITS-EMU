@@ -1834,6 +1834,10 @@ impl Peripheral for GpTimer {
         self.name
     }
 
+    fn idle_until_written(&self) -> bool {
+        true
+    }
+
     fn read_stable_until(&self, off: u32, clock: &Clock) -> u64 {
         // CNT changes with every tick, SR (UIF) at the next overflow.
         if self.itr_slave().is_some() {

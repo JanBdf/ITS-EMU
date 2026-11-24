@@ -185,7 +185,7 @@ impl Peripheral for Exti {
     }
 
     fn next_event(&self) -> Option<u64> {
-        self.gpio.borrow().exti_due()
+        self.gpio.borrow().next_event()
     }
 
     fn reset(&mut self) {
@@ -219,6 +219,10 @@ impl Syscfg {
 impl Peripheral for Syscfg {
     fn name(&self) -> &str {
         "SYSCFG"
+    }
+
+    fn has_time_events(&self) -> bool {
+        false
     }
 
     fn read_stable_until(&self, _offset: u32, _clock: &Clock) -> u64 {

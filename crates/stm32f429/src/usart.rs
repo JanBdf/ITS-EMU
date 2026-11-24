@@ -190,11 +190,13 @@ impl Usart {
     /// Processes everything that happened up to `ctx.now()`.
     fn advance(&mut self, ctx: &mut DeviceCtx) {
         let now = ctx.now();
+        let mut changed = false;
         // Transmitter
         while let Some((byte, done)) = self.shifting {
             if done > now {
                 break;
             }
+            changed = true;
             self.port.borrow_mut().push_output(byte as u8);
             self.shifting = self.tdr.take().map(|b| (b, done + self.frame_cycles(ctx)));
             if self.shifting.is_some() {
@@ -204,7 +206,7 @@ impl Usart {
             }
         }
         // Receiver
-        if self.enabled(CR1_RE) {
+        if self.cr1 & (CR1_UE | CR1_RE) == (CR1_UE | CR1_RE) && self.clocks_enabled() {
             loop {
                 match self.rx_done_at {
                     None => {
@@ -215,6 +217,7 @@ impl Usart {
                         self.idle_at = None;
                     }
                     Some(t) if t <= now => {
+                        changed = true;
                         let byte = self.port.borrow_mut().rx.pop_front();
                         if let Some(b) = byte {
                             if self.sr & SR_RXNE != 0 {
@@ -235,13 +238,16 @@ impl Usart {
                 && t <= now
                 && self.rx_done_at.is_none()
             {
+                changed = true;
                 self.sr |= SR_IDLE;
                 self.idle_at = None;
             }
         } else {
             self.rx_done_at = None;
         }
-        self.sync_irq(ctx);
+        if changed {
+            self.sync_irq(ctx);
+        }
     }
 
     fn sync_irq(&self, ctx: &mut DeviceCtx) {
@@ -317,6 +323,10 @@ impl Peripheral for Usart {
         self.name
     }
 
+    fn idle_until_written(&self) -> bool {
+        true
+    }
+
     fn read_stable_until(&self, _offset: u32, _clock: &Clock) -> u64 {
         // State only changes at the events reported by `next_event`.
         u64::MAX
@@ -327,15 +337,21 @@ impl Peripheral for Usart {
             return 0;
         }
         self.advance(ctx);
+        let mut irq_dirty = false;
         let v = match off & !3 {
             0x00 => {
                 self.sr_read_mask = self.sr;
                 self.sr
             }
-            0x04 => self.read_dr(),
+            0x04 => {
+                irq_dirty = true;
+                self.read_dr()
+            }
             other => self.reg(other),
         };
-        self.sync_irq(ctx);
+        if irq_dirty {
+            self.sync_irq(ctx);
+        }
         extract_read(v, off, size)
     }
 
@@ -365,6 +381,7 @@ impl Peripheral for Usart {
             _ => {}
         }
         self.advance(ctx);
+        self.sync_irq(ctx);
     }
 
     fn update(&mut self, ctx: &mut DeviceCtx) {
@@ -372,9 +389,24 @@ impl Peripheral for Usart {
     }
 
     fn next_event(&self) -> Option<u64> {
-        let waiting_rx = self.enabled(CR1_RE) && self.rx_done_at.is_none() && !self.port.borrow().rx.is_empty();
-        let rx = if waiting_rx { Some(0) } else { self.rx_done_at };
-        [self.shifting.map(|(_, t)| t), rx, self.idle_at].into_iter().flatten().min()
+        let rx = if self.rx_done_at.is_some() {
+            self.rx_done_at
+        } else if self.cr1 & (CR1_UE | CR1_RE) == (CR1_UE | CR1_RE)
+            && self.clocks_enabled()
+            && !self.port.borrow().rx.is_empty()
+        {
+            Some(0)
+        } else {
+            None
+        };
+        let mut best = self.shifting.map(|(_, t)| t);
+        if let Some(t) = rx {
+            best = Some(best.map_or(t, |b| b.min(t)));
+        }
+        if let Some(t) = self.idle_at {
+            best = Some(best.map_or(t, |b| b.min(t)));
+        }
+        best
     }
 
     fn reset(&mut self) {

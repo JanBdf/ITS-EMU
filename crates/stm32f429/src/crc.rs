@@ -36,6 +36,10 @@ impl Peripheral for Crc {
         "CRC"
     }
 
+    fn has_time_events(&self) -> bool {
+        false
+    }
+
     fn read_stable_until(&self, _off: u32, _clock: &Clock) -> u64 {
         u64::MAX
     }
@@ -109,6 +113,10 @@ impl Rng {
 impl Peripheral for Rng {
     fn name(&self) -> &str {
         "RNG"
+    }
+
+    fn idle_until_written(&self) -> bool {
+        true
     }
 
     fn read_stable_until(&self, _off: u32, _clock: &Clock) -> u64 {

@@ -54,6 +54,10 @@ impl Peripheral for Iwdg {
         "IWDG"
     }
 
+    fn idle_until_written(&self) -> bool {
+        true
+    }
+
     fn read_stable_until(&self, off: u32, _clock: &Clock) -> u64 {
         if off & !3 == 0x0C { self.update_done.unwrap_or(u64::MAX) } else { u64::MAX }
     }

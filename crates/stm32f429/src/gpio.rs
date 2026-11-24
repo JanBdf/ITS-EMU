@@ -76,6 +76,8 @@ pub struct PortState {
     high_cycles: [u64; 16],
     duty_since: u64,
     duty_last: u64,
+    /// Cached result of [`Self::idr`], updated whenever pin state changes.
+    idr_cache: u16,
 }
 
 impl PortState {
@@ -96,7 +98,14 @@ impl PortState {
             0..=6 => 0xFFFF,
             _ => 0,
         };
-        Self { moder, ospeedr, pupdr, bonded, ..Default::default() }
+        let mut s = Self { moder, ospeedr, pupdr, bonded, ..Default::default() };
+        s.refresh_idr();
+        s
+    }
+
+    #[inline]
+    fn refresh_idr(&mut self) {
+        self.idr_cache = self.idr() as u16;
     }
 
     pub fn mode(&self, pin: u32) -> PinMode {
@@ -156,7 +165,7 @@ impl PortState {
         let now = now.max(self.duty_last);
         let dt = now - self.duty_last;
         if dt > 0 {
-            let levels = self.idr();
+            let levels = u32::from(self.idr_cache);
             for (pin, high) in self.high_cycles.iter_mut().enumerate() {
                 if levels & (1 << pin) != 0 {
                     *high += dt;
@@ -170,7 +179,7 @@ impl PortState {
     fn take_duty(&mut self, now: u64) -> [f32; 16] {
         self.accumulate(now);
         let window = now.saturating_sub(self.duty_since);
-        let levels = self.idr();
+        let levels = u32::from(self.idr_cache);
         let mut duty = [0.0; 16];
         for (pin, d) in duty.iter_mut().enumerate() {
             *d = if window == 0 {
@@ -187,9 +196,10 @@ impl PortState {
     /// Changes ODR and counts rising edges of the resulting pin levels.
     fn set_odr(&mut self, odr: u32, now: u64) {
         self.accumulate(now);
-        let before = self.idr();
+        let before = u32::from(self.idr_cache);
         self.odr = odr & 0xFFFF;
-        let rising = self.idr() & !before;
+        self.refresh_idr();
+        let rising = u32::from(self.idr_cache) & !before;
         for (pin, rises) in self.rises.iter_mut().enumerate() {
             if rising & (1 << pin) != 0 {
                 *rises = rises.wrapping_add(1);
@@ -206,11 +216,14 @@ impl PortState {
     /// `tracked` for edges at a known time `edge_ps` (for input capture).
     fn tracked_at<R>(&mut self, due: u64, edge_ps: u64, f: impl FnOnce(&mut Self) -> R) -> R {
         if self.exti_watch | self.cap_watch | self.log_watch == 0 {
-            return f(self);
+            let r = f(self);
+            self.refresh_idr();
+            return r;
         }
-        let before = self.idr() as u16;
+        let before = self.idr_cache;
         let r = f(self);
-        let after = self.idr() as u16;
+        self.refresh_idr();
+        let after = self.idr_cache;
         for pin in 0..16u8 {
             if (before ^ after) & self.log_watch & (1 << pin) != 0 {
                 self.edge_log.push((pin, after & (1 << pin) != 0, due, self.external_change));
@@ -234,6 +247,11 @@ impl PortState {
             self.exti_fall |= fall;
         }
         r
+    }
+
+    #[inline]
+    fn has_pending_events(&self) -> bool {
+        self.cap_rise | self.cap_fall | self.exti_rise | self.exti_fall != 0 || !self.edge_log.is_empty()
     }
 
     /// Cycle at which pending edges reach EXTI, if there are any.
@@ -280,11 +298,14 @@ impl PortState {
 #[derive(Debug, Clone)]
 pub struct GpioBank {
     pub ports: [PortState; NUM_PORTS],
+    /// Conservative flag: `false` guarantees no port has pending EXTI,
+    /// capture, or logged edge events.
+    any_events: std::cell::Cell<bool>,
 }
 
 impl Default for GpioBank {
     fn default() -> Self {
-        Self { ports: std::array::from_fn(PortState::reset_for) }
+        Self { ports: std::array::from_fn(PortState::reset_for), any_events: std::cell::Cell::new(false) }
     }
 }
 
@@ -297,8 +318,9 @@ impl GpioBank {
     /// [`Self::drive`] at a known cycle (edges are logged with it).
     pub fn drive_at(&mut self, port: usize, pin: u32, level: Option<bool>, cycle: u64) {
         let bit = 1u16 << pin;
-        self.ports[port].external_change = true;
-        self.ports[port].tracked(cycle, |p| match level {
+        let p = &mut self.ports[port];
+        p.external_change = true;
+        p.tracked(cycle, |p| match level {
             Some(l) => {
                 p.ext_mask |= bit;
                 if l {
@@ -309,7 +331,10 @@ impl GpioBank {
             }
             None => p.ext_mask &= !bit,
         });
-        self.ports[port].external_change = false;
+        p.external_change = false;
+        if p.has_pending_events() {
+            self.any_events.set(true);
+        }
     }
 
     /// Takes the logged edges of the pins in `mask`, in order.
@@ -321,8 +346,39 @@ impl GpioBank {
     }
 
     /// When the earliest edge on pins watched by EXTI reaches EXTI.
+    #[inline]
     pub fn exti_due(&self) -> Option<u64> {
-        self.ports.iter().filter_map(PortState::exti_due).min()
+        if !self.any_events.get() {
+            return None;
+        }
+        let mut best: Option<u64> = None;
+        for p in &self.ports[..7] {
+            if p.exti_rise | p.exti_fall != 0 {
+                best = Some(best.map_or(p.exti_due, |b| b.min(p.exti_due)));
+            }
+        }
+        best
+    }
+
+    /// Earliest pending GPIO edge event across all ports (captures, edge log, EXTI).
+    #[inline]
+    pub fn next_event(&self) -> Option<u64> {
+        if !self.any_events.get() {
+            return None;
+        }
+        let mut best: Option<u64> = None;
+        for p in &self.ports[..7] {
+            if p.cap_rise | p.cap_fall != 0 || !p.edge_log.is_empty() {
+                return Some(0);
+            }
+            if p.exti_rise | p.exti_fall != 0 {
+                best = Some(best.map_or(p.exti_due, |b| b.min(p.exti_due)));
+            }
+        }
+        if best.is_none() {
+            self.any_events.set(false);
+        }
+        best
     }
 
     /// A peripheral output (alternate function `af`) drives a pin to `level`
@@ -334,6 +390,9 @@ impl GpioBank {
         }
         p.accumulate(due);
         p.tracked_at(due, edge_ps, |p| p.af_drive[pin as usize][af as usize] = level);
+        if p.has_pending_events() {
+            self.any_events.set(true);
+        }
     }
 
     pub fn level(&self, port: usize, pin: u32) -> bool {
@@ -342,7 +401,11 @@ impl GpioBank {
 
     /// Sets the levels that floating inputs (no pull, not driven) of `port` read.
     pub fn set_floating_levels(&mut self, port: usize, levels: u16) {
-        self.ports[port].tracked(0, |p| p.float_level = levels);
+        let p = &mut self.ports[port];
+        p.tracked(0, |p| p.float_level = levels);
+        if p.has_pending_events() {
+            self.any_events.set(true);
+        }
     }
 
     /// Fraction of time (0.0–1.0) each pin of `port` was high since the
@@ -411,7 +474,7 @@ impl Peripheral for GpioPort {
             0x04 => p.otyper,
             0x08 => p.ospeedr,
             0x0C => p.pupdr,
-            0x10 => p.idr(),
+            0x10 => u32::from(p.idr_cache),
             0x14 => p.odr,
             0x1C => p.lckr,
             0x20 => p.afr[0],
@@ -453,6 +516,15 @@ impl Peripheral for GpioPort {
             0x24 => p.afr[1] = merge_write(p.afr[1], off, size, value),
             _ => {}
         });
+        if bank.ports[self.index].has_pending_events() {
+            bank.any_events.set(true);
+        }
+    }
+
+    fn has_time_events(&self) -> bool {
+        // Exti::next_event checks the whole GpioBank in one pass; GpioPort
+        // still implements next_event for Bus::write_aligned.
+        false
     }
 
     fn next_event(&self) -> Option<u64> {
@@ -473,6 +545,7 @@ impl Peripheral for GpioPort {
         let new = &mut bank.ports[self.index];
         (new.ext_mask, new.ext_level, new.float_level, new.exti_watch, new.cap_watch, new.log_watch) =
             (ext_mask, ext_level, float_level, watch, cap, log);
+        new.refresh_idr();
         self.warned_clock = false;
     }
 }

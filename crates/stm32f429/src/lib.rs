@@ -144,26 +144,15 @@ impl spi::SpiDevice for OpenMiso {
 /// (2·div - 1 extra core cycles), writes one cycle less; the first access
 /// after other work also waits for the bridge (div cycles for reads,
 /// 2·div - 1 for writes). AHB peripherals cost about one cycle more than SRAM.
-fn bus_wait_states(clocks: SharedClocks) -> impl Fn(u32, bool, u64) -> u64 {
+fn bus_wait_states(apb_divs: std::rc::Rc<std::cell::Cell<(u64, u64)>>) -> impl Fn(u32, bool, u64) -> u64 {
     let last_end = std::cell::Cell::new(u64::MAX);
-    // HCLK and the APB clock of the last access to each APB, with their ratio
-    // (a division per access is a noticeable part of polling a peripheral)
-    let ratios = std::cell::Cell::new([(0u32, 0u32, 1u64); 2]);
     move |addr, write, now| {
-        let apb = match addr {
-            0x4000_0000..=0x4000_7FFF => 0,
-            0x4001_0000..=0x4001_6BFF => 1,
+        let div = match addr {
+            0x4000_0000..=0x4000_7FFF => apb_divs.get().0,
+            0x4001_0000..=0x4001_6BFF => apb_divs.get().1,
             0x4002_0000..=0x5FFF_FFFF => return 1,
             _ => return 0,
         };
-        let c = clocks.get();
-        let pclk = if apb == 0 { c.pclk1 } else { c.pclk2 };
-        let mut known = ratios.get();
-        if (known[apb].0, known[apb].1) != (c.hclk, pclk) {
-            known[apb] = (c.hclk, pclk, u64::from(c.hclk / pclk.max(1)).max(1));
-            ratios.set(known);
-        }
-        let div = known[apb].2;
         if div == 1 {
             return 0;
         }
@@ -177,19 +166,28 @@ fn bus_wait_states(clocks: SharedClocks) -> impl Fn(u32, bool, u64) -> u64 {
 }
 
 /// The bus masters besides the core: they take turns.
-struct Masters(Vec<Box<dyn emu_core::BusMaster>>);
+struct Masters {
+    dma: dma::DmaMaster,
+    eth: eth::EthMaster,
+}
 
 impl emu_core::BusMaster for Masters {
+    #[inline]
     fn wants_service(&self) -> bool {
-        self.0.iter().any(|m| m.wants_service())
+        self.dma.wants_service() || self.eth.wants_service()
     }
 
     fn service(&mut self, ctx: &mut emu_core::DeviceCtx, bus: &mut Bus, ram: &mut emu_core::Ram) {
-        for m in &mut self.0 {
-            if m.wants_service() {
-                m.service(ctx, bus, ram);
-            }
+        if self.dma.wants_service() {
+            self.dma.service(ctx, bus, ram);
         }
+        if self.eth.wants_service() {
+            self.eth.service(ctx, bus, ram);
+        }
+    }
+
+    fn active_flags(&self) -> [Option<std::rc::Rc<std::cell::Cell<bool>>>; 2] {
+        [Some(self.dma.0.active.clone()), Some(self.eth.0.enabled.clone())]
     }
 }
 
@@ -197,10 +195,7 @@ impl emu_core::BusMaster for Masters {
 /// controllers and the Ethernet DMA of `mcu` as further bus masters.
 pub fn machine(bus: Bus, mcu: &Stm32f429) -> Result<Machine, MachineError> {
     let mut m = Machine::new(machine_config(), bus)?;
-    m.set_bus_master(Box::new(Masters(vec![
-        Box::new(dma::DmaMaster(mcu.dma.clone())),
-        Box::new(eth::EthMaster(mcu.eth.clone())),
-    ])));
+    m.set_bus_master(Box::new(Masters { dma: dma::DmaMaster(mcu.dma.clone()), eth: eth::EthMaster(mcu.eth.clone()) }));
     m.set_debug_ids(DEBUG_IDS);
     m.set_flash_controller(Box::new(flash::FlashProgrammer::new(mcu.flash.clone(), mcu.clocks.clone())));
     // Device electronic signature in system memory (read-only): unique ID
@@ -431,7 +426,8 @@ pub fn build() -> (Bus, Stm32f429) {
     bus.attach(0x4002_3000, 0x400, Box::new(crc::Crc::new(clocks.clone())));
     bus.attach(0x4002_6000, 0x400, Box::new(dma::DmaRegs::new(0, dma.clone(), clocks.clone())));
     bus.attach(0x4002_6400, 0x400, Box::new(dma::DmaRegs::new(1, dma.clone(), clocks.clone())));
-    bus.attach(0x4002_3800, 0x400, Box::new(Rcc::new(clocks.clone())));
+    let apb_divs = std::rc::Rc::new(std::cell::Cell::new((1u64, 1u64)));
+    bus.attach(0x4002_3800, 0x400, Box::new(Rcc::new(clocks.clone()).with_apb_divs(apb_divs.clone())));
     bus.attach(0x5006_0800, 0x400, Box::new(crc::Rng::new(clocks.clone())));
     let flash = flash::SharedFlash::default();
     bus.attach(0x4002_3C00, 0x400, Box::new(flash::FlashInterface::new(flash.clone())));
@@ -440,7 +436,7 @@ pub fn build() -> (Bus, Stm32f429) {
     bus.attach(0x4002_8000, 0x1400, Box::new(eth::EthRegs::new(eth.clone(), clocks.clone())));
     let otg = otg_fs::SharedOtgPort::default();
     bus.attach(otg_fs::OTG_FS_BASE, otg_fs::OTG_FS_SIZE, Box::new(otg_fs::OtgFs::new(clocks.clone(), otg.clone())));
-    bus.set_wait_states(Box::new(bus_wait_states(clocks.clone())));
+    bus.set_wait_states(Box::new(bus_wait_states(apb_divs)));
 
     let tim_pwm: [SharedPwm; 4] = tim_pwm.try_into().unwrap_or_else(|_| unreachable!());
     (bus, Stm32f429 { gpio, clocks, spi1, tim_pwm, usart3, analog, i2c1, dma, eth, eth_link, flash, otg })

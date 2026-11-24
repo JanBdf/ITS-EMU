@@ -1045,6 +1045,10 @@ impl Peripheral for OtgFs {
         "OTG_FS"
     }
 
+    fn idle_until_written(&self) -> bool {
+        true
+    }
+
     fn read(&mut self, ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
         self.update(ctx);
         if !self.clock_enabled() {

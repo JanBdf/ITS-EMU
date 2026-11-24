@@ -112,6 +112,7 @@ const HSE_CRYSTAL_NS: u64 = 2_000_000;
 
 pub struct Rcc {
     clocks: SharedClocks,
+    apb_divs: Rc<Cell<(u64, u64)>>,
     cr: u32,
     pllcfgr: u32,
     cfgr: u32,
@@ -134,6 +135,7 @@ impl Rcc {
     pub fn new(clocks: SharedClocks) -> Self {
         let mut r = Self {
             clocks,
+            apb_divs: Rc::new(Cell::new((1, 1))),
             cr: 0,
             pllcfgr: 0,
             cfgr: 0,
@@ -151,6 +153,11 @@ impl Rcc {
         };
         r.reset_regs();
         r
+    }
+
+    pub(crate) fn with_apb_divs(mut self, apb_divs: Rc<Cell<(u64, u64)>>) -> Self {
+        self.apb_divs = apb_divs;
+        self
     }
 
     fn reset_regs(&mut self) {
@@ -248,6 +255,9 @@ impl Rcc {
             log::info!("core clock {} MHz", f64::from(clocks.hclk) / 1e6);
         }
         self.clocks.set(clocks);
+        let div1 = u64::from(clocks.hclk / clocks.pclk1.max(1)).max(1);
+        let div2 = u64::from(clocks.hclk / clocks.pclk2.max(1)).max(1);
+        self.apb_divs.set((div1, div2));
         ctx.clock.set_cpu_hz(hclk.max(1));
     }
 
@@ -289,6 +299,10 @@ impl Rcc {
 impl Peripheral for Rcc {
     fn name(&self) -> &str {
         "RCC"
+    }
+
+    fn has_time_events(&self) -> bool {
+        false
     }
 
     fn read_stable_until(&self, offset: u32, clock: &Clock) -> u64 {
@@ -352,6 +366,7 @@ impl Peripheral for Rcc {
     fn reset(&mut self) {
         self.reset_regs();
         self.clocks.set(Clocks::default());
+        self.apb_divs.set((1, 1));
     }
 
     /// The reset flags in CSR collect until RMVF; every reset but power-on
@@ -399,6 +414,10 @@ impl Pwr {
 impl Peripheral for Pwr {
     fn name(&self) -> &str {
         "PWR"
+    }
+
+    fn has_time_events(&self) -> bool {
+        false
     }
 
     fn read_stable_until(&self, _offset: u32, _clock: &Clock) -> u64 {

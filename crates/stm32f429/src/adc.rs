@@ -273,13 +273,15 @@ impl Adc {
 
     /// A trigger that the regular group of `unit` has not seen yet.
     fn new_trigger(&self, unit: &Unit) -> Option<u64> {
-        let t = self.triggers.get()[unit.trigger_source()?];
+        let src = unit.trigger_source()?;
+        let t = self.triggers.get()[src];
         (t > unit.trigger_seen).then_some(t)
     }
 
     /// A trigger that the injected group of `unit` has not seen yet.
     fn new_jtrigger(&self, unit: &Unit) -> Option<u64> {
-        let t = self.triggers.get()[unit.jtrigger_source()?];
+        let src = unit.jtrigger_source()?;
+        let t = self.triggers.get()[src];
         (t > unit.jtrigger_seen).then_some(t)
     }
 
@@ -490,6 +492,10 @@ impl Peripheral for Adc {
         "ADC"
     }
 
+    fn idle_until_written(&self) -> bool {
+        true
+    }
+
     fn read_stable_until(&self, off: u32, _clock: &Clock) -> u64 {
         let u = (off / 0x100) as usize;
         if u < 3 && matches!(off & 0xFF, 0x00 | 0x3C..=0x4C) {
@@ -591,9 +597,23 @@ impl Peripheral for Adc {
     }
 
     fn next_event(&self) -> Option<u64> {
-        let conversions = self.units.iter().flat_map(|u| [u.regular, u.injected]).flatten().map(|(_, end)| end);
-        let triggers = self.units.iter().flat_map(|u| [self.new_trigger(u), self.new_jtrigger(u)]).flatten();
-        conversions.chain(triggers).min()
+        let mut best: Option<u64> = None;
+        let mut note = |t: u64| best = Some(best.map_or(t, |b| b.min(t)));
+        for u in &self.units {
+            if let Some((_, end)) = u.regular {
+                note(end);
+            }
+            if let Some((_, end)) = u.injected {
+                note(end);
+            }
+            if let Some(t) = self.new_trigger(u) {
+                note(t);
+            }
+            if let Some(t) = self.new_jtrigger(u) {
+                note(t);
+            }
+        }
+        best
     }
 
     fn reset(&mut self) {
@@ -788,6 +808,10 @@ impl Dac {
 impl Peripheral for Dac {
     fn name(&self) -> &str {
         "DAC"
+    }
+
+    fn idle_until_written(&self) -> bool {
+        true
     }
 
     fn read_stable_until(&self, _off: u32, _clock: &Clock) -> u64 {

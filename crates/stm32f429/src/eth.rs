@@ -443,18 +443,24 @@ pub fn crc32(data: &[u8]) -> u32 {
 pub struct Eth {
     state: RefCell<EthState>,
     link: SharedEthLink,
+    /// True while either TX or RX DMA is enabled in DMAOMR (fast path for `busy`).
+    pub(crate) enabled: Rc<std::cell::Cell<bool>>,
 }
 
 pub type SharedEth = Rc<Eth>;
 
 impl Eth {
     pub fn new(link: SharedEthLink) -> SharedEth {
-        Rc::new(Self { state: RefCell::new(EthState::new()), link })
+        Rc::new(Self { state: RefCell::new(EthState::new()), link, enabled: Rc::new(std::cell::Cell::new(false)) })
     }
 
     /// Something for the DMA to do: frames to send, or a frame from the link
     /// and a reception that is not suspended.
+    #[inline]
     fn busy(&self) -> bool {
+        if !self.enabled.get() {
+            return false;
+        }
         let s = self.state.borrow();
         let tx = s.tx_poll && s.omr & DMAOMR_ST != 0;
         let rx = s.omr & DMAOMR_SR != 0
@@ -526,6 +532,10 @@ impl EthRegs {
 impl Peripheral for EthRegs {
     fn name(&self) -> &str {
         "ETH"
+    }
+
+    fn idle_until_written(&self) -> bool {
+        true
     }
 
     fn read_stable_until(&self, off: u32, _clock: &Clock) -> u64 {
@@ -624,7 +634,9 @@ impl Peripheral for EthRegs {
             }
         }
         let irq = s.irq();
+        let enabled = s.omr & (DMAOMR_ST | DMAOMR_SR) != 0;
         drop(s);
+        self.eth.enabled.set(enabled);
         ctx.set_irq(ETH_IRQ, irq);
     }
 
@@ -639,6 +651,7 @@ impl Peripheral for EthRegs {
     fn reset(&mut self) {
         let mut s = self.eth.state.borrow_mut();
         *s = EthState::new();
+        self.eth.enabled.set(false);
     }
 }
 

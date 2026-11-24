@@ -110,7 +110,7 @@ pub struct Dma {
     ended: Cell<[[u8; 8]; 2]>,
     one_left: Cell<[[u8; 8]; 2]>,
     /// Some stream is enabled (checked after every peripheral access).
-    active: Cell<bool>,
+    pub(crate) active: Rc<Cell<bool>>,
 }
 
 impl Dma {
@@ -390,6 +390,10 @@ impl DmaRegs {
 impl Peripheral for DmaRegs {
     fn name(&self) -> &str {
         if self.index == 0 { "DMA1" } else { "DMA2" }
+    }
+
+    fn has_time_events(&self) -> bool {
+        false
     }
 
     fn read_stable_until(&self, _off: u32, _clock: &Clock) -> u64 {

@@ -226,8 +226,18 @@ impl Nvic {
     }
 
     /// Execution priority without the boost from mask registers (256 = thread mode, nothing active).
+    #[inline]
     fn active_priority(&self) -> i16 {
-        self.active.iter().map(|e| self.group_priority(e)).min().unwrap_or(256)
+        let mut min = 256;
+        for (i, &word) in self.active.0.iter().enumerate() {
+            let mut w = word;
+            while w != 0 {
+                let b = w.trailing_zeros();
+                w &= w - 1;
+                min = min.min(self.group_priority(i as u32 * 32 + b));
+            }
+        }
+        min
     }
 
     pub fn execution_priority(&self, masks: MaskRegs) -> i16 {
@@ -254,9 +264,36 @@ impl Nvic {
         }
     }
 
+    #[inline]
+    fn pending_enabled_word(&self, i: usize) -> u32 {
+        let p = self.pending.0[i];
+        if i == 0 {
+            let sys_ena = 0xFFFFu32
+                & !(u32::from(!self.mem_fault_ena) << MEM_MANAGE)
+                & !(u32::from(!self.bus_fault_ena) << BUS_FAULT)
+                & !(u32::from(!self.usage_fault_ena) << USAGE_FAULT);
+            p & (sys_ena | (self.enabled.0[0] & 0xFFFF_0000))
+        } else {
+            p & self.enabled.0[i]
+        }
+    }
+
     /// Highest priority pending and enabled exception, regardless of masking.
     pub fn highest_pending(&self) -> Option<u32> {
-        self.pending.iter().filter(|&e| self.is_enabled(e)).min_by_key(|&e| (self.full_priority(e), e))
+        let mut best: Option<(i16, u32)> = None;
+        for i in 0..self.pending.0.len() {
+            let mut w = self.pending_enabled_word(i);
+            while w != 0 {
+                let b = w.trailing_zeros();
+                w &= w - 1;
+                let exc = i as u32 * 32 + b;
+                let key = (self.full_priority(exc), exc);
+                if best.is_none_or(|cur| key < cur) {
+                    best = Some(key);
+                }
+            }
+        }
+        best.map(|(_, exc)| exc)
     }
 
     /// The exception that preempts the current execution, if any.
@@ -270,8 +307,13 @@ impl Nvic {
     /// time slices. A disabled one is not taken until it is enabled (an NVIC
     /// write, which ends the slice): an interrupt line that stays high while
     /// nobody uses its interrupt does not slow the core down.
+    #[inline]
     pub fn any_pending(&self) -> bool {
-        self.pending.iter().any(|e| self.is_enabled(e))
+        let mut any = 0u32;
+        for i in 0..self.pending.0.len() {
+            any |= self.pending_enabled_word(i);
+        }
+        any != 0
     }
 
     /// Number of active exceptions (RETTOBASE = active_count() <= 1).

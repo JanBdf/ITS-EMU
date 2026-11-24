@@ -162,10 +162,12 @@ impl Spi {
     /// Completes all frames whose last bit has been shifted by `ctx.now()`.
     fn advance(&mut self, ctx: &mut DeviceCtx) {
         let now = ctx.now();
+        let mut changed = false;
         while let Some((frame, done)) = self.shifting {
             if done > now {
                 break;
             }
+            changed = true;
             let received = match self.device.borrow_mut().as_mut() {
                 Some(dev) => dev.transfer(frame),
                 None => 0xFF, // MISO pulled up / nothing connected
@@ -180,7 +182,9 @@ impl Spi {
             self.shifting = self.tx_buf.take().map(|f| (f, done + self.frame_cycles(ctx)));
             self.sr |= SR_TXE;
         }
-        self.sync_irq(ctx);
+        if changed {
+            self.sync_irq(ctx);
+        }
     }
 
     fn sr(&self) -> u32 {
@@ -193,6 +197,10 @@ impl Peripheral for Spi {
         self.name
     }
 
+    fn idle_until_written(&self) -> bool {
+        true
+    }
+
     fn read_stable_until(&self, _offset: u32, _clock: &Clock) -> u64 {
         // State only changes at the events reported by `next_event`.
         u64::MAX
@@ -203,6 +211,7 @@ impl Peripheral for Spi {
             return 0;
         }
         self.advance(ctx);
+        let mut irq_dirty = false;
         let reg = match off & !3 {
             0x00 => self.cr1,
             0x04 => self.cr2,
@@ -211,11 +220,15 @@ impl Peripheral for Spi {
                 if self.ovr_dr_read && self.sr & SR_OVR != 0 {
                     self.sr &= !SR_OVR;
                     self.ovr_dr_read = false;
+                    irq_dirty = true;
                 }
                 v
             }
             0x0C => {
-                self.sr &= !SR_RXNE;
+                if self.sr & SR_RXNE != 0 {
+                    self.sr &= !SR_RXNE;
+                    irq_dirty = true;
+                }
                 if self.sr & SR_OVR != 0 {
                     self.ovr_dr_read = true;
                 }
@@ -226,7 +239,9 @@ impl Peripheral for Spi {
             0x20 if self.i2s => self.i2spr,
             _ => 0,
         };
-        self.sync_irq(ctx);
+        if irq_dirty {
+            self.sync_irq(ctx);
+        }
         extract_read(reg, off, size)
     }
 

@@ -85,6 +85,11 @@ pub trait BusMaster {
     /// Whether there is a transfer to make now.
     fn wants_service(&self) -> bool;
     fn service(&mut self, ctx: &mut DeviceCtx, bus: &mut Bus, ram: &mut Ram);
+    /// Optional fast-path flags: when present and all `false`, `wants_service`
+    /// is guaranteed to return `false` and the machine skips calling it.
+    fn active_flags(&self) -> [Option<std::rc::Rc<std::cell::Cell<bool>>>; 2] {
+        [None, None]
+    }
 }
 
 /// What reset the MCU (reset flags in RCC_CSR).
@@ -153,6 +158,19 @@ pub trait Peripheral {
         None
     }
 
+    /// Whether [`Self::update`] or [`Self::next_event`] needs to be called
+    /// during periodic bus sweeps. Peripherals that only react to register
+    /// accesses return `false` so the bus skips them on every slice.
+    fn has_time_events(&self) -> bool {
+        true
+    }
+
+    /// Whether this peripheral stays completely idle (no events, `update` is a
+    /// no-op) after reset until software writes one of its registers.
+    fn idle_until_written(&self) -> bool {
+        false
+    }
+
     /// Writes to the register at `offset` change nothing (registers of a
     /// stub that ignores them). Lets idle polling loops that write such a
     /// register be fast-forwarded. Conservative default: false.
@@ -173,6 +191,8 @@ struct Mapping {
     base: u32,
     size: u32,
     dev: Box<dyn Peripheral>,
+    /// Included in `Bus::timed` for `update` / `next_event` sweeps.
+    active: bool,
 }
 
 /// Extra cycles (bus wait states) of an access to `addr` (`true`: write)
@@ -182,6 +202,8 @@ pub type WaitStates = Box<dyn Fn(u32, bool, u64) -> u64>;
 #[derive(Default)]
 pub struct Bus {
     maps: Vec<Mapping>,
+    /// Indices into `maps` of peripherals with `has_time_events() == true`.
+    timed: Vec<usize>,
     /// Index of the mapping found last (polling loops hit the same one).
     last: usize,
     /// Devices without registers (circuitry on the pins, see [`Bus::attach_device`]).
@@ -205,8 +227,19 @@ impl Bus {
             "peripheral window of {} overlaps an existing mapping",
             dev.name()
         );
+        let active = dev.has_time_events() && !dev.idle_until_written();
         let pos = self.maps.partition_point(|m| m.base < base);
-        self.maps.insert(pos, Mapping { base, size, dev });
+        self.maps.insert(pos, Mapping { base, size, dev, active });
+        self.rebuild_timed();
+    }
+
+    fn rebuild_timed(&mut self) {
+        self.timed.clear();
+        for (i, m) in self.maps.iter().enumerate() {
+            if m.active {
+                self.timed.push(i);
+            }
+        }
     }
 
     /// Adds a device without registers (external circuitry on the pins): it
@@ -215,7 +248,8 @@ impl Bus {
         self.devices.push(dev);
     }
 
-    fn find(&mut self, addr: u32) -> Option<&mut Mapping> {
+    #[inline]
+    fn find_idx(&mut self, addr: u32) -> Option<usize> {
         let hit = self.maps.get(self.last).is_some_and(|m| addr.wrapping_sub(m.base) < m.size);
         if !hit {
             let idx = self.maps.partition_point(|m| m.base <= addr).checked_sub(1)?;
@@ -224,9 +258,16 @@ impl Bus {
             }
             self.last = idx;
         }
-        Some(&mut self.maps[self.last])
+        Some(self.last)
     }
 
+    #[inline]
+    fn find(&mut self, addr: u32) -> Option<&mut Mapping> {
+        let idx = self.find_idx(addr)?;
+        Some(&mut self.maps[idx])
+    }
+
+    #[inline]
     pub fn read(&mut self, ctx: &mut DeviceCtx, addr: u32, size: u32) -> u32 {
         if let Some((word, bit)) = bitband_target(addr) {
             return (self.read_aligned(ctx, word, 4) >> bit) & 1;
@@ -238,6 +279,7 @@ impl Bus {
         self.read_aligned(ctx, addr, size)
     }
 
+    #[inline]
     pub fn write(&mut self, ctx: &mut DeviceCtx, addr: u32, size: u32, value: u32) {
         if let Some((word, bit)) = bitband_target(addr) {
             // Read-modify-write of the containing word.
@@ -256,12 +298,15 @@ impl Bus {
         self.write_aligned(ctx, addr, size, value);
     }
 
+    #[inline]
     fn read_aligned(&mut self, ctx: &mut DeviceCtx, addr: u32, size: u32) -> u32 {
         if let Some(m) = self.find(addr) {
             let off = addr - m.base;
             let v = m.dev.read(ctx, off, size);
-            let ev = m.dev.next_event();
-            self.note_access_event(ev);
+            if m.active {
+                let ev = m.dev.next_event();
+                self.note_access_event(ev);
+            }
             return v;
         }
         if self.warned.insert(addr) {
@@ -270,8 +315,14 @@ impl Bus {
         0
     }
 
+    #[inline]
     fn write_aligned(&mut self, ctx: &mut DeviceCtx, addr: u32, size: u32, value: u32) {
-        if let Some(m) = self.find(addr) {
+        if let Some(idx) = self.find_idx(addr) {
+            let m = &mut self.maps[idx];
+            if !m.active && m.dev.has_time_events() {
+                m.active = true;
+                self.timed.push(idx);
+            }
             let off = addr - m.base;
             m.dev.write(ctx, off, size, value);
             let ev = m.dev.next_event();
@@ -310,8 +361,8 @@ impl Bus {
     }
 
     pub fn update(&mut self, ctx: &mut DeviceCtx) {
-        for m in &mut self.maps {
-            m.dev.update(ctx);
+        for &i in &self.timed {
+            self.maps[i].dev.update(ctx);
         }
         for d in &mut self.devices {
             d.update(ctx);
@@ -351,13 +402,29 @@ impl Bus {
     }
 
     pub fn next_event(&self) -> Option<u64> {
-        self.maps.iter().map(|m| &m.dev).chain(&self.devices).filter_map(|d| d.next_event()).min()
+        let mut best: Option<u64> = None;
+        for &i in &self.timed {
+            if let Some(t) = self.maps[i].dev.next_event() {
+                best = Some(best.map_or(t, |b| b.min(t)));
+            }
+        }
+        for d in &self.devices {
+            if let Some(t) = d.next_event() {
+                best = Some(best.map_or(t, |b| b.min(t)));
+            }
+        }
+        best
     }
 
     pub fn reset(&mut self, kind: ResetKind) {
-        for d in self.maps.iter_mut().map(|m| &mut m.dev).chain(&mut self.devices) {
+        for m in &mut self.maps {
+            m.dev.system_reset(kind);
+            m.active = m.dev.has_time_events() && !m.dev.idle_until_written();
+        }
+        for d in &mut self.devices {
             d.system_reset(kind);
         }
+        self.rebuild_timed();
     }
 }
 
@@ -367,6 +434,7 @@ const BITBAND_ALIAS_SIZE: u32 = 0x0200_0000;
 
 /// Maps a bit-band alias address to (word address in the bit-band region, bit).
 /// Every alias word stands for one bit: alias = base + byte_offset * 32 + bit * 4.
+#[inline]
 pub fn bitband_target(addr: u32) -> Option<(u32, u32)> {
     let off = addr.checked_sub(PERIPH_BITBAND_ALIAS).filter(|&o| o < BITBAND_ALIAS_SIZE)?;
     let byte = PERIPH_BITBAND_REGION + off / 32;

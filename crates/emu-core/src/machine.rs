@@ -179,6 +179,9 @@ pub struct System {
     synced_at: u64,
     /// DMA controllers, if the MCU has any, and the memory they access.
     master: Option<Box<dyn BusMaster>>,
+    /// Fast-path active flags from `master.active_flags()`.
+    master_flags: [Option<Rc<Cell<bool>>>; 2],
+    has_master_flags: bool,
     ram: Ram,
     config: MachineConfig,
     /// The block hook looks at devices once the cycle counter reaches this
@@ -408,7 +411,8 @@ impl System {
 
     /// Brings SysTick and the peripherals up to the current cycle.
     fn sync_devices(&mut self) {
-        let bus_event = self.bus.next_event();
+        let bus_event =
+            if self.idle_skipping && (self.idle.clean || self.idle.delay.clean) { self.bus.next_event() } else { None };
         self.sync_devices_with(bus_event);
     }
 
@@ -432,7 +436,20 @@ impl System {
     }
 
     /// Lets the DMA make the transfers that peripherals request.
+    #[inline]
     fn service_master(&mut self) {
+        if self.has_master_flags {
+            let active = self.master_flags[0].as_ref().is_some_and(|f| f.get())
+                || self.master_flags[1].as_ref().is_some_and(|f| f.get());
+            if !active {
+                return;
+            }
+        }
+        self.service_master_slow();
+    }
+
+    #[cold]
+    fn service_master_slow(&mut self) {
         // a transfer may make the next one due (e.g. reading an ADC result)
         for _ in 0..64 {
             let Some(master) = self.master.as_mut() else { return };
@@ -539,9 +556,13 @@ impl System {
         let (mut ctx, bus) = self.ctx();
         let value = bus.read(&mut ctx, addr, size);
         self.service_master();
-        let now = self.clock.cycles();
-        let until = self.bus.read_stable_until(addr, &self.clock);
-        self.idle.note_read(until, now);
+        if self.idle_skipping && self.idle.clean {
+            let now = self.clock.cycles();
+            let until = self.bus.read_stable_until(addr, &self.clock);
+            self.idle.note_read(until, now);
+        } else {
+            self.idle.delay.clean = false;
+        }
         self.clip_slice_to_events();
         self.note_end_run_signals();
         value
@@ -1536,6 +1557,8 @@ impl Machine {
             mmio_shift: 0,
             synced_at: u64::MAX,
             master: None,
+            master_flags: [None, None],
+            has_master_flags: false,
             ram: Ram::default(),
             config: config.clone(),
             slice_end: 0,
@@ -2393,7 +2416,12 @@ impl Machine {
 
     /// Adds a second bus master (DMA controllers) that peripherals' requests wake.
     pub fn set_bus_master(&mut self, master: Box<dyn BusMaster>) {
-        self.uc.get_data_mut().master = Some(master);
+        let flags = master.active_flags();
+        let has_flags = flags[0].is_some() || flags[1].is_some();
+        let sys = self.uc.get_data_mut();
+        sys.master = Some(master);
+        sys.master_flags = flags;
+        sys.has_master_flags = has_flags;
     }
 
     /// Resets the core and the system peripherals (memory contents are kept),

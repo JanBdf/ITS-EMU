@@ -2,7 +2,7 @@
 //! watch pins through the GPIO bank and take part in the machine's time
 //! keeping as a device without registers.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use emu_core::bus::ResetKind;
@@ -22,7 +22,17 @@ pub trait PinDevice {
 pub type SharedDevices = Rc<RefCell<Vec<Rc<RefCell<dyn PinDevice>>>>>;
 
 /// The devices as one [`Peripheral`] for [`emu_core::Bus::attach_device`].
-pub struct DeviceHub(pub SharedDevices);
+pub struct DeviceHub {
+    devices: SharedDevices,
+    contacts_pending: Rc<Cell<bool>>,
+    has_extra: Rc<Cell<bool>>,
+}
+
+impl DeviceHub {
+    pub fn new(devices: SharedDevices, contacts_pending: Rc<Cell<bool>>, has_extra: Rc<Cell<bool>>) -> Self {
+        Self { devices, contacts_pending, has_extra }
+    }
+}
 
 impl Peripheral for DeviceHub {
     fn name(&self) -> &str {
@@ -36,17 +46,23 @@ impl Peripheral for DeviceHub {
     fn write(&mut self, _ctx: &mut DeviceCtx, _offset: u32, _size: u32, _value: u32) {}
 
     fn update(&mut self, ctx: &mut DeviceCtx) {
-        for d in self.0.borrow().iter() {
+        if !self.has_extra.get() && !self.contacts_pending.get() {
+            return;
+        }
+        for d in self.devices.borrow().iter() {
             d.borrow_mut().update(ctx);
         }
     }
 
     fn next_event(&self) -> Option<u64> {
-        self.0.borrow().iter().filter_map(|d| d.borrow().next_event()).min()
+        if !self.has_extra.get() && !self.contacts_pending.get() {
+            return None;
+        }
+        self.devices.borrow().iter().filter_map(|d| d.borrow().next_event()).min()
     }
 
     fn system_reset(&mut self, _kind: ResetKind) {
-        for d in self.0.borrow().iter() {
+        for d in self.devices.borrow().iter() {
             d.borrow_mut().mcu_reset();
         }
     }
@@ -100,11 +116,23 @@ pub struct Contacts {
     /// Scheduled edges: (cycle, port, pin, level), unsorted.
     edges: Vec<(u64, usize, u32, Option<bool>)>,
     rng: u32,
+    pending: Rc<Cell<bool>>,
 }
 
 impl Contacts {
     pub fn new(gpio: SharedGpio) -> Self {
-        Self { gpio, bounce: false, requests: Vec::new(), edges: Vec::new(), rng: 0x9E37_79B9 }
+        Self {
+            gpio,
+            bounce: false,
+            requests: Vec::new(),
+            edges: Vec::new(),
+            rng: 0x9E37_79B9,
+            pending: Rc::new(Cell::new(false)),
+        }
+    }
+
+    pub fn pending_flag(&self) -> Rc<Cell<bool>> {
+        self.pending.clone()
     }
 
     fn next(&mut self) -> u32 {
@@ -130,6 +158,7 @@ impl Contacts {
             return;
         }
         self.requests.push((port, pin, level, how));
+        self.pending.set(true);
     }
 
     /// Schedules the edges of a transition from `old` to `level` at cycle
@@ -149,6 +178,7 @@ impl Contacts {
         self.edges.retain(|e| (e.1, e.2) != (port, pin));
         let mut t = at;
         self.edges.push((t, port, pin, level));
+        self.pending.set(true);
         let n = if self.next() % 1000 < how.per_mille { 1 + self.next() % how.max_glitches } else { 0 };
         for _ in 0..n {
             // the contacts separate again for a short moment
@@ -162,6 +192,9 @@ impl Contacts {
 
 impl PinDevice for Contacts {
     fn update(&mut self, ctx: &mut DeviceCtx) {
+        if self.requests.is_empty() && self.edges.is_empty() {
+            return;
+        }
         let now = ctx.now();
         for (port, pin, level, how) in std::mem::take(&mut self.requests) {
             let old = self.gpio.borrow().ports[port].driven(pin);
@@ -180,6 +213,7 @@ impl PinDevice for Contacts {
             i += 1;
         }
         self.edges.drain(..i);
+        self.pending.set(!self.edges.is_empty());
     }
 
     fn next_event(&self) -> Option<u64> {
