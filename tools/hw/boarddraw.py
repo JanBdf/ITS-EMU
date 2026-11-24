@@ -1369,7 +1369,7 @@ def nucleo():
                                           rect_stroke(271.5, 123.0, 292.4, 155.8, '#a9aaa8', 0.5, 0),
                                           nt(281.0, 139.4, '2021', 2.6, 90, '#a8a294')])))
     # CN14 RJ45 (opening to the left): top of the shield with 45° chamfered corners and dark interior in the latch notch
-    n0, n1, depth, ch = 230.0, 247.7, 18.0, 3.2
+    n0, n1, depth, ch = 230.0, 247.7, 18.0, 1.2
     shell = (f'M{255.5 + ch},203.2 H{322.5 - ch} L322.5,{203.2 + ch} V{274.5 - ch} L{322.5 - ch},274.5 '
              f'H{255.5 + ch} L255.5,{274.5 - ch} V{n1} H{255.5 + depth} V{n0} H255.5 V{203.2 + ch} Z')
     # four solder pins visible along the right edge of the RJ45 shield (031724)
