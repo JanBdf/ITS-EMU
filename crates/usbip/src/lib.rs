@@ -18,7 +18,10 @@ use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 /// Default USB/IP port (`usbipd`).
 pub const DEFAULT_PORT: u16 = 3240;
@@ -166,6 +169,8 @@ pub struct UsbipServer {
     /// Connections that have not imported a device (yet).
     others: Vec<(u64, TcpStream)>,
     ports: Vec<Port>,
+    stop: Arc<AtomicBool>,
+    accept_thread: Option<JoinHandle<()>>,
 }
 
 impl UsbipServer {
@@ -175,10 +180,12 @@ impl UsbipServer {
         let listener = TcpListener::bind(addr)?;
         let local = listener.local_addr()?;
         let (tx, events) = channel();
-        std::thread::Builder::new().name("usbip-accept".into()).spawn(move || {
-            accept_loop(listener, tx, wake);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_accept = Arc::clone(&stop);
+        let accept_thread = std::thread::Builder::new().name("usbip-accept".into()).spawn(move || {
+            accept_loop(listener, tx, wake, stop_accept);
         })?;
-        Ok(Self { local, events, others: Vec::new(), ports: Vec::new() })
+        Ok(Self { local, events, others: Vec::new(), ports: Vec::new(), stop, accept_thread: Some(accept_thread) })
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -428,6 +435,16 @@ fn send_attached(a: &mut Attached, msg: &[u8]) {
 
 impl Drop for UsbipServer {
     fn drop(&mut self) {
+        // Stop the accept thread and wait for it to drop the listener so the
+        // port can be bound again immediately.
+        self.stop.store(true, Ordering::Release);
+        let woke = match TcpStream::connect_timeout(&connect_addr(self.local), Duration::from_millis(200)) {
+            Ok(_) => true,
+            Err(e) => e.kind() == ErrorKind::ConnectionRefused,
+        };
+        if woke && let Some(t) = self.accept_thread.take() {
+            let _ = t.join();
+        }
         // Ends the reader threads; the kernel sees the devices unplugged.
         for a in self.ports.iter().filter_map(|p| p.attached.as_ref()) {
             let _ = a.stream.shutdown(Shutdown::Both);
@@ -435,6 +452,19 @@ impl Drop for UsbipServer {
         for (_, s) in &self.others {
             let _ = s.shutdown(Shutdown::Both);
         }
+        for ev in self.events.try_iter() {
+            if let Event::Connected(_, s) = ev {
+                let _ = s.shutdown(Shutdown::Both);
+            }
+        }
+    }
+}
+
+fn connect_addr(local: SocketAddr) -> SocketAddr {
+    match local {
+        SocketAddr::V4(a) if a.ip().is_unspecified() => SocketAddr::from(([127, 0, 0, 1], a.port())),
+        SocketAddr::V6(a) if a.ip().is_unspecified() => SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], a.port())),
+        a => a,
     }
 }
 
@@ -447,9 +477,12 @@ fn fmt_peer(peer: Option<SocketAddr>) -> String {
     peer.map_or_else(|| "?".to_owned(), |p| p.to_string())
 }
 
-fn accept_loop(listener: TcpListener, tx: Sender<Event>, wake: Arc<dyn Fn() + Send + Sync>) {
+fn accept_loop(listener: TcpListener, tx: Sender<Event>, wake: Arc<dyn Fn() + Send + Sync>, stop: Arc<AtomicBool>) {
     let mut next_id = 0u64;
     for stream in listener.incoming() {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
         let stream = match stream {
             Ok(s) => s,
             Err(e) => {

@@ -19,7 +19,10 @@
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use emu_core::Machine;
 use usbip::{Reply, UsbDevice};
@@ -58,6 +61,8 @@ pub(crate) struct TcpServer {
     owner: Option<u64>,
     /// An IN request of the owner waiting for data.
     pending_in: Option<usize>,
+    stop: Arc<AtomicBool>,
+    accept_thread: Option<JoinHandle<()>>,
 }
 
 impl TcpServer {
@@ -65,8 +70,20 @@ impl TcpServer {
         let listener = TcpListener::bind(addr)?;
         let local = listener.local_addr()?;
         let (tx, events) = channel();
-        std::thread::Builder::new().name("stlink-tcp".into()).spawn(move || accept_loop(listener, tx, wake))?;
-        Ok(Self { local, events, conns: Vec::new(), owner: None, pending_in: None })
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_accept = Arc::clone(&stop);
+        let accept_thread = std::thread::Builder::new()
+            .name("stlink-tcp".into())
+            .spawn(move || accept_loop(listener, tx, wake, stop_accept))?;
+        Ok(Self {
+            local,
+            events,
+            conns: Vec::new(),
+            owner: None,
+            pending_in: None,
+            stop,
+            accept_thread: Some(accept_thread),
+        })
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -158,16 +175,42 @@ impl TcpServer {
 
 impl Drop for TcpServer {
     fn drop(&mut self) {
-        // ends the reader threads (the accept thread ends with the next connection)
+        // Stop the accept thread and wait for it to drop the listener so the
+        // port can be bound again immediately.
+        self.stop.store(true, Ordering::Release);
+        let woke = match TcpStream::connect_timeout(&connect_addr(self.local), Duration::from_millis(200)) {
+            Ok(_) => true,
+            Err(e) => e.kind() == ErrorKind::ConnectionRefused,
+        };
+        if woke && let Some(t) = self.accept_thread.take() {
+            let _ = t.join();
+        }
+        // ends the reader threads
         for (_, s) in &self.conns {
             let _ = s.shutdown(Shutdown::Both);
+        }
+        for ev in self.events.try_iter() {
+            if let Event::Connected(_, s) = ev {
+                let _ = s.shutdown(Shutdown::Both);
+            }
         }
     }
 }
 
-fn accept_loop(listener: TcpListener, tx: Sender<Event>, wake: Arc<dyn Fn() + Send + Sync>) {
+fn connect_addr(local: SocketAddr) -> SocketAddr {
+    match local {
+        SocketAddr::V4(a) if a.ip().is_unspecified() => SocketAddr::from(([127, 0, 0, 1], a.port())),
+        SocketAddr::V6(a) if a.ip().is_unspecified() => SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], a.port())),
+        a => a,
+    }
+}
+
+fn accept_loop(listener: TcpListener, tx: Sender<Event>, wake: Arc<dyn Fn() + Send + Sync>, stop: Arc<AtomicBool>) {
     let mut next_id = 0u64;
     for stream in listener.incoming() {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
         let stream = match stream {
             Ok(s) => s,
             Err(e) => {
@@ -293,5 +336,14 @@ mod tests {
         }
         request(&mut b, OP_OPEN, &[]);
         assert_eq!(reply(&mut server, &mut dev, &mut m, &mut b).0, STATUS_OK);
+    }
+
+    #[test]
+    fn rebind_after_drop() {
+        let server = TcpServer::bind("127.0.0.1:0", Arc::new(|| {})).unwrap();
+        let addr = server.local_addr();
+        drop(server);
+        let server2 = TcpServer::bind(addr, Arc::new(|| {})).expect("rebind after drop");
+        assert_eq!(server2.local_addr(), addr);
     }
 }

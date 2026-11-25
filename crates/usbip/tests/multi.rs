@@ -232,3 +232,12 @@ fn each_device_serves_its_own_connection() {
     assert_eq!(rig.server.busids().collect::<Vec<_>>(), vec!["1-1"]);
     assert_eq!(rig.server.free_busid(), "1-2");
 }
+
+#[test]
+fn rebind_after_drop() {
+    let server = UsbipServer::bind("127.0.0.1:0", Arc::new(|| {})).unwrap();
+    let addr = server.local_addr();
+    drop(server);
+    let server2 = UsbipServer::bind(addr, Arc::new(|| {})).expect("rebind after drop");
+    assert_eq!(server2.local_addr(), addr);
+}
