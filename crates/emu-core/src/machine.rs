@@ -17,7 +17,7 @@ use crate::debug::{self, CoreDebug, DebugAction, DebugIds};
 use crate::elf::ElfImage;
 use crate::exception::{self, AccessError, CoreAccess, CoreReg, ExceptionError};
 use crate::nvic::{self, Nvic};
-use crate::scs::{self, PPB_BASE, PPB_SIZE, Scs, ScsAction};
+use crate::scs::{self, MpuPerms, PPB_BASE, PPB_SIZE, Scs, ScsAction};
 use crate::timing::{self, BlockTiming, DivSite};
 
 mod delay;
@@ -181,6 +181,7 @@ pub struct System {
     flash_restore: Vec<(u32, [u8; 4], u8)>,
     /// FPB/DWT comparators changed (by software): re-apply before the next run.
     points_dirty: bool,
+    mpu_dirty: bool,
     /// The core locked up (DHCSR.S_LOCKUP).
     locked_up: bool,
     /// The reset pin is held low (by the debug probe).
@@ -1465,6 +1466,7 @@ impl Machine {
             || sys.flash_dirty.is_some()
             || !sys.flash_restore.is_empty()
             || sys.points_dirty
+            || sys.mpu_dirty
             || sys.run_points
             || sys.reset_requested.is_some()
             || sys.stop.is_some()
@@ -1568,6 +1570,7 @@ impl Machine {
             flash_dirty: None,
             flash_restore: Vec::new(),
             points_dirty: false,
+            mpu_dirty: false,
             locked_up: false,
             reset_held: false,
             mmio_shift: 0,
@@ -1715,6 +1718,10 @@ impl Machine {
                 match sys.scs.write(&mut sys.nvic, now, off as u32, size as u32, value as u32) {
                     ScsAction::None => {}
                     ScsAction::CheckPending => sys.request_stop(),
+                    ScsAction::FlushTlb => {
+                        sys.mpu_dirty = true;
+                        let _ = uc.ctl_flush_tlb();
+                    }
                     ScsAction::SystemReset => {
                         sys.reset_requested = Some(ResetKind::Software);
                         sys.request_stop();
@@ -1780,10 +1787,42 @@ impl Machine {
         // engine, which calls `first_write` only while it runs.
         unsafe { uc_its_track_writes(uc.get_handle().cast(), Some(first_write), sys.cast()) };
 
-        // Page rights come from `page_perms` instead of the CPU's MPU model
-        // (the PPB, where the MPU registers are, is modelled here anyway).
-        uc.add_tlb_hook(1, 0, |uc, addr, _ty| {
-            Some(TlbEntry { paddr: addr, perms: uc.get_data().page_perms(addr as u32) })
+        // Page rights come from `page_perms` (and the MPU when enabled).
+        uc.add_tlb_hook(1, 0, |uc, addr, ty| {
+            let a = addr as u32;
+            let default_prot = uc.get_data().page_perms(a);
+            let perms = if uc.get_data().scs.mpu_enabled() {
+                let (privileged, in_hfnmi) = Self::mpu_state(uc);
+                let default = MpuPerms {
+                    read: default_prot.0 & Prot::READ.0 != 0,
+                    write: default_prot.0 & Prot::WRITE.0 != 0,
+                    exec: default_prot.0 & Prot::EXEC.0 != 0,
+                };
+                let eff = uc.get_data().scs.mpu_page_perms(a & !0x3FF, default, privileged, in_hfnmi);
+                let mut p = Prot::NONE;
+                if eff.read {
+                    p |= Prot::READ;
+                }
+                if eff.write {
+                    p |= Prot::WRITE;
+                }
+                if eff.exec && default.exec {
+                    p |= Prot::EXEC;
+                }
+                let mpu_denied = match ty {
+                    MemType::READ => !eff.read,
+                    MemType::WRITE => !eff.write,
+                    MemType::FETCH => !eff.exec,
+                    _ => false,
+                };
+                if mpu_denied {
+                    uc.get_data_mut().last_invalid = Some((a, ty == MemType::WRITE, ty == MemType::FETCH));
+                }
+                p
+            } else {
+                default_prot
+            };
+            Some(TlbEntry { paddr: addr, perms })
         })?;
         uc.ctl_set_tlb_type(TlbType::VIRTUAL)?;
 
@@ -1791,6 +1830,7 @@ impl Machine {
             HookType::MEM_READ_UNMAPPED.0
                 | HookType::MEM_WRITE_UNMAPPED.0
                 | HookType::MEM_FETCH_UNMAPPED.0
+                | HookType::MEM_READ_PROT.0
                 | HookType::MEM_WRITE_PROT.0
                 | HookType::MEM_FETCH_PROT.0,
         );
@@ -1799,45 +1839,51 @@ impl Machine {
         // except instruction fetches (`make_ram_executable`).
         for (begin, end) in gaps(&mem.ram) {
             uc.add_mem_hook(invalid, begin, end, |uc, ty, addr, size, value| {
+                let a = addr as u32;
                 if ty == MemType::WRITE_PROT {
-                    // Flash programming: Unicorn completes the store if the
-                    // flash controller accepts it.
-                    let sys = uc.get_data_mut();
-                    let mem = &sys.config.memory;
-                    let a = addr as u32;
-                    let off = if a.wrapping_sub(mem.flash_base) < mem.flash_size {
-                        Some(a - mem.flash_base)
-                    } else if mem.flash_alias_at_zero && a < mem.flash_size {
-                        Some(a)
-                    } else {
-                        None
+                    let mpu_denies = uc.get_data().scs.mpu_enabled() && {
+                        let (privileged, in_hfnmi) = Self::mpu_state(uc);
+                        uc.get_data().scs.mpu_access(a, privileged, in_hfnmi).is_some_and(|p| !p.write)
                     };
-                    if let Some(off) = off {
-                        match sys.flash_store(off, size as u32, value as u32) {
-                            FlashStore::Program => return true,
-                            FlashStore::Ignore => {
-                                // Unicorn writes `value` into the backing slice when the
-                                // hook returns `true`; save the original bytes and stop at
-                                // the end of the block so `take_flash_dirty` restores them.
-                                let base = sys.config.memory.flash_base;
-                                let n = size.min(4);
-                                if let Some(flash) = sys.ram.region_mut(base)
-                                    && (off as usize) + n <= flash.len()
-                                {
-                                    let mut orig = [0u8; 4];
-                                    orig[..n].copy_from_slice(&flash[off as usize..off as usize + n]);
-                                    sys.flash_restore.push((off, orig, n as u8));
+                    // Flash programming: Unicorn completes the store if the
+                    // flash controller accepts it and the MPU allows writes.
+                    if !mpu_denies {
+                        let sys = uc.get_data_mut();
+                        let mem = &sys.config.memory;
+                        let off = if a.wrapping_sub(mem.flash_base) < mem.flash_size {
+                            Some(a - mem.flash_base)
+                        } else if mem.flash_alias_at_zero && a < mem.flash_size {
+                            Some(a)
+                        } else {
+                            None
+                        };
+                        if let Some(off) = off {
+                            match sys.flash_store(off, size as u32, value as u32) {
+                                FlashStore::Program => return true,
+                                FlashStore::Ignore => {
+                                    // Unicorn writes `value` into the backing slice when the
+                                    // hook returns `true`; save the original bytes and stop at
+                                    // the end of the block so `take_flash_dirty` restores them.
+                                    let base = sys.config.memory.flash_base;
+                                    let n = size.min(4);
+                                    if let Some(flash) = sys.ram.region_mut(base)
+                                        && (off as usize) + n <= flash.len()
+                                    {
+                                        let mut orig = [0u8; 4];
+                                        orig[..n].copy_from_slice(&flash[off as usize..off as usize + n]);
+                                        sys.flash_restore.push((off, orig, n as u8));
+                                    }
+                                    sys.request_stop();
+                                    return true;
                                 }
-                                sys.request_stop();
-                                return true;
+                                FlashStore::Fault => {}
                             }
-                            FlashStore::Fault => {}
                         }
                     }
                 }
                 let is_write = matches!(ty, MemType::WRITE_UNMAPPED | MemType::WRITE_PROT);
                 let is_fetch = matches!(ty, MemType::FETCH_UNMAPPED | MemType::FETCH_PROT);
-                uc.get_data_mut().last_invalid = Some((addr as u32, is_write, is_fetch));
+                uc.get_data_mut().last_invalid = Some((a, is_write, is_fetch));
                 false
             })?;
         }
@@ -2202,8 +2248,12 @@ impl Machine {
                 return Ok(());
             }
             let now = sys.clock.cycles();
-            if sys.scs.write(&mut sys.nvic, now, off, size, value) == ScsAction::SystemReset {
-                self.reset_with(ResetKind::Software);
+            match sys.scs.write(&mut sys.nvic, now, off, size, value) {
+                ScsAction::SystemReset => self.reset_with(ResetKind::Software),
+                ScsAction::FlushTlb => {
+                    let _ = self.uc.ctl_flush_tlb();
+                }
+                ScsAction::None | ScsAction::CheckPending => {}
             }
             return Ok(());
         }
@@ -2492,6 +2542,7 @@ impl Machine {
         sys.watch_hit = None;
         sys.reset_requested = None;
         sys.last_invalid = None;
+        sys.mpu_dirty = false;
         sys.locked_up = false;
         sys.asleep = false;
         sys.ended_for_wake = false;
@@ -2513,6 +2564,7 @@ impl Machine {
         core.set_reg(CoreReg::Msp, msp & !3);
         core.set_reg(CoreReg::Lr, 0xFFFF_FFFF);
         core.set_reg(CoreReg::Pc, reset_vector | 1);
+        let _ = self.uc.ctl_flush_tlb();
     }
 
     /// Stops execution before the instruction at `addr` (debugger breakpoint).
@@ -2705,6 +2757,9 @@ impl Machine {
             self.take_flash_dirty();
             if self.uc.get_data().points_dirty {
                 self.update_debug_points();
+            }
+            if std::mem::take(&mut self.uc.get_data_mut().mpu_dirty) {
+                let _ = self.uc.ctl_flush_tlb();
             }
             if let Some(kind) = self.uc.get_data().reset_requested {
                 self.reset_with(kind);
@@ -3010,13 +3065,76 @@ impl Machine {
         err == uc_error::EXCEPTION && self.uc.get_data().last_invalid.is_none() && self.make_ram_executable(self.pc())
     }
 
+    /// `(privileged, in_hfnmi)` for MPU access checks.
+    fn mpu_state(uc: &Unicorn<System>) -> (bool, bool) {
+        let sys = uc.get_data();
+        let in_handler = (uc.reg_read(RegisterARM::XPSR).unwrap_or(0) & 0x1FF) != 0;
+        let control = uc.reg_read(RegisterARM::CONTROL).unwrap_or(0) as u32;
+        let privileged = in_handler || (control & 1) == 0;
+        let faultmask = uc.reg_read(RegisterARM::FAULTMASK).unwrap_or(0) as u32;
+        let in_hfnmi = sys.nvic.is_active(nvic::HARD_FAULT) || sys.nvic.is_active(nvic::NMI) || (faultmask & 1) != 0;
+        (privileged, in_hfnmi)
+    }
+
     /// Unicorn aborted because of an invalid memory access or instruction.
     fn on_emu_error(&mut self, err: uc_error) {
-        if self.fetch_from_new_ram_code(err) {
-            return;
-        }
         let pc = self.pc();
         let invalid = self.uc.get_data_mut().last_invalid.take();
+
+        // Check MPU violations first so an execute-never RAM page is not made
+        // executable by `fetch_from_new_ram_code`, and so MemManage is raised
+        // instead of BusFault.
+        if self.uc.get_data().scs.mpu_enabled() {
+            let (privileged, in_hfnmi) = Self::mpu_state(&self.uc);
+            if self.uc.get_data().scs.mpu_active(in_hfnmi) {
+                if let Some((addr, is_write, is_fetch)) = invalid {
+                    let denied = self.uc.get_data().scs.mpu_access(addr, privileged, in_hfnmi).is_some_and(|p| {
+                        if is_fetch {
+                            !p.exec
+                        } else if is_write {
+                            !p.write
+                        } else {
+                            !p.read
+                        }
+                    });
+                    if denied {
+                        let sys = self.uc.get_data_mut();
+                        if is_fetch {
+                            sys.scs.cfsr |= scs::CFSR_IACCVIOL | scs::CFSR_MMARVALID;
+                        } else {
+                            sys.scs.cfsr |= scs::CFSR_DACCVIOL | scs::CFSR_MMARVALID;
+                        }
+                        sys.scs.mmfar = addr;
+                        log::debug!("MPU fault: access to {addr:#010x} at pc {pc:#010x}");
+                        Self::raise_fault(&mut self.uc, nvic::MEM_MANAGE, pc);
+                        let _ = self.uc.ctl_flush_tlb();
+                        return;
+                    }
+                } else if matches!(err, uc_error::FETCH_PROT | uc_error::EXCEPTION)
+                    && self.uc.get_data().scs.mpu_access(pc, privileged, in_hfnmi).is_some_and(|p| !p.exec)
+                {
+                    let sys = self.uc.get_data_mut();
+                    sys.scs.cfsr |= scs::CFSR_IACCVIOL | scs::CFSR_MMARVALID;
+                    sys.scs.mmfar = pc;
+                    log::debug!("MPU fetch fault at pc {pc:#010x}");
+                    Self::raise_fault(&mut self.uc, nvic::MEM_MANAGE, pc);
+                    let _ = self.uc.ctl_flush_tlb();
+                    return;
+                } else if matches!(err, uc_error::READ_PROT | uc_error::WRITE_PROT) {
+                    // Protected RAM page (no mem hook over RAM, so address is not captured).
+                    self.uc.get_data_mut().scs.cfsr |= scs::CFSR_DACCVIOL;
+                    log::debug!("MPU data fault on RAM at pc {pc:#010x}");
+                    Self::raise_fault(&mut self.uc, nvic::MEM_MANAGE, pc);
+                    let _ = self.uc.ctl_flush_tlb();
+                    return;
+                }
+            }
+        }
+
+        // Restore `last_invalid` for `fetch_from_new_ram_code` check.
+        if invalid.is_none() && self.fetch_from_new_ram_code(err) {
+            return;
+        }
         // An instruction fetch the TLB hook (`page_perms`) refused outside
         // RAM: an execute-never region of the default memory map, which the
         // CPU's own TLB reported as a prefetch abort.

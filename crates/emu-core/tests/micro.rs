@@ -419,3 +419,36 @@ fn idle_detection_sees_stores_of_a_loop() {
     assert_eq!(count, 200_000);
     assert_eq!(run(false), (cycles, count));
 }
+
+/// `its_brd_lib`'s `MPU_EnableNullPointerProtection()`: Region 0 covers
+/// `0x0000_0000..0x0000_0020` with AP=0 (no access) and `PRIVDEFENA=1`.
+/// Dereferencing NULL must fault (MemManage escalating to HardFault) with
+/// `DACCVIOL | MMARVALID` and `MMFAR == 0`, while normal flash/RAM still works.
+#[test]
+fn mpu_null_pointer_protection_faults() {
+    let mut m = boot_thumb(
+        &[
+            0x4805, // ldr r0, =0xE000_ED94 (MPU_CTRL)
+            0x2100, // movs r1, #0
+            0x6001, // str r1, [r0, #0]     ; MPU->CTRL = 0
+            0x6041, // str r1, [r0, #4]     ; MPU->RNR  = 0
+            0x6081, // str r1, [r0, #8]     ; MPU->RBAR = 0x0000_0000
+            0x2209, // movs r2, #9          ; SIZE=4 (32B) | ENABLE=1, AP=0
+            0x60C2, // str r2, [r0, #12]    ; MPU->RASR = 0x09
+            0x2205, // movs r2, #5          ; ENABLE | PRIVDEFENA
+            0x6002, // str r2, [r0, #0]     ; MPU->CTRL = 5
+            0x680B, // ldr r3, [r1, #0]     ; dereference NULL -> fault!
+            0xBE01, // bkpt #1 (must not be reached)
+            0xBF00, // nop (align literal pool)
+        ],
+        &[0xE000_ED94],
+    );
+    // Point HardFault handler (vector 3) to a bkpt #2 at 0x0800_0080.
+    let handler: u32 = 0x0800_0080;
+    assert!(m.write_mem(0x0800_0000 + 3 * 4, &(handler | 1).to_le_bytes()));
+    assert!(m.write_mem(handler, &0xBE02u16.to_le_bytes()));
+    let stop = m.run(10_000);
+    assert_eq!(stop, StopReason::Breakpoint { pc: handler });
+    assert_eq!(m.read_u32(0xE000_ED28).unwrap() & 0xFF, 0x82, "CFSR MMFSR = DACCVIOL | MMARVALID");
+    assert_eq!(m.read_u32(0xE000_ED34).unwrap(), 0, "MMFAR == NULL");
+}
