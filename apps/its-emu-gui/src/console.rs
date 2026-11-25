@@ -247,23 +247,26 @@ impl Console {
                 }
             });
         });
-        let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-        let input_height = row * if narrow { 2.0 } else { 1.0 } + ui.spacing().item_spacing.y + 2.0;
-        self.show_text(ui, (ui.available_height() - input_height).max(20.0));
-        if narrow {
-            ui.horizontal(|ui| action.options_changed |= self.options(ui, false));
-            self.input_line(ui, &mut action);
-        } else {
-            ui.horizontal(|ui| {
-                // options right of the input line, which takes the rest
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    action.options_changed |= self.options(ui, true);
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        self.input_line(ui, &mut action);
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+            if narrow {
+                self.input_line(ui, &mut action);
+                ui.horizontal(|ui| action.options_changed |= self.options(ui, false));
+            } else {
+                ui.horizontal(|ui| {
+                    // options right of the input line, which takes the rest
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        action.options_changed |= self.options(ui, true);
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            self.input_line(ui, &mut action);
+                        });
                     });
                 });
+            }
+            let text_h = ui.available_height().max(20.0);
+            ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                self.show_text(ui, text_h);
             });
-        }
+        });
         action
     }
 
@@ -458,5 +461,153 @@ mod tests {
         c.received_bytes(b"\xFFx\r\ny", 3);
         assert_eq!(c.text(), "21.5 °C\n\u{FFFD}x\ny");
         assert_eq!(c.lines[1].at_ns, 3);
+    }
+
+    #[test]
+    fn bottom_panel_keeps_resized_height() {
+        for width in [1000.0, 500.0] {
+            let ctx = egui::Context::default();
+            let mut console = Console::new(LineEnding::Lf, false, false);
+            for i in 0..100 {
+                console.received(&format!("line {i}: hello world\n"));
+            }
+
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 800.0));
+            let mut show_console = true;
+            let mut run_frame = |events: Vec<egui::Event>, show: bool| -> egui::Rect {
+                let input = egui::RawInput { screen_rect: Some(screen), events, time: Some(0.0), ..Default::default() };
+                let mut panel_rect = egui::Rect::NOTHING;
+                let mut out = ctx.run_ui(input, |ui| {
+                    if show {
+                        panel_rect = egui::Panel::bottom("console")
+                            .resizable(true)
+                            .default_size(180.0)
+                            .min_size(80.0)
+                            .show(ui, |ui| console.show(ui))
+                            .response
+                            .rect;
+                    }
+                    egui::CentralPanel::default().show(ui, |_| {});
+                });
+                out.textures_delta.clear();
+                panel_rect
+            };
+
+            let r0 = run_frame(vec![], show_console);
+            let r1 = run_frame(vec![], show_console);
+            let r2 = run_frame(vec![], show_console);
+            assert!((r0.height() - 180.0).abs() < 1.0, "width={width}: initial {}", r0.height());
+            assert!((r1.height() - r0.height()).abs() < 0.5, "width={width}: frame 1 drifted to {}", r1.height());
+            assert!((r2.height() - r0.height()).abs() < 0.5, "width={width}: frame 2 drifted to {}", r2.height());
+
+            // Drag the top edge up to height = 300, then back down to height = 140
+            for target_h in [300.0_f32, 140.0] {
+                let current = run_frame(vec![], show_console);
+                let p_start = egui::pos2(width * 0.5, current.top());
+                let p_end = egui::pos2(width * 0.5, screen.bottom() - target_h);
+                let _ = run_frame(vec![egui::Event::PointerMoved(p_start)], show_console);
+                let _ = run_frame(
+                    vec![egui::Event::PointerButton {
+                        pos: p_start,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    show_console,
+                );
+                let _ = run_frame(vec![egui::Event::PointerMoved(p_end)], show_console);
+                let r_rel = run_frame(
+                    vec![egui::Event::PointerButton {
+                        pos: p_end,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                    show_console,
+                );
+                assert!(
+                    (r_rel.height() - target_h).abs() < 2.0,
+                    "width={width}: expected ~{target_h}, got {}",
+                    r_rel.height()
+                );
+                for frame in 0..10 {
+                    let h = run_frame(vec![], show_console).height();
+                    assert!(
+                        (h - r_rel.height()).abs() < 0.5,
+                        "width={width} target={target_h} frame={frame}: height drifted from {} to {h}",
+                        r_rel.height()
+                    );
+                }
+            }
+
+            // Hiding and showing again within the same session keeps the resized height
+            show_console = false;
+            for _ in 0..3 {
+                let _ = run_frame(vec![], show_console);
+            }
+            show_console = true;
+            let reopened = run_frame(vec![], show_console);
+            assert!(
+                (reopened.height() - 140.0).abs() < 2.0,
+                "width={width}: reopened height was {}",
+                reopened.height()
+            );
+        }
+    }
+
+    #[test]
+    fn right_panel_keeps_resized_width() {
+        let ctx = egui::Context::default();
+        let mut console = Console::new(LineEnding::Lf, false, false);
+        console.received("hello\nworld\n");
+
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let mut run_frame = |events: Vec<egui::Event>| -> egui::Rect {
+            let input = egui::RawInput { screen_rect: Some(screen), events, time: Some(0.0), ..Default::default() };
+            let mut panel_rect = egui::Rect::NOTHING;
+            let mut out = ctx.run_ui(input, |ui| {
+                panel_rect = egui::Panel::right("side")
+                    .resizable(true)
+                    .default_size(360.0)
+                    .min_size(240.0)
+                    .show(ui, |ui| console.show(ui))
+                    .response
+                    .rect;
+                egui::CentralPanel::default().show(ui, |_| {});
+            });
+            out.textures_delta.clear();
+            panel_rect
+        };
+
+        let r0 = run_frame(vec![]);
+        assert!((r0.width() - 360.0).abs() < 1.0, "initial width {}", r0.width());
+        for target_w in [480.0_f32, 320.0] {
+            let current = run_frame(vec![]);
+            let p_start = egui::pos2(current.left(), 400.0);
+            let p_end = egui::pos2(screen.right() - target_w, 400.0);
+            let _ = run_frame(vec![egui::Event::PointerMoved(p_start)]);
+            let _ = run_frame(vec![egui::Event::PointerButton {
+                pos: p_start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+            let _ = run_frame(vec![egui::Event::PointerMoved(p_end)]);
+            let r_rel = run_frame(vec![egui::Event::PointerButton {
+                pos: p_end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+            assert!((r_rel.width() - target_w).abs() < 2.0, "expected ~{target_w}, got {}", r_rel.width());
+            for frame in 0..10 {
+                let w = run_frame(vec![]).width();
+                assert!(
+                    (w - r_rel.width()).abs() < 0.5,
+                    "target={target_w} frame={frame}: width drifted from {} to {w}",
+                    r_rel.width()
+                );
+            }
+        }
     }
 }
