@@ -137,3 +137,39 @@ jobs:
           path: dist/*.dmg
           if-no-files-found: error
           retention-days: 14
+
+  # The Debian/Ubuntu package as release.yml builds it, verified on Ubuntu 26.04
+  # and kept as a workflow artifact.
+  deb-pkg:
+    name: Debian/Ubuntu package (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, os: ubuntu-24.04 }
+          - { arch: arm64, os: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: deb-pkg-${{ matrix.arch }}
+      - name: Build
+        run: packaging/deb/build.sh
+      - name: Verify install on Ubuntu 26.04
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" ubuntu:26.04 bash -euo pipefail -c '
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y /dist/*.deb
+            its-emu --version
+            its-emu-gui --version
+          '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: its-emu-deb-${{ matrix.arch }}
+          path: dist/*.deb
+          if-no-files-found: error
+          retention-days: 14

@@ -51,6 +51,20 @@ sudo pacman -U dist/its-emu-<version>-x86_64.pkg.tar.zst   # install or update
 sudo pacman -Rns its-emu                                   # remove
 ```
 
+## Debian / Ubuntu package
+
+`packaging/deb/build.sh` builds a `.deb` package of the checkout into `dist/`
+(for Ubuntu 24.04, Ubuntu 26.04 and Debian 13+; needs `dpkg-deb` and `zip`).
+It carries the same programs, desktop entry, VS Code `.vsix` extension
+(`/usr/share/its-emu/gdbtarget-nodebug.vsix`) and USB ST-LINK setup (`vhci-hcd`,
+polkit helper and udev rules) as the Arch package.
+
+```sh
+packaging/deb/build.sh
+sudo apt install ./dist/its-emu_<version>_<arch>.deb   # install or update
+sudo apt remove its-emu                                # remove
+```
+
 ## macOS app
 
 `packaging/macos/build.sh` builds *ITS-Board Emulator.app* for the host

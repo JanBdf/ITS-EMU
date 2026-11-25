@@ -1,0 +1,30 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    # USB/IP host driver for the emulated ST-LINK: loaded at boot from now on
+    # (modules-load.d), here for the running system.
+    if ! modprobe vhci-hcd 2>/dev/null; then
+      if [ ! -d "/usr/lib/modules/$(uname -r)" ] && [ ! -d "/lib/modules/$(uname -r)" ]; then
+        cat <<MSG
+its-emu: WARNING: the running kernel ($(uname -r)) was updated without a restart
+  since, its modules are gone. Restart the computer before using the emulator's
+  USB ST-LINK (the vhci-hcd module cannot be loaded until then).
+MSG
+      else
+        cat <<MSG
+its-emu: WARNING: cannot load the vhci-hcd kernel module (USB ST-LINK of the emulator).
+  On Ubuntu, make sure linux-modules-extra-$(uname -r) is installed.
+MSG
+      fi
+    fi
+    udevadm control --reload-rules 2>/dev/null || true
+    if command -v update-desktop-database >/dev/null 2>&1; then
+      update-desktop-database -q /usr/share/applications 2>/dev/null || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+      gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+    fi
+    ;;
+esac
