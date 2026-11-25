@@ -22,5 +22,6 @@ pub use debug::DebugIds;
 pub use elf::ElfImage;
 pub use exception::CoreReg;
 pub use machine::{
-    CpuModel, DebugFault, FlashController, Machine, MachineConfig, MachineError, MemoryMap, StopReason, WatchKind,
+    CpuModel, DebugFault, FlashController, FlashStore, Machine, MachineConfig, MachineError, MemoryMap, StopReason,
+    WatchKind,
 };

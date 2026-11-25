@@ -10,16 +10,14 @@
 //! measured 14.1 µs; BSY stays set that long.
 //!
 //! Deviations: programming bits that are not erased stores the new value
-//! (the cells would end up as old AND new); a store without PG or with a
-//! wrong size faults instead of only setting PGSERR/PGPERR; option bytes
-//! cannot be changed.
+//! (the cells would end up as old AND new); option bytes cannot be changed.
 
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 
 use emu_core::bus::{extract_read, merge_write};
-use emu_core::{Clock, DeviceCtx, FlashController, Peripheral};
+use emu_core::{Clock, DeviceCtx, FlashController, FlashStore, Peripheral};
 
 use crate::rcc::SharedClocks;
 
@@ -334,7 +332,7 @@ impl FlashProgrammer {
 }
 
 impl FlashController for FlashProgrammer {
-    fn store(&mut self, now: u64, offset: u32, size: u32, value: u32) -> bool {
+    fn store(&mut self, now: u64, offset: u32, size: u32, value: u32) -> FlashStore {
         let mut s = self.state.borrow_mut();
         s.settle(now);
         let error = if s.cr & CR_LOCK != 0 {
@@ -351,12 +349,12 @@ impl FlashController for FlashProgrammer {
         if let Some(e) = error {
             log::debug!("flash: store of {value:#x} ({size} bytes) at offset {offset:#x} refused (SR {e:#x})");
             s.sr |= e;
-            return false;
+            return FlashStore::Ignore;
         }
         // programming a byte, half word or word: 14.1 µs (measured)
         let cycles = u64::from(self.clocks.get().hclk) * PROGRAM_NS / 1_000_000_000;
         s.start(now, cycles.max(1));
-        true
+        FlashStore::Program
     }
 
     fn service(&mut self, now: u64, flash: &mut [u8]) -> Option<Range<u32>> {

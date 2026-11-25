@@ -152,3 +152,51 @@ fn code_programmed_into_flash_runs() {
     assert_eq!(a.call("ProgramPage", &[0x0800_1000, 1024, BUFFER]), 0);
     assert_eq!(call_flash(&mut a), 7);
 }
+
+#[test]
+fn stray_flash_write_is_ignored_without_fault() {
+    // On STM32F429, a store to flash while LOCK=1 or PG=0 sets WRPERR/PGSERR
+    // in FLASH_SR and leaves flash unchanged without raising a BusFault/HardFault.
+    let mut sim = Simulator::blank(None).unwrap();
+    let mut img = vec![0xFFu8; 0x90];
+    let put32 = |buf: &mut [u8], off: usize, v: u32| buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    let put16 = |buf: &mut [u8], off: usize, v: u16| buf[off..off + 2].copy_from_slice(&v.to_le_bytes());
+    put32(&mut img, 0x00, STACK_TOP);
+    put32(&mut img, 0x04, 0x0800_0041); // Reset
+    put32(&mut img, 0x0C, 0x0800_0061); // HardFault
+    // 0x0800_0040: STR r0, [r2]; ADDS r1, #1; BKPT #0
+    put16(&mut img, 0x40, 0x6010);
+    put16(&mut img, 0x42, 0x3101);
+    put16(&mut img, 0x44, 0xBE00);
+    // 0x0800_0060: HardFault -> BKPT #1
+    put16(&mut img, 0x60, 0xBE01);
+    // 0x0800_0080: sentinel word in flash
+    put32(&mut img, 0x80, 0x1234_5678);
+
+    sim.machine.load_bin(0x0800_0000, &img).unwrap();
+    sim.machine.reset();
+    sim.machine.set_reg(CoreReg::R(0), 0xDEAD_BEEF);
+    sim.machine.set_reg(CoreReg::R(1), 0);
+    sim.machine.set_reg(CoreReg::R(2), 0x0800_0080);
+
+    // 1. Flash locked: must not fault, must set WRPERR (bit 4), flash unchanged
+    assert_eq!(sim.machine.run(10_000), StopReason::Breakpoint { pc: 0x0800_0044 });
+    assert_eq!(sim.machine.reg(CoreReg::R(1)), 1);
+    let mut back = [0u8; 4];
+    assert!(sim.machine.read_mem(0x0800_0080, &mut back));
+    assert_eq!(u32::from_le_bytes(back), 0x1234_5678);
+    let sr = sim.machine.debug_read(0x4002_3C0C, 4).unwrap();
+    assert_ne!(sr & (1 << 4), 0, "expected WRPERR in FLASH_SR, got {sr:#x}");
+
+    // 2. Flash unlocked, PG=0: must not fault, must set PGSERR (bit 7), flash unchanged
+    sim.machine.debug_write(0x4002_3C0C, 4, sr).unwrap();
+    sim.machine.debug_write(0x4002_3C04, 4, 0x4567_0123).unwrap();
+    sim.machine.debug_write(0x4002_3C04, 4, 0xCDEF_89AB).unwrap();
+    sim.machine.set_reg(CoreReg::Pc, 0x0800_0041);
+    assert_eq!(sim.machine.run(10_000), StopReason::Breakpoint { pc: 0x0800_0044 });
+    assert_eq!(sim.machine.reg(CoreReg::R(1)), 2);
+    assert!(sim.machine.read_mem(0x0800_0080, &mut back));
+    assert_eq!(u32::from_le_bytes(back), 0x1234_5678);
+    let sr = sim.machine.debug_read(0x4002_3C0C, 4).unwrap();
+    assert_ne!(sr & (1 << 7), 0, "expected PGSERR in FLASH_SR, got {sr:#x}");
+}

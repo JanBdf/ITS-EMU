@@ -107,13 +107,24 @@ pub struct DebugFault {
     pub addr: u32,
 }
 
+/// Outcome of a store to flash memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlashStore {
+    /// Programming is enabled and valid: memory takes the stored value.
+    Program,
+    /// Refused by the flash interface without a bus fault (e.g. STM32F4 sets
+    /// `FLASH_SR` error bits and ignores the write, leaving flash unchanged).
+    Ignore,
+    /// Rejected with a bus fault.
+    Fault,
+}
+
 /// The MCU's flash interface as far as the core needs it: stores to flash
 /// (programming) and operations started through its registers (erasing).
 pub trait FlashController {
     /// A store of `size` bytes at offset `offset` into flash, by the core or
-    /// a debugger. Returns true if the memory takes the value (programming
-    /// is enabled and the access is valid); otherwise it faults.
-    fn store(&mut self, now: u64, offset: u32, size: u32, value: u32) -> bool;
+    /// a debugger.
+    fn store(&mut self, now: u64, offset: u32, size: u32, value: u32) -> FlashStore;
     /// Carries out operations started by register writes (erase) on the
     /// flash contents; returns the byte range that changed.
     fn service(&mut self, now: u64, flash: &mut [u8]) -> Option<std::ops::Range<u32>>;
@@ -165,6 +176,9 @@ pub struct System {
     /// Flash bytes changed by the flash controller during a run (offsets):
     /// their translations are dropped before the next run.
     flash_dirty: Option<std::ops::Range<u32>>,
+    /// Original bytes of refused-but-non-faulting flash stores (`FlashStore::Ignore`)
+    /// to restore as soon as Unicorn exits the current block.
+    flash_restore: Vec<(u32, [u8; 4], u8)>,
     /// FPB/DWT comparators changed (by software): re-apply before the next run.
     points_dirty: bool,
     /// The core locked up (DHCSR.S_LOCKUP).
@@ -484,13 +498,13 @@ impl System {
     }
 
     /// A store to flash by the core (`offset` into flash): asks the flash controller.
-    fn flash_store(&mut self, offset: u32, size: u32, value: u32) -> bool {
+    fn flash_store(&mut self, offset: u32, size: u32, value: u32) -> FlashStore {
         let now = self.clock.cycles();
-        let ok = self.flash_ctl.as_mut().is_some_and(|c| c.store(now, offset, size, value));
-        if ok {
+        let outcome = self.flash_ctl.as_mut().map_or(FlashStore::Fault, |c| c.store(now, offset, size, value));
+        if outcome == FlashStore::Program {
             self.mark_flash_dirty(offset..offset + size);
         }
-        ok
+        outcome
     }
 
     /// A peripheral (watchdog) asked for a reset: done before the next instruction.
@@ -1449,6 +1463,7 @@ impl Machine {
         }
         if !sys.new_divs.is_empty()
             || sys.flash_dirty.is_some()
+            || !sys.flash_restore.is_empty()
             || sys.points_dirty
             || sys.run_points
             || sys.reset_requested.is_some()
@@ -1551,6 +1566,7 @@ impl Machine {
             debug: CoreDebug::new(DebugIds::default()),
             flash_ctl: None,
             flash_dirty: None,
+            flash_restore: Vec::new(),
             points_dirty: false,
             locked_up: false,
             reset_held: false,
@@ -1796,10 +1812,27 @@ impl Machine {
                     } else {
                         None
                     };
-                    if let Some(off) = off
-                        && sys.flash_store(off, size as u32, value as u32)
-                    {
-                        return true;
+                    if let Some(off) = off {
+                        match sys.flash_store(off, size as u32, value as u32) {
+                            FlashStore::Program => return true,
+                            FlashStore::Ignore => {
+                                // Unicorn writes `value` into the backing slice when the
+                                // hook returns `true`; save the original bytes and stop at
+                                // the end of the block so `take_flash_dirty` restores them.
+                                let base = sys.config.memory.flash_base;
+                                let n = size.min(4);
+                                if let Some(flash) = sys.ram.region_mut(base)
+                                    && (off as usize) + n <= flash.len()
+                                {
+                                    let mut orig = [0u8; 4];
+                                    orig[..n].copy_from_slice(&flash[off as usize..off as usize + n]);
+                                    sys.flash_restore.push((off, orig, n as u8));
+                                }
+                                sys.request_stop();
+                                return true;
+                            }
+                            FlashStore::Fault => {}
+                        }
                     }
                 }
                 let is_write = matches!(ty, MemType::WRITE_UNMAPPED | MemType::WRITE_PROT);
@@ -2027,8 +2060,23 @@ impl Machine {
         }
     }
 
-    /// Flash bytes changed by the flash controller: drop their translations.
+    /// Flash bytes changed by the flash controller: drop their translations,
+    /// and restore any ignored stores that Unicorn completed without faulting.
     fn take_flash_dirty(&mut self) {
+        let restore = std::mem::take(&mut self.uc.get_data_mut().flash_restore);
+        if !restore.is_empty() {
+            // SAFETY: `emu_start` is not running; restore in reverse so the
+            // earliest original bytes win if one instruction wrote the same
+            // address twice.
+            let flash = unsafe { &mut *self.flash.get() };
+            for (off, bytes, size) in restore.into_iter().rev() {
+                let off = off as usize;
+                let n = usize::from(size);
+                if off + n <= flash.len() {
+                    flash[off..off + n].copy_from_slice(&bytes[..n]);
+                }
+            }
+        }
         let Some(r) = self.uc.get_data_mut().flash_dirty.take() else { return };
         self.flash_writes += 1;
         self.invalidate_flash(r.start, r.end - r.start);
@@ -2179,13 +2227,16 @@ impl Machine {
             None
         };
         if let Some(off) = flash_off {
-            if !sys.flash_store(off, size, value) {
-                return Err(fault);
+            match sys.flash_store(off, size, value) {
+                FlashStore::Program => {
+                    let bytes = value.to_le_bytes();
+                    self.write_flash(off as usize, &bytes[..size as usize]);
+                    self.take_flash_dirty();
+                    return Ok(());
+                }
+                FlashStore::Ignore => return Ok(()),
+                FlashStore::Fault => return Err(fault),
             }
-            let bytes = value.to_le_bytes();
-            self.write_flash(off as usize, &bytes[..size as usize]);
-            self.take_flash_dirty();
-            return Ok(());
         }
         let bytes = value.to_le_bytes();
         self.uc.mem_write(u64::from(addr), &bytes[..size as usize]).map_err(|_| fault)?;
@@ -2710,6 +2761,7 @@ impl Machine {
                 break result;
             };
             let at = self.pc();
+            self.take_flash_dirty();
             if let Err(err) = result {
                 self.on_emu_error(err);
             } else if self.breakpoints.contains(&at) && self.uc.get_data().stop.is_none() {
@@ -2732,6 +2784,8 @@ impl Machine {
             || sys.reset_requested.is_some()
             || sys.nvic.any_pending()
             || sys.ended_for_wake
+            || sys.flash_dirty.is_some()
+            || !sys.flash_restore.is_empty()
     }
 
     /// Unicorn returned early without an error: either we stopped it from a
