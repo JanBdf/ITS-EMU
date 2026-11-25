@@ -13,6 +13,7 @@
 //! | Touch (XPT2046)     | SPI1, CS PF14, PENIRQ PE13, BUSY PB10  |
 
 pub mod devices;
+pub mod iks01a3;
 pub mod ili9486;
 pub mod lm75;
 pub mod net;
@@ -152,6 +153,8 @@ enum Sensor {
     OneWire(Rc<RefCell<OneWireBus>>, usize),
     /// LM75 on I2C1 (the I2C header).
     Lm75(lm75::SharedCelsius),
+    /// X-NUCLEO-IKS01A3 sensor shield on I2C1.
+    Iks01a3(iks01a3::SharedIks01a3),
 }
 
 pub struct ItsBoard {
@@ -274,6 +277,29 @@ impl ItsBoard {
         sensors.len() - 1
     }
 
+    /// Connects an ST X-NUCLEO-IKS01A3 sensor shield (LSM6DSO, LIS2DW12,
+    /// LIS2MDL, HTS221, LPS22HH, STTS751) to I2C1 (PB8/PB9); returns its
+    /// sensor index for [`Self::set_temperature`] and [`Self::set_iks01a3`].
+    pub fn add_iks01a3(&self) -> usize {
+        let state = Rc::new(RefCell::new(iks01a3::Iks01a3State::default()));
+        self.mcu.i2c1.borrow_mut().push(Box::new(iks01a3::Iks01a3::new(state.clone())));
+        let mut sensors = self.sensors.borrow_mut();
+        sensors.push(Sensor::Iks01a3(state));
+        sensors.len() - 1
+    }
+
+    /// Updates all physical quantities seen by the X-NUCLEO-IKS01A3 shield at
+    /// sensor index `n`.
+    pub fn set_iks01a3(&self, n: usize, state: iks01a3::Iks01a3State) -> Result<(), String> {
+        match self.sensors.borrow().get(n) {
+            Some(Sensor::Iks01a3(s)) => {
+                *s.borrow_mut() = state;
+                Ok(())
+            }
+            _ => Err(format!("sensor {n} is not an X-NUCLEO-IKS01A3 shield")),
+        }
+    }
+
     /// Connects the Ethernet jack to a [`net::VirtualNet`] (gateway, DHCP,
     /// ports of the computer forwarded to the board); returns the forwards
     /// with the addresses they listen on.
@@ -322,6 +348,7 @@ impl ItsBoard {
         match self.sensors.borrow().get(n).ok_or_else(|| format!("there is no temperature sensor {n}"))? {
             Sensor::OneWire(bus, i) => bus.borrow_mut().sensors[*i].set_celsius(celsius),
             Sensor::Lm75(c) => c.set(celsius),
+            Sensor::Iks01a3(s) => s.borrow_mut().temp_c = celsius,
         }
         Ok(())
     }
@@ -330,7 +357,7 @@ impl ItsBoard {
     pub fn ds18b20_rom(&self, n: usize) -> Option<[u8; 8]> {
         match self.sensors.borrow().get(n)? {
             Sensor::OneWire(bus, i) => Some(bus.borrow().sensors[*i].rom()),
-            Sensor::Lm75(_) => None,
+            Sensor::Lm75(_) | Sensor::Iks01a3(_) => None,
         }
     }
 

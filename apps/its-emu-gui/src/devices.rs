@@ -25,6 +25,7 @@ enum Kind {
     Encoder,
     Ds18b20,
     Lm75,
+    Iks01a3,
     Pico,
     Network,
 }
@@ -165,6 +166,7 @@ impl DevicesPanel {
             DeviceSpec::Encoder(a, b) => format!("Rotary encoder  A {} · B {}", pin_name(*a), pin_name(*b)),
             DeviceSpec::Ds18b20(pin) => format!("DS18B20  {}", pin_name(*pin)),
             DeviceSpec::Lm75(addr) => format!("LM75  I2C1 0x{addr:02X}"),
+            DeviceSpec::Iks01a3 => "X-NUCLEO-IKS01A3  I2C1".to_owned(),
             DeviceSpec::Pico(spec) => format!("Pico  {}", file_name(&spec.firmware)),
             DeviceSpec::Network(_) => "Network  192.168.33.99".to_owned(),
         };
@@ -186,6 +188,9 @@ impl DevicesPanel {
                     }
                     (DeviceSpec::Ds18b20(_) | DeviceSpec::Lm75(_), DeviceState::Sensor { celsius, rom }) => {
                         show_sensor(ui, d.id, *celsius, rom.as_ref(), emu);
+                    }
+                    (DeviceSpec::Iks01a3, DeviceState::Iks01a3(state)) => {
+                        show_iks01a3(ui, d.id, *state, emu);
                     }
                     (DeviceSpec::Pico(spec), DeviceState::Starting) => {
                         ui.horizontal(|ui| {
@@ -378,6 +383,7 @@ impl DevicesPanel {
                 (Kind::Encoder, "Rotary encoder"),
                 (Kind::Ds18b20, "DS18B20"),
                 (Kind::Lm75, "LM75"),
+                (Kind::Iks01a3, "IKS01A3"),
                 (Kind::Network, "Network"),
             ] {
                 if crate::app::toggle_button(ui, self.kind == kind, label).clicked() {
@@ -421,6 +427,10 @@ impl DevicesPanel {
                 .response
                 .on_hover_text("I2C address 0x48..0x4F (A2..A0) on the I2C header: I2C1, SCL PB8, SDA PB9");
                 format!("lm75@0x{:02X}", self.lm75_addr)
+            }
+            Kind::Iks01a3 => {
+                ui.label("X-NUCLEO-IKS01A3 on I2C1 (PB8/PB9): LSM6DSO, LIS2DW12, LIS2MDL, HTS221, LPS22HH, STTS751");
+                "iks01a3".to_owned()
             }
             Kind::Network => {
                 ui.label("Ethernet: gateway 192.168.33.1, DHCP gives the board 192.168.33.99");
@@ -605,6 +615,46 @@ fn show_sensor(ui: &mut egui::Ui, id: u64, celsius: f32, rom: Option<&[u8; 8]>, 
     }
 }
 
+fn show_iks01a3(ui: &mut egui::Ui, id: u64, mut st: itsboard::iks01a3::Iks01a3State, emu: &EmuHandle) {
+    let mut changed = false;
+    egui::Grid::new(("iks01a3", id)).num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+        ui.label("Temperature:");
+        changed |= ui
+            .add(egui::Slider::new(&mut st.temp_c, -40.0..=85.0).suffix(" °C").step_by(0.1).max_decimals(1))
+            .changed();
+        ui.end_row();
+        ui.label("Humidity:");
+        changed |= ui
+            .add(egui::Slider::new(&mut st.humidity_rh, 0.0..=100.0).suffix(" %RH").step_by(0.5).max_decimals(1))
+            .changed();
+        ui.end_row();
+        ui.label("Pressure:");
+        changed |= ui
+            .add(egui::Slider::new(&mut st.pressure_hpa, 800.0..=1100.0).suffix(" hPa").step_by(0.25).max_decimals(2))
+            .changed();
+        ui.end_row();
+        for (label, vals, range, unit) in [
+            ("Accel:", &mut st.accel_mg, -2000.0..=2000.0, "mg"),
+            ("Gyro:", &mut st.gyro_mdps, -250_000.0..=250_000.0, "mdps"),
+            ("Mag:", &mut st.mag_mgauss, -2000.0..=2000.0, "mG"),
+        ] {
+            ui.label(label);
+            ui.horizontal(|ui| {
+                for (axis, v) in ["X", "Y", "Z"].into_iter().zip(vals.iter_mut()) {
+                    ui.label(axis);
+                    changed |= ui
+                        .add(egui::DragValue::new(v).range(range.clone()).speed(10.0).max_decimals(0).suffix(unit))
+                        .changed();
+                }
+            });
+            ui.end_row();
+        }
+    });
+    if changed {
+        emu.send(Command::Iks01a3(id, st));
+    }
+}
+
 fn show_wiring(ui: &mut egui::Ui, spec: &PicoSpec) {
     let wires: Vec<String> = spec.wiring.iter().map(|&(gp, pin)| format!("GP{gp} → {}", pin_name(pin))).collect();
     ui.label(wires.join(" · ")).on_hover_text(spec.firmware.display().to_string());
@@ -645,10 +695,21 @@ fn file_name(path: &Path) -> String {
 /// A new device must not drive a pin another one drives (DS18B20 sensors
 /// share their 1-Wire line), nor use an I2C address another one uses.
 fn check_pins(spec: &DeviceSpec, devices: &[DeviceView]) -> Result<(), String> {
-    if let DeviceSpec::Lm75(addr) = spec
-        && devices.iter().any(|d| d.spec == *spec)
-    {
-        return Err(format!("address 0x{addr:02X} is in use"));
+    if let DeviceSpec::Lm75(addr) = spec {
+        if devices.iter().any(|d| d.spec == *spec) {
+            return Err(format!("address 0x{addr:02X} is in use"));
+        }
+        if *addr == itsboard::iks01a3::ADDR_STTS751 && devices.iter().any(|d| d.spec == DeviceSpec::Iks01a3) {
+            return Err("address 0x4A is in use by X-NUCLEO-IKS01A3 (STTS751)".to_owned());
+        }
+    }
+    if *spec == DeviceSpec::Iks01a3 {
+        if devices.iter().any(|d| d.spec == DeviceSpec::Iks01a3) {
+            return Err("an X-NUCLEO-IKS01A3 shield is already connected".to_owned());
+        }
+        if devices.iter().any(|d| d.spec == DeviceSpec::Lm75(itsboard::iks01a3::ADDR_STTS751)) {
+            return Err("address 0x4A (STTS751) is in use by LM75".to_owned());
+        }
     }
     if matches!(spec, DeviceSpec::Network(_)) && devices.iter().any(|d| matches!(d.spec, DeviceSpec::Network(_))) {
         return Err("the board has one Ethernet jack (remove the network first)".to_owned());

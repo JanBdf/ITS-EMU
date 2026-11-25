@@ -16,6 +16,8 @@ pub enum DeviceSpec {
     Ds18b20((char, u32)),
     /// LM75 temperature sensor on the I2C header, at an address 0x48..=0x4F.
     Lm75(u8),
+    /// ST X-NUCLEO-IKS01A3 MEMS & environmental sensor shield on I2C1.
+    Iks01a3,
     /// Raspberry Pi Pico running a firmware.
     Pico(PicoSpec),
     /// The virtual network on the Ethernet jack, with ports of the computer
@@ -33,6 +35,9 @@ impl DeviceSpec {
             let forwards = rest.split(',').filter(|f| !f.trim().is_empty()).map(Forward::parse);
             return forwards.collect::<Result<_, _>>().map(Self::Network);
         }
+        if kind.trim().eq_ignore_ascii_case("iks01a3") && rest.trim().is_empty() {
+            return Ok(Self::Iks01a3);
+        }
         let (kind, pins) = s.split_once('@').ok_or_else(|| format!("expected DEVICE@PINS, got {s:?}"))?;
         if kind.trim().eq_ignore_ascii_case("lm75") {
             let hex = pins.trim().trim_start_matches("0x").trim_start_matches("0X");
@@ -47,7 +52,7 @@ impl DeviceSpec {
             ("encoder", _) => Err("an encoder needs two pins: encoder@PA,PB".to_owned()),
             ("ds18b20", &[pin]) => Ok(Self::Ds18b20(pin)),
             ("ds18b20", _) => Err("a DS18B20 needs one pin: ds18b20@PG2".to_owned()),
-            _ => Err(format!("unknown device {kind:?} (known: encoder, ds18b20, lm75, pico=FILE.uf2, net)")),
+            _ => Err(format!("unknown device {kind:?} (known: encoder, ds18b20, lm75, iks01a3, pico=FILE.uf2, net)")),
         }
     }
 
@@ -56,7 +61,7 @@ impl DeviceSpec {
         match self {
             Self::Encoder(a, b) => vec![*a, *b],
             Self::Ds18b20(pin) => vec![*pin],
-            Self::Lm75(_) | Self::Network(_) => Vec::new(), // LM75: the I2C lines are shared
+            Self::Lm75(_) | Self::Iks01a3 | Self::Network(_) => Vec::new(), // I2C lines are shared
             Self::Pico(spec) => spec.wiring.iter().map(|&(_, pin)| pin).collect(),
         }
     }
@@ -68,6 +73,7 @@ impl fmt::Display for DeviceSpec {
             Self::Encoder(a, b) => write!(f, "encoder@{},{}", pin_name(*a), pin_name(*b)),
             Self::Ds18b20(pin) => write!(f, "ds18b20@{}", pin_name(*pin)),
             Self::Lm75(addr) => write!(f, "lm75@0x{addr:02X}"),
+            Self::Iks01a3 => write!(f, "iks01a3"),
             Self::Pico(spec) => write!(f, "pico={spec}"),
             Self::Network(forwards) => {
                 write!(f, "net")?;
@@ -109,6 +115,7 @@ mod tests {
             "encoder@PA6,PA7",
             "ds18b20@PG2",
             "lm75@0x4A",
+            "iks01a3",
             "pico=/a/gen.uf2@GP0=PF0,GP5=PF1",
             "net",
             "net@tcp:8080=80,udp:5000",

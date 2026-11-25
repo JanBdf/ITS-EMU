@@ -62,8 +62,10 @@ pub enum Command {
     /// Turn an encoder by that many detents (negative: counter-clockwise),
     /// with that many nanoseconds between two of its four transitions.
     Turn(u64, i32, u64),
-    /// Temperature at a DS18B20 (°C).
+    /// Temperature at a DS18B20 or LM75 (°C).
     Temperature(u64, f32),
+    /// Physical readings of an X-NUCLEO-IKS01A3 sensor shield.
+    Iks01a3(u64, itsboard::iks01a3::Iks01a3State),
     /// Bytes for a Pico's USB serial port.
     PicoSend(u64, Vec<u8>),
     /// Boot ROM file for Picos started from now on (`None`: the cached download).
@@ -87,11 +89,13 @@ pub enum DeviceState {
     Connected,
     /// The network: the computer's addresses forwarded to the board's ports.
     Network(Vec<(String, u16)>),
-    /// A DS18B20: its temperature and ROM code.
+    /// A DS18B20 or LM75: its temperature and ROM code.
     Sensor {
         celsius: f32,
         rom: Option<[u8; 8]>,
     },
+    /// An X-NUCLEO-IKS01A3 sensor shield.
+    Iks01a3(itsboard::iks01a3::Iks01a3State),
     /// A Pico boots (its boot ROM may be downloaded first).
     Starting,
     /// A Pico runs; host programs open its USB serial port here.
@@ -378,6 +382,7 @@ struct Device {
     /// Its number among the board's encoders or sensors.
     board_index: Option<usize>,
     celsius: f32,
+    iks01a3: itsboard::iks01a3::Iks01a3State,
     pico: Option<PicoPlugin>,
     /// The Pico's USB device while the USB/IP server runs.
     pico_usb: Option<PicoUsbDevice>,
@@ -405,6 +410,7 @@ impl Device {
                 celsius: self.celsius,
                 rom: board.zip(self.board_index).and_then(|(b, n)| b.ds18b20_rom(n)),
             },
+            DeviceSpec::Iks01a3 => DeviceState::Iks01a3(self.iks01a3),
             DeviceSpec::Pico(_) => match &self.pico {
                 Some(p) => DeviceState::Running {
                     port: p.serial_port().map(PathBuf::from),
@@ -639,6 +645,7 @@ impl Worker {
             spec,
             board_index: None,
             celsius: DEFAULT_CELSIUS,
+            iks01a3: itsboard::iks01a3::Iks01a3State::default(),
             pico: None,
             pico_usb: None,
             starting: None,
@@ -694,6 +701,11 @@ impl Worker {
                 (DeviceSpec::Lm75(addr), _) => {
                     let n = board.add_lm75(*addr);
                     let _ = board.set_temperature(n, d.celsius);
+                    Some(n)
+                }
+                (DeviceSpec::Iks01a3, _) => {
+                    let n = board.add_iks01a3();
+                    let _ = board.set_iks01a3(n, d.iks01a3);
                     Some(n)
                 }
                 (DeviceSpec::Pico(spec), Some(pico)) => {
@@ -781,6 +793,14 @@ impl Worker {
                 let index = d.board_index;
                 if let (Some(n), Some(sim)) = (index, &self.sim) {
                     let _ = sim.board.set_temperature(n, celsius);
+                }
+            }
+            Command::Iks01a3(id, state) => {
+                let Some(d) = self.device(id) else { return };
+                d.iks01a3 = state;
+                let index = d.board_index;
+                if let (Some(n), Some(sim)) = (index, &self.sim) {
+                    let _ = sim.board.set_iks01a3(n, state);
                 }
             }
             Command::PicoSend(id, data) => {
@@ -906,6 +926,7 @@ impl Worker {
             | Command::RestartDevice(_)
             | Command::Turn(..)
             | Command::Temperature(..)
+            | Command::Iks01a3(..)
             | Command::PicoSend(..)
             | Command::SetBootrom(_)) => self.handle_device(cmd),
             Command::SetAutoReload(on) => {

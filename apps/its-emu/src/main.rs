@@ -81,6 +81,7 @@ struct Args {
     /// falls first; turn it with the `ENC` input), `ds18b20@PG2` a 1-Wire
     /// temperature sensor (21 °C; change it with the `TEMP` input), `lm75@0x48`
     /// an I2C temperature sensor on the I2C header (I2C1: PB8, PB9; `TEMP` too),
+    /// `iks01a3` the ST X-NUCLEO-IKS01A3 sensor shield on I2C1 (`TEMP` too),
     /// `pico=FIRMWARE.uf2@GP0=PF0,GP5=PF1` a Raspberry Pi Pico running the
     /// firmware with its GPIOs wired to the pins (default wiring GP0=PF0,
     /// GP5=PF1); its USB serial port is a pseudo terminal (path printed),
@@ -320,6 +321,9 @@ fn main() -> Result<()> {
             }
             DeviceSpec::Lm75(addr) => {
                 board.add_lm75(addr);
+            }
+            DeviceSpec::Iks01a3 => {
+                board.add_iks01a3();
             }
             DeviceSpec::Network(ref forwards) => {
                 let config = itsboard::net::NetConfig { forwards: forwards.clone(), ..Default::default() };

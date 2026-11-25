@@ -13,7 +13,7 @@ apps/its-emu (CLI)        apps/its-emu-gui (egui)
          usbip      — USB/IP server for the emulated devices, bus ids 1-1 (ST-LINK),
                       1-2... (CN13, Picos); vhci-hcd attaches them; forwarding of
                       devices whose controller is modelled elsewhere
-         itsboard   — wiring, ILI9486, XPT2046, LM75, LEDs/buttons, network, fonts.bin
+         itsboard   — wiring, ILI9486, XPT2046, LM75, IKS01A3, LEDs/buttons, network, fonts.bin
               |   \
               |    rp2040 — Raspberry Pi Pico (both cores, PIO, DMA, USB device), own thread
               |
@@ -68,8 +68,9 @@ Known gaps:
   512 bytes take 2.3 ms (1.0): it retries NAKed packets later
   (`tests/hardware/UsbCdcEcho.txt`). Short round trips match (0.2 ms).
 - **Network**: no NAT to the host network; IPv6 frames are dropped.
-- **Devices**: more I2C devices (EEPROM, IMU, …) via `I2cDevice`. Which pin
-  the course uses for the DS18B20 is open (encoder: IN0/IN1, GS task 2).
+- **Devices**: more I2C devices (EEPROM, …) via `I2cDevice` (LM75 and the
+  X-NUCLEO-IKS01A3 sensor shield are modelled). Which pin the course uses for
+  the DS18B20 is open (encoder: IN0/IN1, GS task 2).
 - **Pico**: SPI/I2C only store registers; flash program/erase is ignored
   (both warned once). PWM lacks DIVMODE inputs and PH_ADV/PH_RET. ADC inputs
   see digital board levels only (`Pico::analog` sets voltages). DMA: no

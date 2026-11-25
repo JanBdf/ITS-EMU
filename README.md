@@ -67,9 +67,9 @@ Everything else is in [Usage](docs/usage.md).
 
 | | |
 |---|---|
-| CPU | Cortex-M4F (Thumb-2, FPU) via [Unicorn](https://www.unicorn-engine.org/); NVIC, SysTick, exceptions and faults in Rust |
+| CPU | Cortex-M4F (Thumb-2, FPU) via [Unicorn](https://www.unicorn-engine.org/); NVIC, SysTick, MPU, exceptions and faults in Rust |
 | Clock | RCC clock tree (16 MHz HSI → 180 MHz PLL) with the oscillators' start-up and the PLLs' lock time; virtual time in CPU cycles with a Cortex-M4 cycle model (loads, branches, divisions, exceptions, APB wait states) measured on the board |
-| Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (up/down/center-aligned, output compare/PWM on the pins, input capture, encoder mode, slave modes reset/gated/trigger/external clock from TI1/TI2 or another timer's TRGO, TIM1/8 repetition counter, complementary outputs with dead time, break, COM), ADC1–3 (regular and injected, timer TRGO triggers), DAC (timer triggers, noise/triangle), I²C1–3 (master; optional LM75, other addresses NACK), SPI1–6, USART1–6 + UART4/5/7/8 (USART3 connected), IWDG, CRC, RNG, DMA1/2 (direct/FIFO with packing, double buffer, all peripheral requests, timer bursts), Ethernet MAC + LAN8742A PHY, USB OTG FS (device mode, FIFOs), PWR, flash interface (programming and 128 KB erase timed as measured on the board, other erases at datasheet times), bit-banding |
+| Peripherals | GPIO A–K, EXTI + SYSCFG, TIM1–14 (up/down/center-aligned, output compare/PWM on the pins, input capture, encoder mode, slave modes reset/gated/trigger/external clock from TI1/TI2 or another timer's TRGO, TIM1/8 repetition counter, complementary outputs with dead time, break, COM), ADC1–3 (regular and injected, timer TRGO triggers), DAC (timer triggers, noise/triangle), I²C1–3 (master; optional LM75 and X-NUCLEO-IKS01A3 sensor shield, other addresses NACK), SPI1–6, USART1–6 + UART4/5/7/8 (USART3 connected), IWDG, CRC, RNG, DMA1/2 (direct/FIFO with packing, double buffer, all peripheral requests, timer bursts), Ethernet MAC + LAN8742A PHY, USB OTG FS (device mode, FIFOs), PWR, flash interface (programming and 128 KB erase timed as measured on the board, other erases at datasheet times), bit-banding |
 | Board | LEDs OUT0–15, buttons S0–S7 (with contact bounce, as on the board), INT0–5, Analog header (pin voltages, DAC1), Nucleo LEDs and USER button; on any pins: rotary encoder, DS18B20 sensors, a Raspberry Pi Pico running its own firmware; a virtual network on the Ethernet jack |
 | Pico | RP2040 with both M0+ cores and the real boot ROM, firmware from UF2: clocks, resets, timer, SIO, PIO0/1, PWM, ADC, DMA, RTC, XIP flash, USB CDC serial as a pseudo terminal or (Linux) its USB device over USB/IP. Own thread |
 | Display | ILI9486 480×320 TFT with SPI timing, vertical scrolling, XPT2046 touch, backlight PWM, the real panel's tone response (`--ideal-colors` turns it off) |
@@ -77,8 +77,8 @@ Everything else is in [Usage](docs/usage.md).
 | Debugging | GDB server: breakpoints, single step, watchpoints, registers incl. FPU, memory, `monitor reset halt` |
 | USB (Linux) | The Nucleo's ST-LINK/V2-1 over USB/IP for pyOCD and OpenOCD, plus its virtual COM port; behind it halting debug, FPB, DWT, ROM table and CoreSight IDs. On the same USB/IP server: the firmware's own USB device on CN13 (USB OTG FS, e.g. the BITMAP task's USB-CDC transfer) and the Picos' USB devices |
 
-Not yet: I²C devices other than the LM75, timer slave modes with ETR, ADC
-triggers from CCx and EXTI.
+Not yet: I²C devices other than LM75 and X-NUCLEO-IKS01A3, timer slave modes
+with ETR, ADC triggers from CCx and EXTI.
 
 ## License
 

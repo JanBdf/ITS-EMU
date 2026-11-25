@@ -296,6 +296,10 @@ fn device_marks(devices: &[emu::DeviceView]) -> Vec<board::PinMark> {
                 marks.push(mark(('B', 8), "LM75", format!("LM75 at 0x{addr:02X} (I2C1 SCL)")));
                 marks.push(mark(('B', 9), "LM75", format!("LM75 at 0x{addr:02X} (I2C1 SDA)")));
             }
+            DeviceSpec::Iks01a3 => {
+                marks.push(mark(('B', 8), "IKS01A3", "X-NUCLEO-IKS01A3 sensor shield (I2C1 SCL)".to_owned()));
+                marks.push(mark(('B', 9), "IKS01A3", "X-NUCLEO-IKS01A3 sensor shield (I2C1 SDA)".to_owned()));
+            }
             DeviceSpec::Pico(spec) => {
                 let file = spec.firmware.file_name().unwrap_or_default().to_string_lossy();
                 for &(gp, pin) in &spec.wiring {
