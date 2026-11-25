@@ -91,6 +91,13 @@ pub struct App {
     self_screenshot: Option<SelfScreenshot>,
     /// The toolbar switch of the ST-LINK.
     usb_on: bool,
+    /// Whether the emulator's built-in GDB server is enabled.
+    gdb_on: bool,
+    /// Address the built-in GDB server listens on when enabled.
+    gdb_addr: String,
+    /// Re-enable the GDB server when the ST-LINK cable is plugged back in
+    /// (set when unplugging ST-LINK stopped it).
+    restore_gdb_on_plug: bool,
     /// The ST-LINK is served to pyOCD through the plugin (not USB/IP).
     pyocd_on: bool,
     /// Ask whether to use the pyOCD plugin (first start, where USB/IP does not work).
@@ -345,7 +352,7 @@ impl App {
     pub fn new(
         cc: &eframe::CreationContext,
         firmware: Option<PathBuf>,
-        gdb_addr: Option<String>,
+        gdb: emu::GdbConfig,
         usb: emu::UsbConfig,
         bootrom_override: Option<PathBuf>,
         settings: Settings,
@@ -354,9 +361,11 @@ impl App {
         let ctx = cc.egui_ctx.clone();
         apply_theme(&ctx, settings.theme);
         let usb_on = usb.enabled;
+        let gdb_on = gdb.enabled;
+        let gdb_addr = gdb.addr.clone();
         let pyocd_on = usb.pyocd;
         let bootrom = bootrom_override.clone().or_else(|| settings.pico_bootrom.clone());
-        let emu = emu::spawn(move || ctx.request_repaint(), gdb_addr, usb, settings.devices.clone(), bootrom);
+        let emu = emu::spawn(move || ctx.request_repaint(), gdb, usb, settings.devices.clone(), bootrom);
         if ideal_colors {
             emu.send(Command::IdealColors(true));
         }
@@ -390,6 +399,9 @@ impl App {
             analog: [None; 8],
             self_screenshot: SelfScreenshot::from_env(),
             usb_on,
+            gdb_on,
+            gdb_addr,
+            restore_gdb_on_plug: false,
             pyocd_on,
             // USB/IP attaches the probe on Linux; elsewhere the plugin is the way
             pyocd_ask: settings.pyocd.is_none() && !cfg!(target_os = "linux"),
@@ -521,10 +533,36 @@ impl App {
         }
     }
 
+    fn set_gdb(&mut self, on: bool) {
+        self.gdb_on = on;
+        self.restore_gdb_on_plug = false;
+        self.emu.send(Command::SetGdb(on));
+        self.settings.gdb = on;
+        self.settings.save();
+    }
+
     fn set_usb(&mut self, on: bool) {
         self.usb_on = on;
         self.emu.send(Command::SetUsb(on));
         self.settings.usb = on;
+        if !on {
+            // Unplugging the virtual ST-LINK (e.g. to flash a real board) also
+            // releases the GDB port unless a GDB client is actively attached.
+            let attached = self.emu.snapshot.lock().unwrap().gdb_attached;
+            if self.gdb_on && !attached {
+                self.gdb_on = false;
+                self.restore_gdb_on_plug = true;
+                self.emu.send(Command::SetGdb(false));
+                self.settings.gdb = false;
+            }
+        } else if self.restore_gdb_on_plug {
+            self.restore_gdb_on_plug = false;
+            if !self.gdb_on {
+                self.gdb_on = true;
+                self.emu.send(Command::SetGdb(true));
+                self.settings.gdb = true;
+            }
+        }
         self.settings.save();
     }
 
@@ -698,6 +736,18 @@ impl App {
                 .changed()
             {
                 self.set_pyocd(ctx, pyocd);
+            }
+            let mut gdb = self.gdb_on;
+            if ui
+                .checkbox(&mut gdb, format!("GDB server ({})", self.gdb_addr))
+                .on_hover_text(
+                    "Listen for a GDB debugger directly on this address (target remote). \
+                     Yields the port while pyOCD uses the emulated ST-LINK, and stops when \
+                     the ST-LINK cable is unplugged so pyOCD can debug a real board",
+                )
+                .changed()
+            {
+                self.set_gdb(gdb);
             }
             let mut bounce = self.settings.bounce;
             if ui
@@ -1042,13 +1092,31 @@ impl App {
                     self.set_usb(!self.usb_on);
                 }
                 ui.separator();
-                match gdb {
-                    (Ok(addr), true) => ui.label(RichText::new(format!("GDB attached ({addr})")).color(ok_color(ui))),
-                    (Ok(addr), false) => ui
-                        .label(RichText::new(format!("GDB ready ({addr})")).color(ui.visuals().weak_text_color()))
-                        .on_hover_text("The emulator's GDB server waits for a debugger on this address"),
-                    (Err(e), _) => ui.label(RichText::new(format!("GDB: {e}")).color(ui.visuals().weak_text_color())),
+                let (gdb_text, gdb_color, gdb_tip) = match gdb {
+                    (Ok(addr), true) => (
+                        format!("GDB attached ({addr})"),
+                        ok_color(ui),
+                        "A debugger is connected to the emulator's GDB server\n\nclick: stop GDB server",
+                    ),
+                    (Ok(addr), false) => (
+                        format!("GDB ready ({addr})"),
+                        ui.visuals().weak_text_color(),
+                        "The emulator's GDB server waits for a debugger on this address\n\nclick: stop GDB server",
+                    ),
+                    (Err(e), _) => (
+                        format!("GDB: {e}"),
+                        ui.visuals().weak_text_color(),
+                        if self.gdb_on {
+                            "The emulator's GDB server is enabled\n\nclick: stop GDB server"
+                        } else {
+                            "The emulator's GDB server is off (port 3333 is free for pyOCD)\n\nclick: start GDB server"
+                        },
+                    ),
                 };
+                let label = egui::Label::new(RichText::new(gdb_text).color(gdb_color)).sense(egui::Sense::click());
+                if ui.add(label).on_hover_text(gdb_tip).clicked() {
+                    self.set_gdb(!self.gdb_on);
+                }
             });
         });
     }

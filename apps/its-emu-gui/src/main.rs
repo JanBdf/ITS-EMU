@@ -25,13 +25,14 @@ struct Args {
     firmware: Option<PathBuf>,
 
     /// Address of the GDB server (`target remote` in GDB / port in the VS Code
-    /// debug configuration). While pyOCD uses the ST-LINK the server leaves
-    /// the port to pyOCD's own GDB server
-    #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:3333")]
-    gdb: String,
+    /// debug configuration), enabling it for this run whatever the setting says.
+    /// While pyOCD uses the ST-LINK the server leaves the port to pyOCD's own
+    /// GDB server
+    #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:3333")]
+    gdb: Option<String>,
 
-    /// Do not start the GDB server
-    #[arg(long)]
+    /// Do not start the GDB server this time (see --gdb)
+    #[arg(long, conflicts_with = "gdb")]
     no_gdb: bool,
 
     /// Plug in the board's ST-LINK (debug probe and virtual COM port) over
@@ -140,11 +141,14 @@ fn run(args: Args, renderer: eframe::Renderer) -> eframe::Result {
         "ITS-Board Emulator",
         options,
         Box::new(move |cc| {
-            let gdb = (!args.no_gdb).then_some(args.gdb);
             let mut settings = settings::Settings::load();
             if !args.devices.is_empty() {
                 settings.devices = args.devices;
             }
+            let gdb = emu::GdbConfig {
+                enabled: if args.no_gdb { false } else { args.gdb.is_some() || settings.gdb },
+                addr: args.gdb.unwrap_or_else(|| "127.0.0.1:3333".to_owned()),
+            };
             let usb = emu::UsbConfig {
                 enabled: if args.no_usb { false } else { args.usb.is_some() || settings.usb },
                 // --usb: USB/IP this time, whatever the setting says

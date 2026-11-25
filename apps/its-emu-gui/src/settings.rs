@@ -10,6 +10,8 @@ use itsboard::spec::DeviceSpec;
 pub struct Settings {
     /// The ST-LINK is plugged in (USB/IP) at start.
     pub usb: bool,
+    /// The built-in GDB server is enabled at start.
+    pub gdb: bool,
     /// The ST-LINK is served to pyOCD through the emulator's plugin (TCP and
     /// a pseudo-terminal) instead of USB/IP. `None`: not decided yet (the
     /// GUI asks at the first start where USB/IP does not work).
@@ -124,6 +126,7 @@ impl Default for Settings {
         // Like the real board: the probe is there when the emulator runs.
         Self {
             usb: cfg!(target_os = "linux"),
+            gdb: true,
             pyocd: None,
             auto_reload: true,
             recent: Vec::new(),
@@ -170,6 +173,7 @@ impl Settings {
             let on = matches!(value, "true" | "1" | "yes" | "on");
             match key.trim() {
                 "usb" => self.usb = on,
+                "gdb" => self.gdb = on,
                 "pyocd_stlink" => self.pyocd = Some(on),
                 "auto_reload" => self.auto_reload = on,
                 "console" => self.console = on,
@@ -217,10 +221,11 @@ impl Settings {
     pub fn save(&self) {
         let Some(path) = Self::path() else { return };
         let mut text = format!(
-            "# ITS-Board emulator (GUI)\nusb = {}\nauto_reload = {}\nconsole = {}\nconsole_side = {}\n\
+            "# ITS-Board emulator (GUI)\nusb = {}\ngdb = {}\nauto_reload = {}\nconsole = {}\nconsole_side = {}\n\
              line_ending = {}\necho = {}\ntimestamps = {}\ntheme = {}\nspeed = {}\nbounce = {}\n\
              tutorial_done = {}\n",
             self.usb,
+            self.gdb,
             self.auto_reload,
             self.console,
             name(&ConsoleSide::ALL, self.console_side),
@@ -284,8 +289,9 @@ mod tests {
         assert_eq!(s.recent, [PathBuf::from("/a/b c.axf"), PathBuf::from("/d.axf")]);
         s.add_recent(std::path::Path::new("/d.axf"));
         assert_eq!(s.recent, [PathBuf::from("/d.axf"), PathBuf::from("/a/b c.axf")]);
-        s.parse("usb=on");
+        s.parse("usb=on\ngdb = false");
         assert!(s.usb);
+        assert!(!s.gdb);
         assert_eq!(s.pyocd, None);
         s.parse("pyocd_stlink = yes");
         assert_eq!(s.pyocd, Some(true));

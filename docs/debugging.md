@@ -2,7 +2,8 @@
 
 ## Debugging with GDB
 
-The GUI serves GDB on `127.0.0.1:3333` (`--gdb ADDR`, `--no-gdb`); the CLI
+The GUI serves GDB on `127.0.0.1:3333` (`--gdb [ADDR]`, `--no-gdb`, or via the
+*Emulation → GDB server* toggle / status bar); the CLI
 waits for a debugger with `--gdb [ADDR]`. Connecting halts the core,
 detaching resumes it. Without a firmware file both start with empty flash
 and the debugger loads the program:
@@ -77,6 +78,9 @@ the running kernel's modules, so vhci-hcd (if not loaded yet) and cdc_acm,
 which gives the serial ports `/dev/ttyACM*`, cannot load until then. The
 emulator's own GDB server yields port 3333 to pyOCD while pyOCD debugs and
 takes it back afterwards, so both debug configurations work side by side.
+Unplugging the virtual ST-LINK also stops the built-in GDB server (unless a GDB
+client is actively attached) so pyOCD can debug a real board without closing
+the emulator; plugging it back in restores the GDB server.
 
 Without the package:
 

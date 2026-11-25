@@ -45,6 +45,8 @@ pub enum Command {
     IdealColors(bool),
     /// Plug the board's ST-LINK in (USB/IP) or unplug it.
     SetUsb(bool),
+    /// Start or stop the built-in GDB server.
+    SetGdb(bool),
     /// Serve the ST-LINK to the pyOCD plugin over TCP instead of USB/IP
     /// (plugs it in again if it is).
     SetPyocd(bool),
@@ -111,6 +113,15 @@ pub enum DeviceState {
 
 /// Temperature of a newly connected DS18B20.
 pub const DEFAULT_CELSIUS: f32 = 21.0;
+
+/// The built-in GDB server.
+#[derive(Debug, Clone)]
+pub struct GdbConfig {
+    /// Address to listen on (e.g. `127.0.0.1:3333`).
+    pub addr: String,
+    /// Listen at start.
+    pub enabled: bool,
+}
 
 /// The board's ST-LINK on USB/IP, or over TCP for the pyOCD plugin.
 #[derive(Debug, Clone)]
@@ -259,11 +270,11 @@ impl Drop for EmuHandle {
 }
 
 /// Starts the emulator thread. `repaint` is called whenever the snapshot
-/// changed. With `gdb_addr`, a GDB server listens there (except while
-/// pyOCD uses the ST-LINK: its own GDB server takes the port).
+/// changed. When `gdb.enabled`, a GDB server listens on `gdb.addr` (except
+/// while pyOCD uses the ST-LINK: its own GDB server takes the port).
 pub fn spawn(
     repaint: impl Fn() + Send + Sync + 'static,
-    gdb_addr: Option<String>,
+    gdb: GdbConfig,
     usb: UsbConfig,
     devices: Vec<DeviceSpec>,
     bootrom: Option<PathBuf>,
@@ -283,7 +294,7 @@ pub fn spawn(
     let thread = std::thread::Builder::new()
         .name("emulator".into())
         .spawn(move || {
-            let mut worker = Worker::new(rx, shared, Arc::new(repaint), gdb_addr, usb, wake, pending);
+            let mut worker = Worker::new(rx, shared, Arc::new(repaint), gdb, usb, wake, pending);
             worker.bootrom = bootrom;
             for spec in devices {
                 worker.add_device(spec);
@@ -337,8 +348,10 @@ struct Worker {
     analog: [Option<f32>; 8],
     gdb: Option<GdbServer>,
     gdb_status: Result<String, String>,
-    /// Address the GDB server should listen on, if any.
-    gdb_addr: Option<String>,
+    /// Address the GDB server listens on when enabled.
+    gdb_addr: String,
+    /// Whether the built-in GDB server should listen.
+    gdb_enabled: bool,
     /// Next attempt to (re)open the GDB server's port.
     gdb_retry_at: Instant,
     /// How the debugger wants the core to run (`Free` without debugger).
@@ -444,7 +457,7 @@ impl Worker {
         commands: Receiver<Command>,
         snapshot: SharedSnapshot,
         repaint: Arc<dyn Fn() + Send + Sync>,
-        gdb_addr: Option<String>,
+        gdb: GdbConfig,
         usb_config: UsbConfig,
         wake: Arc<dyn Fn() + Send + Sync>,
         wake_pending: Arc<AtomicBool>,
@@ -475,7 +488,8 @@ impl Worker {
             analog: [None; 8],
             gdb: None,
             gdb_status: Err("off".to_owned()),
-            gdb_addr,
+            gdb_addr: gdb.addr,
+            gdb_enabled: gdb.enabled,
             gdb_retry_at: now,
             execution: Execution::Free,
             usb: None,
@@ -582,10 +596,33 @@ impl Worker {
         }
     }
 
+    /// Starts or stops the built-in GDB server.
+    fn set_gdb(&mut self, on: bool) {
+        self.gdb_enabled = on;
+        if !on {
+            if self.gdb.take().is_some() {
+                log::info!("GDB server closed");
+            }
+            self.gdb_status = Err("off".to_owned());
+            let was_halted = self.execution == Execution::Halted;
+            self.execution = Execution::Free;
+            if was_halted && self.state == RunState::Halted && !self.core_halted {
+                self.state = RunState::Running;
+                self.reanchor();
+            }
+            return;
+        }
+        self.gdb_retry_at = Instant::now();
+        self.manage_gdb();
+    }
+
     /// Opens the GDB server's port, and leaves it to pyOCD while pyOCD has
     /// the ST-LINK in debug mode (`pyocd gdbserver` listens on the same port).
     fn manage_gdb(&mut self) {
-        let Some(addr) = self.gdb_addr.clone() else { return };
+        if !self.gdb_enabled {
+            return;
+        }
+        let addr = self.gdb_addr.clone();
         // pyOCD binds its GDB server right after connecting; one that was
         // killed leaves the probe in debug mode, but then the port is free.
         let probe_busy = self.usb.as_ref().is_some_and(|p| p.debug_busy(Duration::from_millis(1500)));
@@ -913,6 +950,7 @@ impl Worker {
                 self.published_generation = u64::MAX;
             }
             Command::SetUsb(on) => self.set_usb(on),
+            Command::SetGdb(on) => self.set_gdb(on),
             Command::SetPyocd(on) if on != self.usb_config.pyocd => {
                 self.usb_config.pyocd = on;
                 if self.usb.is_some() {
