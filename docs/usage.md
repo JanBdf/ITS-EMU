@@ -52,9 +52,10 @@ controls. The main ones:
   `~/.config/its-emu/gui.conf` (the platform's config directory elsewhere).
 - *Devices* (Ctrl+E) connects devices on the header pins while the board
   runs: a [Pico](#raspberry-pi-pico), a rotary encoder (buttons for 1 or 10
-  detents, or scroll over the knob), DS18B20 sensors and the
-  [network](#network). They persist across firmware loads and restarts;
-  green tags on the board's pads show which pins they use.
+  detents, or scroll over the knob), DS18B20 sensors, I²C sensors (LM75,
+  X-NUCLEO-IKS01A3 shield) and the [network](#network). They persist across
+  firmware loads and restarts; green tags on the board's pads show which pins
+  they use.
 
 **Command line.** `its-emu Program.axf` runs 10 s of virtual time as fast
 as possible (`--seconds`, `--realtime`), prints the virtual COM port's
@@ -78,6 +79,7 @@ newline), a pin voltage, `ENC`, `TEMP`, `PICO`:
 | `--input 3:ENC=5` | turn it 5 detents clockwise (`-5` back) |
 | `--device ds18b20@PG2` | DS18B20 at 21 °C; several on one pin share the line |
 | `--device lm75@0x48` | LM75 on I2C1 (SCL PB8, SDA PB9; 0x48–0x4F) |
+| `--device iks01a3` | X-NUCLEO-IKS01A3 I²C sensor shield on I2C1 (HTS221, LPS22HH, STTS751, LSM6DSO, LIS2DW12, LIS2MDL) |
 | `--input 4:TEMP=30.5` | set a sensor's temperature; `TEMP1` is the second sensor given |
 
 ## Network
@@ -97,8 +99,8 @@ its-emu NetEcho.axf --forward tcp:7007=7   # then: nc localhost 7007
 
 A firmware that uses USB OTG FS (the Nucleo's second USB jack, CN13) as a
 USB device, such as the BITMAP task's USB-CDC transfer (S7), appears on the
-computer like the real board with a second cable. While the USB switch is
-on (`its-emu --usb`), the firmware's device is exported over USB/IP once it
+computer like the real board with a second cable. While the ST-LINK USB is
+plugged in (*Emulation → USB ST-LINK plugged in* or `its-emu --usb`), the firmware's device is exported over USB/IP once it
 connects, with the descriptors it reports (e.g. `0483:5740` "STM32 Virtual
 ComPort in FS Mode"), and the GUI (or `--usb-attach`) plugs it in; the
 status bar shows *CN13 plugged in*. Programs then use its `/dev/ttyACM*`
@@ -135,7 +137,7 @@ python3 tools/pico/run_gui.py /dev/ttys004 Rechteckgenerator/Python_GUI/main.py
 
 On Linux the Pico's USB device can also be plugged into the computer like
 a real Pico, next to the [ST-LINK](debugging.md#the-boards-st-link-on-usb-linux):
-while the USB switch is on (`its-emu --usb`), each Pico is exported over
+while the ST-LINK USB is plugged in (*Emulation → USB ST-LINK plugged in* or `its-emu --usb`), each Pico is exported over
 USB/IP as soon as its firmware connects (bus ids `1-2`, `1-3`, ...; the
 Devices panel shows its state). The computer then sees the firmware's own
 descriptors (`2e8a:000a`, "Pico - Board CDC") and a `/dev/ttyACM*` port, so

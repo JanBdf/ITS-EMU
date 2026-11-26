@@ -212,6 +212,8 @@ pub struct System {
     block_insns: BlockCache,
     /// Last invalid memory access reported by Unicorn (address, is_write, is_fetch).
     last_invalid: Option<(u32, bool, bool)>,
+    /// Exact per-address MPU check during a single-instruction sub-page step.
+    mpu_subpage_step: Option<u32>,
     stop: Option<StopReason>,
     reset_requested: Option<ResetKind>,
     idle: IdleDetector,
@@ -925,6 +927,7 @@ unsafe extern "C" {
     fn uc_its_rearm_writes(uc: *mut std::ffi::c_void);
     // the QEMU exception behind the last INSN_INVALID (EXCP_YIELD: WFE, YIELD)
     fn uc_its_stop_exception(uc: *mut std::ffi::c_void) -> std::ffi::c_int;
+    fn uc_its_invalid_addr(uc: *mut std::ffi::c_void) -> u64;
     // R0..R15 and xPSR into `out` (17 words)
     fn uc_its_core_regs(uc: *mut std::ffi::c_void, out: *mut u32);
     // sets R0..R15 and the NZCV flags (code the emulator ran in its place)
@@ -1601,6 +1604,7 @@ impl Machine {
             fast_mode: FastMode::Hook,
             block_insns: BlockCache::new(),
             last_invalid: None,
+            mpu_subpage_step: None,
             stop: None,
             reset_requested: None,
             idle: IdleDetector::default(),
@@ -1798,7 +1802,13 @@ impl Machine {
                     write: default_prot.0 & Prot::WRITE.0 != 0,
                     exec: default_prot.0 & Prot::EXEC.0 != 0,
                 };
-                let eff = uc.get_data().scs.mpu_page_perms(a & !0x3FF, default, privileged, in_hfnmi);
+                let eff = if let Some(exact) = uc.get_data().mpu_subpage_step
+                    && (exact & !0x3FF) == (a & !0x3FF)
+                {
+                    uc.get_data().scs.mpu_access(exact, privileged, in_hfnmi).unwrap_or(default)
+                } else {
+                    uc.get_data().scs.mpu_page_perms(a & !0x3FF, default, privileged, in_hfnmi)
+                };
                 let mut p = Prot::NONE;
                 if eff.read {
                     p |= Prot::READ;
@@ -2548,6 +2558,7 @@ impl Machine {
         sys.watch_hit = None;
         sys.reset_requested = None;
         sys.last_invalid = None;
+        sys.mpu_subpage_step = None;
         sys.mpu_dirty = false;
         sys.locked_up = false;
         sys.asleep = false;
@@ -2932,6 +2943,8 @@ impl Machine {
         uc.get_data_mut().nvic = nvic;
         if let Err(e) = res {
             Self::lockup(uc, format!("exception entry for exception {exc} failed: {e}"));
+        } else if uc.get_data().scs.mpu_enabled() {
+            let _ = uc.ctl_flush_tlb();
         }
     }
 
@@ -2993,6 +3006,9 @@ impl Machine {
                                 Self::enter_exception_after(uc, exc, return_addr, TAIL_CHAIN_CYCLES);
                             }
                             None => uc.get_data_mut().clock.advance(EXCEPTION_RETURN_CYCLES),
+                        }
+                        if uc.get_data().scs.mpu_enabled() {
+                            let _ = uc.ctl_flush_tlb();
                         }
                     }
                     Err(ExceptionError::InvalidExcReturn(_)) => {
@@ -3082,6 +3098,10 @@ impl Machine {
 
     /// Unicorn aborted because of an invalid memory access or instruction.
     fn on_emu_error(&mut self, err: uc_error) {
+        self.on_emu_error_inner(err, true);
+    }
+
+    fn on_emu_error_inner(&mut self, err: uc_error, allow_subpage_retry: bool) {
         let pc = self.pc();
         let invalid = self.uc.get_data_mut().last_invalid.take();
 
@@ -3091,7 +3111,12 @@ impl Machine {
         if self.uc.get_data().scs.mpu_enabled() {
             let (privileged, in_hfnmi) = Self::mpu_state(&self.uc);
             if self.uc.get_data().scs.mpu_active(in_hfnmi) {
-                if let Some((addr, is_write, is_fetch)) = invalid {
+                if let Some((page_addr, is_write, is_fetch)) = invalid {
+                    // `tlb_hook` receives a page-aligned address; recover the
+                    // exact faulting address that `raise_mmu_exception` recorded
+                    // if it lies in the same 1 KB page.
+                    let raw = unsafe { uc_its_invalid_addr(self.uc.get_handle().cast()) } as u32;
+                    let addr = if (raw & !0x3FF) == (page_addr & !0x3FF) { raw } else { page_addr };
                     let denied = self.uc.get_data().scs.mpu_access(addr, privileged, in_hfnmi).is_some_and(|p| {
                         if is_fetch {
                             !p.exec
@@ -3112,6 +3137,32 @@ impl Machine {
                         log::debug!("MPU fault: access to {addr:#010x} at pc {pc:#010x}");
                         Self::raise_fault(&mut self.uc, nvic::MEM_MANAGE, pc);
                         let _ = self.uc.ctl_flush_tlb();
+                        return;
+                    }
+                    // The address itself is permitted by both the MPU and the
+                    // default memory map: the TLB fault came from a smaller
+                    // sub-page (< 1 KB) MPU region sharing this page. Single-step
+                    // this instruction with exact per-address MPU checks, then
+                    // flush the TLB so the stricter page protection resumes.
+                    let default_prot = self.uc.get_data().page_perms(addr);
+                    let default_allows = if is_fetch {
+                        default_prot.0 & Prot::EXEC.0 != 0
+                    } else if is_write {
+                        default_prot.0 & Prot::WRITE.0 != 0
+                    } else {
+                        default_prot.0 & Prot::READ.0 != 0
+                    };
+                    if allow_subpage_retry && default_allows {
+                        self.uc.get_data_mut().mpu_subpage_step = Some(addr);
+                        let _ = self.uc.ctl_flush_tlb();
+                        let _ = self.uc.ctl_flush_tb();
+                        let step_res = self.uc.emu_start(u64::from(pc | 1), u64::MAX, 0, 1);
+                        self.uc.get_data_mut().mpu_subpage_step = None;
+                        let _ = self.uc.ctl_flush_tlb();
+                        self.take_flash_dirty();
+                        if let Err(step_err) = step_res {
+                            self.on_emu_error_inner(step_err, false);
+                        }
                         return;
                     }
                 } else if matches!(err, uc_error::FETCH_PROT | uc_error::EXCEPTION)

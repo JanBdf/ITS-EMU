@@ -370,6 +370,7 @@ impl App {
         let gdb_addr = gdb.addr.clone();
         let pyocd_on = usb.pyocd;
         let bootrom = bootrom_override.clone().or_else(|| settings.pico_bootrom.clone());
+        let devices_overridden = devices_override.is_some();
         let initial_devices = devices_override.unwrap_or_else(|| settings.devices.clone());
         let emu = emu::spawn(move || ctx.request_repaint(), gdb, usb, initial_devices, bootrom);
         if ideal_colors {
@@ -423,7 +424,7 @@ impl App {
             title: String::new(),
             show_pins: start_view("pins"),
             show_devices: start_view("devices"),
-            devices: crate::devices::DevicesPanel::new(bootrom_override),
+            devices: crate::devices::DevicesPanel::new(bootrom_override, devices_overridden),
             show_help: start_view("help"),
             notice: None,
             files,
@@ -559,14 +560,12 @@ impl App {
                 self.gdb_on = false;
                 self.restore_gdb_on_plug = true;
                 self.emu.send(Command::SetGdb(false));
-                self.settings.gdb = false;
             }
         } else if self.restore_gdb_on_plug {
             self.restore_gdb_on_plug = false;
             if !self.gdb_on {
                 self.gdb_on = true;
                 self.emu.send(Command::SetGdb(true));
-                self.settings.gdb = true;
             }
         }
         self.settings.save();
@@ -948,7 +947,7 @@ impl App {
                 };
                 if toggle_button(ui, self.show_devices, label)
                     .on_hover_text(format!(
-                        "Devices on the board's pins: Raspberry Pi Pico, rotary encoder, DS18B20, LM75, network · {}",
+                        "Devices on the board's pins: Raspberry Pi Pico, rotary encoder, DS18B20, LM75, IKS01A3, network · {}",
                         ctx.format_shortcut(&DEVICES)
                     ))
                     .clicked()

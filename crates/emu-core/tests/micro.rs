@@ -452,3 +452,40 @@ fn mpu_null_pointer_protection_faults() {
     assert_eq!(m.read_u32(0xE000_ED28).unwrap() & 0xFF, 0x82, "CFSR MMFSR = DACCVIOL | MMARVALID");
     assert_eq!(m.read_u32(0xE000_ED34).unwrap(), 0, "MMFAR == NULL");
 }
+
+/// A sub-page (< 1 KB) MPU guard region must still allow accesses to the rest
+/// of the same 1 KB page while faulting on the guarded bytes.
+#[test]
+fn mpu_subpage_region_allows_rest_of_page() {
+    let mut m = boot_thumb(
+        &[
+            0x4808, // ldr r0, =0xE000_ED94 (MPU_CTRL) at 0x64
+            0x4909, // ldr r1, =0x2000_0000 (RAM start) at 0x68
+            0x2200, // movs r2, #0
+            0x6002, // str r2, [r0, #0]     ; MPU->CTRL = 0
+            0x6042, // str r2, [r0, #4]     ; MPU->RNR  = 0
+            0x6081, // str r1, [r0, #8]     ; MPU->RBAR = 0x2000_0000
+            0x2209, // movs r2, #9          ; SIZE=4 (32B) | ENABLE=1, AP=0
+            0x60C2, // str r2, [r0, #12]    ; MPU->RASR = 0x09
+            0x2205, // movs r2, #5          ; ENABLE | PRIVDEFENA
+            0x6002, // str r2, [r0, #0]     ; MPU->CTRL = 5
+            0x4A05, // ldr r2, =0x2000_0100 (allowed address in same 1 KB page) at 0x6C
+            0x232A, // movs r3, #42
+            0x6013, // str r3, [r2, #0]     ; allowed write
+            0x6814, // ldr r4, [r2, #0]     ; allowed read -> r4 = 42
+            0x680B, // ldr r3, [r1, #0]     ; guarded address -> MemManage!
+            0xBE01, // bkpt #1 (must not be reached)
+            0xBF00, // padding at 0x60 (overwritten by boot_thumb's default handler)
+            0xBF00, // padding at 0x62
+        ],
+        &[0xE000_ED94, 0x2000_0000, 0x2000_0100],
+    );
+    let handler: u32 = 0x0800_0080;
+    assert!(m.write_mem(0x0800_0000 + 3 * 4, &(handler | 1).to_le_bytes()));
+    assert!(m.write_mem(handler, &0xBE02u16.to_le_bytes()));
+    let stop = m.run(10_000);
+    assert_eq!(stop, StopReason::Breakpoint { pc: handler });
+    assert_eq!(m.read_u32(0x2000_0100).unwrap(), 42);
+    assert_eq!(m.read_u32(0xE000_ED28).unwrap() & 0xFF, 0x82, "CFSR MMFSR = DACCVIOL | MMARVALID");
+    assert_eq!(m.read_u32(0xE000_ED34).unwrap(), 0x2000_0000, "MMFAR == guarded RAM start");
+}

@@ -37,7 +37,7 @@ Code setup); `tools/build-own.sh [Name]` rebuilds only the own test programs.
 ## Arch Linux package
 
 `packaging/arch/build.sh` builds a pacman package of the checkout into
-`dist/` (version `0.1.0.r<commits>.g<hash>`; uncommitted changes are
+`dist/` (version `<version>.r<commits>.g<hash>`; uncommitted changes are
 included without changing the version). It contains both programs, a desktop
 entry, the `vscode-nodebug` extension (built into Arch's `code`, and as
 `.vsix` in `/usr/share/its-emu`), and what the USB ST-LINK needs: `usbip`,
@@ -72,8 +72,11 @@ architecture and `dist/its-emu-<version>-macos-<arch>.dmg` (needs
 `rsvg-convert`: `brew install librsvg`). The app holds both programs, the
 VS Code extension and the licenses; it is signed ad hoc (`codesign -s -`).
 
-The emulator writes nothing to the home directory except the GUI's
-`~/.config/its-emu/gui.conf`.
+The emulator stores GUI settings in `~/.config/its-emu/gui.conf`, cached
+runtime files (such as the downloaded RP2040 boot ROM and extracted tutorial
+assets) in `~/.cache/its-emu/` (or the platform cache directory), and—when
+*ST-LINK for pyOCD (VS Code)* is enabled—installs its pyOCD plugin into the
+detected VS Code / Arm Environment Manager pyOCD directories.
 
 ## Releases
 
@@ -83,7 +86,7 @@ hand (*Actions → Release → Run workflow*) it only keeps them as artifacts.
 Each platform is one job uploading `package-<platform>`.
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 

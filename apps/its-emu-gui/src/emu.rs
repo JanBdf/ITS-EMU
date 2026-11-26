@@ -950,7 +950,7 @@ impl Worker {
             Command::SetGdb(on) => self.set_gdb(on),
             Command::SetPyocd(on) if on != self.usb_config.pyocd => {
                 self.usb_config.pyocd = on;
-                if self.usb.is_some() {
+                if self.usb.is_some() || self.usb_server_error.is_some() {
                     self.set_usb(false);
                     self.set_usb(true);
                 }

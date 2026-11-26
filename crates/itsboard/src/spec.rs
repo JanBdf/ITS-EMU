@@ -27,7 +27,10 @@ pub enum DeviceSpec {
 
 impl DeviceSpec {
     pub fn parse(s: &str) -> Result<Self, String> {
-        if let Some(spec) = s.trim().strip_prefix("pico=") {
+        let trimmed = s.trim();
+        if let Some((head, spec)) = trimmed.split_once('=')
+            && head.trim().eq_ignore_ascii_case("pico")
+        {
             return PicoSpec::parse(spec).map(Self::Pico);
         }
         let (kind, rest) = s.split_once('@').unwrap_or((s, ""));

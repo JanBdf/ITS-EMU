@@ -355,8 +355,10 @@ impl VirtualNet {
         if !self.listeners.is_empty() || !self.udp.is_empty() || !self.tcp.is_empty() {
             delay = Some(delay.map_or(1_000, |d| d.min(1_000)));
         }
-        self.next_poll =
-            delay.map(|us| ctx.clock.cycle_at_ps(ctx.clock.time_ps() + us.max(1) * 1_000_000).max(ctx.now() + 1));
+        self.next_poll = delay.map(|us| {
+            let ps = ctx.clock.time_ps().saturating_add(us.max(1).saturating_mul(1_000_000));
+            ctx.clock.cycle_at_ps(ps).max(ctx.now() + 1)
+        });
     }
 }
 

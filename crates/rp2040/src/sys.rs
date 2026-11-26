@@ -52,7 +52,7 @@ impl PllRegs {
         let refdiv = u64::from((self.cs & 0x3F).max(1));
         let pd1 = u64::from(((self.prim >> 16) & 7).max(1));
         let pd2 = u64::from(((self.prim >> 12) & 7).max(1));
-        (u64::from(XOSC_HZ) / refdiv * u64::from(self.fbdiv & 0xFFF) / (pd1 * pd2)) as u32
+        (u64::from(XOSC_HZ) / refdiv * u64::from(self.fbdiv & 0xFFF) / (pd1 * pd2)).min(u64::from(u32::MAX)) as u32
     }
 }
 

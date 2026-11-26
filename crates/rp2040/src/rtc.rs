@@ -166,7 +166,8 @@ impl Rtc {
     /// Time of `k` seconds after `base_ps`.
     fn tick_ps(&self, k: u64) -> Option<u64> {
         let (num, hz) = self.tick?;
-        Some(self.base_ps + (u128::from(k) * num / hz) as u64)
+        let delta = u64::try_from(u128::from(k) * num / hz).ok()?;
+        self.base_ps.checked_add(delta)
     }
 
     /// Counts the seconds up to now.

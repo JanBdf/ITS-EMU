@@ -70,10 +70,12 @@ kernel's `vhci-hcd`. The course tools then work unchanged: *CMSIS Load*
 flashes with pyOCD and the pack's flash algorithm (running on the emulated
 core), *STLink@pyOCD (launch)* debugs, and a terminal talks to `/dev/ttyACM0`.
 
-With the [Arch package](development.md#arch-linux-package), the GUI plugs the ST-LINK in
-by itself. The toolbar switch **USB ST-LINK** (on by default, remembered in
-`~/.config/its-emu/gui.conf`) and the status bar show its state; quitting or
-switching off unplugs it. After a kernel update, reboot first: pacman removes
+With the [Arch](development.md#arch-linux-package) or
+[Debian / Ubuntu](development.md#debian--ubuntu-package) package, the GUI plugs
+the ST-LINK in by itself. **Emulation → USB ST-LINK plugged in** (on by
+default, remembered in `~/.config/its-emu/gui.conf`), the CN1 USB cable on the
+board, and the status bar show and toggle its state; quitting or switching off
+unplugs it. After a kernel update, reboot first: pacman removes
 the running kernel's modules, so vhci-hcd (if not loaded yet) and cdc_acm,
 which gives the serial ports `/dev/ttyACM*`, cannot load until then. The
 emulator's own GDB server yields port 3333 to pyOCD while pyOCD debugs and
@@ -123,8 +125,8 @@ working, and without a running emulator it finds nothing.
 disables it. The protocol is in `crates/stlink/src/tcp.rs`.
 
 The virtual COM port is a pseudo-terminal (`/dev/ttys…`, shown in the
-status bar; click copies it). Like `/dev/ttyACM0` it starts with echo and
-line editing each time a program opens it; terminal programs set raw mode.
+status bar; click copies it). It is initialized in raw mode on creation;
+terminal programs may still configure termios settings as needed.
 Windows has no pseudo-terminals: use the serial console there.
 
 ```sh

@@ -103,6 +103,7 @@ impl TcpServer {
                         log::info!("ST-LINK (TCP): closed by the debugger");
                         self.owner = None;
                         self.pending_in = None;
+                        dev.mode = crate::commands::MODE_MASS;
                     }
                 }
                 Event::Request(id, op, payload) => self.request(dev, m, id, op, &payload),

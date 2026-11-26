@@ -161,6 +161,12 @@ impl Contacts {
         self.pending.set(true);
     }
 
+    /// Discards any pending bounce requests or scheduled edges for `(port, pin)`.
+    pub fn cancel_pin(&mut self, port: usize, pin: u32) {
+        self.requests.retain(|r| (r.0, r.1) != (port, pin));
+        self.edges.retain(|e| (e.1, e.2) != (port, pin));
+    }
+
     /// Schedules the edges of a transition from `old` to `level` at cycle
     /// `at` (`ns` converts durations to cycles).
     #[allow(clippy::too_many_arguments)]

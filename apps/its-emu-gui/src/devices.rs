@@ -82,10 +82,12 @@ pub struct DevicesPanel {
     program_error: Option<String>,
     /// Boot ROM given on the command line (not saved).
     bootrom_override: Option<PathBuf>,
+    /// Devices were overridden via `--device` on the command line (do not mutate saved `settings.devices`).
+    devices_overridden: bool,
 }
 
 impl DevicesPanel {
-    pub fn new(bootrom_override: Option<PathBuf>) -> Self {
+    pub fn new(bootrom_override: Option<PathBuf>, devices_overridden: bool) -> Self {
         Self {
             kind: Kind::Pico,
             encoder_pins: [('F', 0), ('F', 1)],
@@ -99,6 +101,7 @@ impl DevicesPanel {
             programs: HashMap::new(),
             program_error: None,
             bootrom_override,
+            devices_overridden,
         }
     }
 
@@ -212,12 +215,15 @@ impl DevicesPanel {
                 ui.horizontal(|ui| {
                     if ui.button("✖ Remove").on_hover_text("Disconnect the device from the board").clicked() {
                         emu.send(Command::RemoveDevice(d.id));
-                        // the saved list holds the same devices in the same order
-                        let nth = devices.iter().take_while(|o| o.id != d.id).filter(|o| o.spec == d.spec).count();
-                        if let Some(i) = settings.devices.iter().enumerate().filter(|(_, s)| **s == d.spec).nth(nth) {
-                            settings.devices.remove(i.0);
+                        if !self.devices_overridden {
+                            // the saved list holds the same devices in the same order
+                            let nth = devices.iter().take_while(|o| o.id != d.id).filter(|o| o.spec == d.spec).count();
+                            if let Some(i) = settings.devices.iter().enumerate().filter(|(_, s)| **s == d.spec).nth(nth)
+                            {
+                                settings.devices.remove(i.0);
+                            }
+                            settings.save();
                         }
-                        settings.save();
                         self.terminals.remove(&d.id);
                         if let Some(mut p) = self.programs.remove(&d.id) {
                             let _ = p.child.kill();
@@ -232,6 +238,10 @@ impl DevicesPanel {
                     {
                         emu.send(Command::RestartDevice(d.id));
                         self.terminals.remove(&d.id);
+                        if let Some(mut p) = self.programs.remove(&d.id) {
+                            let _ = p.child.kill();
+                            let _ = p.child.wait();
+                        }
                     }
                 });
             },
@@ -500,8 +510,10 @@ impl DevicesPanel {
                 Ok(spec) => {
                     self.add_error = None;
                     emu.send(Command::AddDevice(spec.clone()));
-                    settings.devices.push(spec);
-                    settings.save();
+                    if !self.devices_overridden {
+                        settings.devices.push(spec);
+                        settings.save();
+                    }
                 }
                 Err(e) => self.add_error = Some(e),
             }

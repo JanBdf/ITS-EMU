@@ -14,8 +14,8 @@ use itsboard::spec::DeviceSpec;
 #[derive(Parser, Debug)]
 #[command(version, about = "ITS-Board emulator (STM32F429ZI)")]
 struct Args {
-    /// Firmware image (.axf / .elf). Without one (only with --gdb or --usb)
-    /// the flash is empty and the debugger loads the program
+    /// Firmware image (.axf / .elf). Without one (only with --gdb, --usb or
+    /// --pyocd) the flash is empty and the debugger loads the program
     #[arg(required_unless_present_any = ["gdb", "usb", "pyocd", "install_pyocd_plugin", "uninstall_pyocd_plugin"])]
     firmware: Option<PathBuf>,
 
@@ -28,7 +28,7 @@ struct Args {
     no_fonts: bool,
 
     /// Stop after this many seconds of virtual time (0 = no limit).
-    /// Default: 10, no limit with --gdb, --usb or --forward
+    /// Default: 10, no limit with --gdb, --usb, --pyocd or --forward
     #[arg(long)]
     seconds: Option<f64>,
 

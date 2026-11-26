@@ -36,8 +36,8 @@ struct Args {
     no_gdb: bool,
 
     /// Plug in the board's ST-LINK (debug probe and virtual COM port) over
-    /// USB/IP at ADDR (default 127.0.0.1:3240), whatever the toolbar setting
-    /// says (also instead of the ST-LINK for pyOCD, Emulation menu). On Linux it is attached with `usbip attach` (vhci-hcd module);
+    /// USB/IP at ADDR (default 127.0.0.1:3240), overriding the saved setting
+    /// (also instead of the ST-LINK for pyOCD, Emulation menu). On Linux it is attached with `usbip attach` (vhci-hcd module);
     /// then pyOCD (the course's STLink@pyOCD configurations), OpenOCD and
     /// terminal programs use it like the real board's
     #[arg(long, value_name = "ADDR", num_args = 0..=1, default_missing_value = "127.0.0.1:3240")]
@@ -53,8 +53,9 @@ struct Args {
 
     /// External device on header pins (repeatable), instead of the ones
     /// added in the Devices panel last time: `encoder@PF0,PF1`,
-    /// `ds18b20@PG2`, `pico=FIRMWARE.uf2@GP0=PF0,GP5=PF1` (a Raspberry Pi Pico
-    /// running the firmware, its GPIOs wired to the pins)
+    /// `ds18b20@PG2`, `lm75@0x48`, `iks01a3`, `net@tcp:8080=80`,
+    /// `pico=FIRMWARE.uf2@GP0=PF0,GP5=PF1` (a Raspberry Pi Pico running the
+    /// firmware, its GPIOs wired to the pins)
     #[arg(long = "device", value_name = "DEVICE@PINS", value_parser = itsboard::spec::DeviceSpec::parse)]
     devices: Vec<itsboard::spec::DeviceSpec>,
 

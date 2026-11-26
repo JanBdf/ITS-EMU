@@ -712,6 +712,13 @@ int uc_its_stop_exception(uc_engine *uc)
     return uc->its_stop_excp;
 }
 
+// ITS-EMU: exact faulting virtual address from raise_mmu_exception().
+UNICORN_EXPORT
+uint64_t uc_its_invalid_addr(uc_engine *uc)
+{
+    return uc->invalid_addr;
+}
+
 // ITS-EMU: inline cycle accounting. Blocks translated from now on charge
 // their cycles themselves and call the block hook only when `block` says
 // they cannot or when the cycle counter reaches the limit (see

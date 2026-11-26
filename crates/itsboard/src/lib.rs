@@ -339,7 +339,9 @@ impl ItsBoard {
         self.sensors.borrow_mut().clear();
         self.mcu.i2c1.borrow_mut().clear();
         let mut g = self.mcu.gpio.borrow_mut();
+        let mut c = self.contacts.borrow_mut();
         for (p, pin) in self.device_pins.take() {
+            c.cancel_pin(port(p), pin);
             g.drive(port(p), pin, Self::pin_idle_level(p, pin));
             g.ports[port(p)].log_watch &= !(1 << pin);
         }

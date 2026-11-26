@@ -50,16 +50,10 @@ enum CableKind {
 }
 
 /// Body, strain relief and cable colors.
-const CABLE_BLACK: [Color32; 3] = [
-    Color32::from_rgb(0x26, 0x26, 0x28),
-    Color32::from_rgb(0x1d, 0x1d, 0x1f),
-    Color32::from_rgb(0x1a, 0x1a, 0x1c),
-];
-const CABLE_GREY: [Color32; 3] = [
-    Color32::from_rgb(0xc9, 0xcd, 0xd1),
-    Color32::from_rgb(0x8d, 0x93, 0x99),
-    Color32::from_rgb(0x96, 0x9c, 0xa2),
-];
+const CABLE_BLACK: [Color32; 3] =
+    [Color32::from_rgb(0x26, 0x26, 0x28), Color32::from_rgb(0x1d, 0x1d, 0x1f), Color32::from_rgb(0x1a, 0x1a, 0x1c)];
+const CABLE_GREY: [Color32; 3] =
+    [Color32::from_rgb(0xc9, 0xcd, 0xd1), Color32::from_rgb(0x8d, 0x93, 0x99), Color32::from_rgb(0x96, 0x9c, 0xa2)];
 const CABLE_GREY_SHINE: Color32 = Color32::from_rgb(0xc4, 0xc9, 0xce);
 
 /// OUT0..OUT15 LEDs (D8..D23), x of the package centre; all at `LED_Y`.
@@ -1047,13 +1041,18 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
     let y = (frame.bottom() + 6.0 + STRIP / 2.0).min(avail.bottom() - STRIP / 2.0) - d * 0.4;
     let x0 = avail.center().x - SLOTS * d / 2.0 + d / 2.0;
     // a name under each part, as on the silkscreen, and one under each group
+    let (name_color, label_color) = if ui.visuals().dark_mode {
+        (Color32::from_gray(200), Color32::from_gray(160))
+    } else {
+        (Color32::from_gray(35), Color32::from_gray(65))
+    };
     let name = |x: f32, text: &str| {
         painter.text(
             Pos2::new(x, y + d * 1.25),
             egui::Align2::CENTER_CENTER,
             text,
             egui::FontId::proportional(d * 0.5),
-            Color32::from_gray(200),
+            name_color,
         );
     };
     let label = |x: f32, text: &str| {
@@ -1062,7 +1061,7 @@ pub fn show_lcd(ui: &mut egui::Ui, state: &BoardState) -> BoardInput {
             egui::Align2::CENTER_CENTER,
             text,
             egui::FontId::proportional(d * 0.62),
-            Color32::from_gray(160),
+            label_color,
         );
     };
     for bit in (0..16).rev() {

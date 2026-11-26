@@ -733,7 +733,7 @@ impl Machine {
         // SAFETY: the engine of this machine, not running; `all` holds R0..R15 and xPSR.
         unsafe { uc_its_core_regs(self.uc.get_handle().cast(), all.as_mut_ptr()) };
         let m4 = self.uc.get_data().config.cpu == CpuModel::CortexM4;
-        let blocks = if debugging || all[16] & XPSR_IT != 0 {
+        let blocks = if debugging || all[16] & XPSR_IT != 0 || self.uc.get_data().scs.mpu_enabled() {
             Vec::new()
         } else {
             let uc = &self.uc;

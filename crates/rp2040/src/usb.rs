@@ -304,23 +304,22 @@ impl UsbCore {
         Some(data)
     }
 
-    /// Fills an armed OUT buffer; returns false if it is not armed.
-    fn give_out(&mut self, bc_off: usize, buf: usize, half: u32, data: &[u8]) -> bool {
+    /// Fills an armed OUT buffer; returns the number of bytes written, or
+    /// `None` if the buffer is not armed.
+    fn give_out(&mut self, bc_off: usize, buf: usize, half: u32, data: &[u8]) -> Option<usize> {
         let bc = self.word(bc_off);
         let b = bc >> half;
         if b & AVAILABLE == 0 || b & FULL != 0 {
-            return false;
+            return None;
         }
         let n = data.len().min((b & LEN_MASK) as usize).min(64);
-        let Some(dst) = self.dpram.get_mut(buf..buf.saturating_add(n)) else {
-            return false;
-        };
+        let dst = self.dpram.get_mut(buf..buf.saturating_add(n))?;
         log::trace!("Pico USB OUT bc@{bc_off:#x}={bc:#010x} buf@{buf:#x}: {:02x?}", &data[..n]);
         dst.copy_from_slice(&data[..n]);
         let b = (b & !(LEN_MASK | AVAILABLE)) | n as u32 | FULL;
         let mask = 0xFFFF << half;
         self.set_word(bc_off, (bc & !mask) | ((b << half) & mask));
-        true
+        Some(n)
     }
 
     fn ep0_stalled(&self) -> bool {
@@ -389,12 +388,13 @@ impl UsbCore {
                 }
                 Stage::DataOut => {
                     let end = (sent + 64).min(data.len());
-                    if !self.give_out(0x84, EP0_BUF, 0, &data[sent..end]) {
+                    let Some(n) = self.give_out(0x84, EP0_BUF, 0, &data[sent..end]) else {
                         break;
-                    }
+                    };
                     self.buff_status |= 2;
-                    let stage = if end >= data.len() { Stage::StatusIn } else { Stage::DataOut };
-                    self.host = Host::Control { step, stage, data, sent: end };
+                    let next_sent = sent + n;
+                    let stage = if next_sent >= data.len() { Stage::StatusIn } else { Stage::DataOut };
+                    self.host = Host::Control { step, stage, data, sent: next_sent };
                 }
                 Stage::StatusIn => {
                     if self.take_in(0x80, EP0_BUF, 0).is_none() {
@@ -404,7 +404,7 @@ impl UsbCore {
                     self.completed(step, data);
                 }
                 Stage::StatusOut => {
-                    if !self.give_out(0x84, EP0_BUF, 0, &[]) {
+                    if self.give_out(0x84, EP0_BUF, 0, &[]).is_none() {
                         break;
                     }
                     self.buff_status |= 2;
@@ -516,14 +516,12 @@ impl UsbCore {
         let (last_id, sent) = self.out_sent[usize::from(t.ep)];
         let start = if last_id == t.id { sent.min(t.data.len()) } else { 0 };
         let end = (start + 64).min(t.data.len());
-        if !self.give_out(bc, buf, 0, &t.data[start..end]) {
-            return None;
-        }
-        let mut sent_to = end;
-        if double && end - start == 64 && end < t.data.len() {
-            let end2 = (end + 64).min(t.data.len());
-            if self.give_out(bc, buf + 64, 16, &t.data[end..end2]) {
-                sent_to = end2;
+        let n1 = self.give_out(bc, buf, 0, &t.data[start..end])?;
+        let mut sent_to = start + n1;
+        if double && n1 == 64 && sent_to < t.data.len() {
+            let end2 = (sent_to + 64).min(t.data.len());
+            if let Some(n2) = self.give_out(bc, buf + 64, 16, &t.data[sent_to..end2]) {
+                sent_to += n2;
             }
         }
         self.buff_status |= bit;
@@ -575,10 +573,14 @@ impl UsbCore {
             let chunk: Vec<u8> = self.pipe.borrow().to_device.iter().take(128).copied().collect();
             if !chunk.is_empty() {
                 let first = chunk.len().min(64);
-                if self.give_out(bc, buf, 0, &chunk[..first]) {
-                    let mut taken = first;
-                    if double && first == 64 && chunk.len() > 64 && self.give_out(bc, buf + 64, 16, &chunk[64..]) {
-                        taken = chunk.len().min(128);
+                if let Some(n1) = self.give_out(bc, buf, 0, &chunk[..first]) {
+                    let mut taken = n1;
+                    if double
+                        && n1 == 64
+                        && chunk.len() > 64
+                        && let Some(n2) = self.give_out(bc, buf + 64, 16, &chunk[64..])
+                    {
+                        taken += n2;
                     }
                     self.pipe.borrow_mut().to_device.drain(..taken);
                     self.buff_status |= 1 << (2 * cdc.bulk_out + 1);
