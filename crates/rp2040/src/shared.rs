@@ -85,17 +85,22 @@ impl SharedBus {
         }
         let mut shared_ctx = DeviceCtx { clock: &mut s.clock, nvic: &mut s.nvic };
         // the DMA up to now before the access, and what the access lets it do
+        let dma_busy = s.dma.as_ref().is_some_and(|d| d.borrow().any_busy());
         let pump = |bus: &mut Bus, ctx: &mut DeviceCtx| s.dma.as_ref().is_some_and(|d| dma::pump(d, bus, ctx));
-        let mut moved = pump(&mut s.bus, &mut shared_ctx);
+        let mut moved = dma_busy && pump(&mut s.bus, &mut shared_ctx);
         let result = f(&mut s.bus, &mut shared_ctx);
-        moved |= pump(&mut s.bus, &mut shared_ctx);
+        if changes || dma_busy {
+            moved |= pump(&mut s.bus, &mut shared_ctx);
+        }
         let accessed = s.bus.take_access_event();
         if changes || moved {
             s.next_event = s.bus.next_event();
         } else if let Some(t) = accessed {
             s.next_event = Some(s.next_event.map_or(t, |n| n.min(t)));
         }
-        ctx.clock.follow(&s.clock);
+        if changes || ctx.clock.cpu_hz() != s.clock.cpu_hz() {
+            ctx.clock.follow(&s.clock);
+        }
         let levels = s.nvic.irq_levels_low() & SHARED_IRQS;
         // lines that changed, and those that are high: software may have
         // cleared their pending state, which a high line sets again

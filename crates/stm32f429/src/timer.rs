@@ -1157,21 +1157,29 @@ impl GpTimer {
         // the turn at the top (center-aligned) also re-evaluates PWM
         let top = (self.center() != 0 && !self.edge_clocked()).then(|| u128::from(self.arr_active));
         for (ch, last) in last.iter_mut().enumerate().take(self.channels) {
-            let mut events: Vec<(u128, u8)> = self
-                .match_phases(ch, true)
-                .into_iter()
-                .flatten()
-                .filter(|&m| from < m && m <= to)
-                .map(|m| (m, 1))
-                .collect();
-            for q in [top, Some(wrap)].into_iter().flatten() {
-                if from < q && q <= to {
-                    events.push((q, 0)); // the wrap first, then a match at the same phase
+            if self.oc_mode(ch) == 0 {
+                continue;
+            }
+            let mut events = [(0u128, 0u8); 4];
+            let mut len = 0usize;
+            for m in self.match_phases(ch, true).into_iter().flatten() {
+                if from < m && m <= to {
+                    events[len] = (m, 1);
+                    len += 1;
                 }
             }
-            events.sort_unstable();
+            for q in [top, Some(wrap)].into_iter().flatten() {
+                if from < q && q <= to {
+                    events[len] = (q, 0); // the wrap first, then a match at the same phase
+                    len += 1;
+                }
+            }
+            if len == 0 {
+                continue;
+            }
+            events[..len].sort_unstable();
             let traced = self.trgo_ref_ch() == Some(ch);
-            for (q, kind) in events {
+            for &(q, kind) in &events[..len] {
                 let changed = if kind == 0 { self.oc_wrap(ch, q) } else { self.oc_match(ch, q) };
                 if changed {
                     *last = Some(q);
@@ -1329,13 +1337,24 @@ impl GpTimer {
     }
 
     /// Ticks elapsed since `base_ps` and the remainder in "ps * hz" units.
+    #[inline]
     fn elapsed_ticks(&self, now_ps: u64) -> (u128, u128) {
         if !self.running() || self.edge_clocked() {
             return (0, 0);
         }
         // Times are whole picoseconds, rounded down: a tick that falls on
         // `now_ps` counts though both ends may be up to a picosecond off.
-        let dt = u128::from((now_ps + TIME_SLACK_PS).saturating_sub(self.base_ps)) * u128::from(self.kernel_hz());
+        let dt_ps = (now_ps + TIME_SLACK_PS).saturating_sub(self.base_ps);
+        let hz = u64::from(self.kernel_hz());
+        // Common case (MHz timer clocks): divide both sides by 10^6 to stay in u64.
+        if hz.is_multiple_of(1_000_000) {
+            let mhz = hz / 1_000_000;
+            if let Some(num) = dt_ps.checked_mul(mhz) {
+                let den = 1_000_000u64 * (u64::from(self.psc_active) + 1);
+                return (u128::from(num / den), u128::from(num % den) * 1_000_000);
+            }
+        }
+        let dt = u128::from(dt_ps) * u128::from(hz);
         let tick = self.tick_ps_num();
         (dt / tick, dt % tick)
     }
@@ -1570,12 +1589,13 @@ impl GpTimer {
     }
 
     /// Takes the input edges, then processes overflows and compare matches up to now.
-    fn advance(&mut self, ctx: &mut DeviceCtx) {
+    fn advance(&mut self, ctx: &mut DeviceCtx) -> u64 {
         let now_ps = ctx.clock.time_ps();
         self.take_input_edges(ctx, now_ps);
         self.take_itr_events(ctx, now_ps);
         self.check_break();
         self.advance_to(ctx, now_ps);
+        now_ps
     }
 
     /// Processes overflows and compare matches up to `now_ps`.
@@ -1857,15 +1877,41 @@ impl Peripheral for GpTimer {
         if !self.clock_enabled() {
             return 0;
         }
-        if off & !3 == 0x4C {
+        let aligned = off & !3;
+        if aligned == 0x4C {
             let reg = self.burst_step();
             return self.read(ctx, reg, 4);
         }
-        self.advance(ctx);
-        let v = self.reg(off & !3, ctx.clock.time_ps());
-        if let 0x34..=0x40 = off & !3 {
+        // Fast path for polling CNT on a plain free-running timer (no captures,
+        // slave/encoder inputs, outputs, interrupts, TRGO, or pending wrap).
+        if aligned == 0x24
+            && self.reinit_read.is_none()
+            && self.watched.is_empty()
+            && self.enc_watched.is_empty()
+            && self.itr_slave().is_none()
+            && self.dier == 0
+            && self.ccer == 0
+            && (self.cr2 & 0x70) == 0
+            && self.trgo_ref_ch().is_none()
+            && (self.cc_irq.is_none() || self.bdtr & BDTR_BKE == 0)
+            && self.next_event.is_none_or(|t| ctx.now() < t)
+            && self.running()
+            && self.arr_active != 0
+            && self.center() == 0
+            && !self.counts_down()
+        {
+            let now_ps = ctx.clock.time_ps();
+            let (ticks, _) = self.elapsed_ticks(now_ps);
+            let pos = u128::from(self.cnt_base) + ticks;
+            if pos <= u128::from(self.arr_active) {
+                return extract_read(pos as u32, off, size);
+            }
+        }
+        let now_ps = self.advance(ctx);
+        let v = self.reg(aligned, now_ps);
+        if let 0x34..=0x40 = aligned {
             // reading a captured value clears its flag
-            let ch = ((off & !3) - 0x34) as usize / 4;
+            let ch = (aligned - 0x34) as usize / 4;
             if self.capture_source(ch).is_some() {
                 self.sr &= !(2 << ch);
             }
@@ -1886,8 +1932,7 @@ impl Peripheral for GpTimer {
             let reg = self.burst_step();
             return self.write(ctx, reg, 4, value);
         }
-        self.advance(ctx);
-        let now_ps = ctx.clock.time_ps();
+        let now_ps = self.advance(ctx);
         let aligned = off & !3;
         let v = merge_write(self.reg(aligned, now_ps), off, size, value);
         let mask = self.max();

@@ -377,12 +377,15 @@ impl Pio {
                         sm.next += n * per;
                     }
                 }
-                // Other machines may wait for what this one did.
-                let next = cycle + 1;
-                for (j, other) in self.sm.iter_mut().enumerate() {
-                    if j != i && other.stalled {
-                        other.stalled = false;
-                        other.align(next);
+                // Other machines may wait for what this one did; a side-set-free
+                // JMP changes no pins, FIFOs, or IRQ flags.
+                if op != 0 || apply {
+                    let next = cycle + 1;
+                    for (j, other) in self.sm.iter_mut().enumerate() {
+                        if j != i && other.stalled {
+                            other.stalled = false;
+                            other.align(next);
+                        }
                     }
                 }
             }
@@ -668,9 +671,39 @@ impl Pio {
         }
     }
 
-    /// Earliest instruction of a state machine that is not waiting.
-    fn next_instruction(&self) -> Option<u64> {
-        (0..4).filter(|&i| self.running(i)).map(|i| self.sm[i].next.div_ceil(256)).min()
+    /// Earliest cycle at which a running state machine can change any
+    /// observable PIO state (pins, FIFOs, IRQs, PC). A side-set-free
+    /// `JMP X--`/`JMP Y--` self-loop only counts down its scratch register
+    /// until it reaches zero.
+    fn next_visible_event(&self) -> Option<u64> {
+        (0..4)
+            .filter(|&i| self.running(i))
+            .map(|i| {
+                let sm = &self.sm[i];
+                let mut tick = sm.next;
+                if sm.exec.is_none() {
+                    let instr = self.instr[sm.pc as usize];
+                    let op = instr >> 13;
+                    let cond = (instr >> 5) & 7;
+                    if op == 0 && (cond == 2 || cond == 4) && u16::from(sm.pc) == instr & 0x1F && sm.current == instr {
+                        let count = sm.pinctrl >> 29;
+                        let side_en = sm.execctrl & (1 << 30) != 0;
+                        let field = u32::from(instr >> 8) & 0x1F;
+                        let side = field >> (5 - count);
+                        let apply = if side_en && count > 0 { side >> (count - 1) & 1 != 0 } else { count > 0 };
+                        if !apply {
+                            let counter = if cond == 2 { sm.x } else { sm.y };
+                            if counter > 0 {
+                                let delay = field & ((1 << (5 - count)) - 1);
+                                let per = (1 + u64::from(delay)) * sm.div();
+                                tick = tick.saturating_add(u64::from(counter).saturating_mul(per));
+                            }
+                        }
+                    }
+                }
+                tick.div_ceil(256)
+            })
+            .min()
     }
 }
 
@@ -751,7 +784,9 @@ impl Block for Pio {
                 0x140 => (self.intr() | self.intf[1]) & self.inte[1],
                 _ => 0,
             };
-        self.sync_irqs(ctx);
+        if matches!(off, 0x020..=0x02C) {
+            self.sync_irqs(ctx);
+        }
         v
     }
 
@@ -867,14 +902,14 @@ impl Block for Pio {
         // Only interrupts need the state machines on time (also the DMA's,
         // when a FIFO paces a channel); pins and FIFOs are brought up to
         // date when they are looked at.
-        let irq = if self.inte[0] | self.inte[1] != 0 { self.next_instruction() } else { None };
+        let irq = if self.inte[0] | self.inte[1] != 0 { self.next_visible_event() } else { None };
         [irq, self.dma_end()].into_iter().flatten().min()
     }
 
     fn read_stable_until(&self, off: u32, _clock: &Clock) -> u64 {
         match off {
             0x020..=0x02C => 0,
-            _ => self.next_instruction().unwrap_or(u64::MAX),
+            _ => self.next_visible_event().unwrap_or(u64::MAX),
         }
     }
 

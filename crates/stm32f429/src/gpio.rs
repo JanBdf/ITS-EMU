@@ -78,6 +78,9 @@ pub struct PortState {
     duty_last: u64,
     /// Cached result of [`Self::idr`], updated whenever pin state changes.
     idr_cache: u16,
+    /// Bonded pins configured as push-pull outputs (`MODER == 01`, `OTYPER == 0`),
+    /// whose IDR bit equals their ODR bit directly.
+    push_pull_out: u16,
 }
 
 impl PortState {
@@ -106,6 +109,14 @@ impl PortState {
     #[inline]
     fn refresh_idr(&mut self) {
         self.idr_cache = self.idr() as u16;
+        // Gather pins with MODER == 01 (Output) and OTYPER == 0 (push-pull).
+        let x = !(self.moder ^ 0x5555_5555);
+        let mut b = x & (x >> 1) & 0x5555_5555;
+        b = (b | (b >> 1)) & 0x3333_3333;
+        b = (b | (b >> 2)) & 0x0F0F_0F0F;
+        b = (b | (b >> 4)) & 0x00FF_00FF;
+        let out = ((b | (b >> 8)) & 0xFFFF) as u16;
+        self.push_pull_out = out & !(self.otyper as u16) & self.bonded;
     }
 
     pub fn mode(&self, pin: u32) -> PinMode {
@@ -165,11 +176,11 @@ impl PortState {
         let now = now.max(self.duty_last);
         let dt = now - self.duty_last;
         if dt > 0 {
-            let levels = u32::from(self.idr_cache);
-            for (pin, high) in self.high_cycles.iter_mut().enumerate() {
-                if levels & (1 << pin) != 0 {
-                    *high += dt;
-                }
+            let mut levels = self.idr_cache;
+            while levels != 0 {
+                let pin = levels.trailing_zeros() as usize;
+                self.high_cycles[pin] += dt;
+                levels &= levels - 1;
             }
         }
         self.duty_last = now;
@@ -195,15 +206,24 @@ impl PortState {
 
     /// Changes ODR and counts rising edges of the resulting pin levels.
     fn set_odr(&mut self, odr: u32, now: u64) {
+        let odr = odr & 0xFFFF;
+        if odr == self.odr {
+            return;
+        }
         self.accumulate(now);
         let before = u32::from(self.idr_cache);
-        self.odr = odr & 0xFFFF;
-        self.refresh_idr();
-        let rising = u32::from(self.idr_cache) & !before;
-        for (pin, rises) in self.rises.iter_mut().enumerate() {
-            if rising & (1 << pin) != 0 {
-                *rises = rises.wrapping_add(1);
-            }
+        let diff = (odr ^ self.odr) as u16;
+        self.odr = odr;
+        if diff & !self.push_pull_out == 0 {
+            self.idr_cache = (self.idr_cache & !diff) | (odr as u16 & diff);
+        } else {
+            self.refresh_idr();
+        }
+        let mut rising = u32::from(self.idr_cache) & !before;
+        while rising != 0 {
+            let pin = rising.trailing_zeros() as usize;
+            self.rises[pin] = self.rises[pin].wrapping_add(1);
+            rising &= rising - 1;
         }
     }
 
@@ -489,13 +509,34 @@ impl Peripheral for GpioPort {
         if !self.clock_enabled() {
             return;
         }
+        let mut bank = self.bank.borrow_mut();
+        let aligned = off & !3;
+        // Fast path for ODR/BSRR writes: skip no-ops and avoid refreshing idr_cache twice.
+        if aligned == 0x14 || aligned == 0x18 {
+            let p = &mut bank.ports[self.index];
+            let odr = if aligned == 0x14 {
+                merge_write(p.odr, off, size, value) & 0xFFFF
+            } else {
+                // Narrow writes only touch their own bits; the rest is zero.
+                let v = merge_write(0, off, size, value);
+                let set = v & 0xFFFF;
+                let reset = v >> 16;
+                ((p.odr & !reset) | set) & 0xFFFF // set wins over reset
+            };
+            if odr == p.odr {
+                return;
+            }
+            if p.exti_watch | p.cap_watch | p.log_watch == 0 {
+                p.set_odr(odr, now);
+                return;
+            }
+        }
         // Edges pass a synchronizer in the APB2 clock domain of EXTI: 26
         // instead of 20 cycles from a BSRR write until a polling loop sees
         // EXTI->PR set at 180/90 MHz.
         let c = self.clocks.get();
         let due = now + 4 * u64::from(c.hclk / c.pclk2.max(1));
-        let mut bank = self.bank.borrow_mut();
-        bank.ports[self.index].tracked(due, |p| match off & !3 {
+        bank.ports[self.index].tracked(due, |p| match aligned {
             0x00 => p.moder = merge_write(p.moder, off, size, value),
             0x04 => p.otyper = merge_write(p.otyper, off, size, value) & 0xFFFF,
             0x08 => p.ospeedr = merge_write(p.ospeedr, off, size, value),

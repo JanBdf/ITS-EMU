@@ -81,7 +81,9 @@ impl Block for Timer {
     }
 
     fn read(&mut self, ctx: &mut DeviceCtx, off: u32) -> u32 {
-        self.update(ctx);
+        if self.armed != 0 {
+            self.update(ctx);
+        }
         let now = self.now_us(ctx.clock);
         match off {
             0x08 => self.hr,
@@ -135,6 +137,9 @@ impl Block for Timer {
     }
 
     fn update(&mut self, ctx: &mut DeviceCtx) {
+        if self.armed == 0 {
+            return;
+        }
         let now = ctx.now();
         let mut fired = false;
         for n in 0..4 {
@@ -153,6 +158,9 @@ impl Block for Timer {
     }
 
     fn next_event(&self) -> Option<u64> {
+        if self.armed == 0 {
+            return None;
+        }
         self.fire_at.iter().flatten().copied().min()
     }
 

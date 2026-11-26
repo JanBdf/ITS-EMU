@@ -14,22 +14,32 @@ pub struct Clock {
     seg_cycles: u64,
     /// Virtual time in picoseconds at the last frequency change.
     seg_ps: u64,
-    /// Picoseconds per cycle where that is a whole number (125 MHz: 8000),
-    /// else 0: the conversions then need no 128-bit division, which polling
-    /// loops reading a timer would pay several times per iteration.
-    ps_per_cycle: u64,
+    /// Reduced ratio `PS_PER_S / cpu_hz = ps_num / ps_den` (for 125 MHz:
+    /// 8000 / 1; for 180 MHz: 50000 / 9), so conversions use 64-bit math
+    /// instead of 128-bit software division.
+    ps_num: u64,
+    ps_den: u64,
 }
 
-/// See `Clock::ps_per_cycle`.
-fn whole_ps_per_cycle(cpu_hz: u32) -> u64 {
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+/// Reduced ratio `PS_PER_S / cpu_hz`.
+fn ps_ratio(cpu_hz: u32) -> (u64, u64) {
     let hz = u64::from(cpu_hz);
-    if (PS_PER_S as u64).is_multiple_of(hz) { PS_PER_S as u64 / hz } else { 0 }
+    let g = gcd(PS_PER_S as u64, hz);
+    (PS_PER_S as u64 / g, hz / g)
 }
 
 impl Clock {
     pub fn new(cpu_hz: u32) -> Self {
         assert!(cpu_hz > 0);
-        Self { cycles: 0, cpu_hz, seg_cycles: 0, seg_ps: 0, ps_per_cycle: whole_ps_per_cycle(cpu_hz) }
+        let (ps_num, ps_den) = ps_ratio(cpu_hz);
+        Self { cycles: 0, cpu_hz, seg_cycles: 0, seg_ps: 0, ps_num, ps_den }
     }
 
     /// Executed CPU cycles since reset.
@@ -63,10 +73,11 @@ impl Clock {
         self.seg_ps = self.time_ps();
         self.seg_cycles = self.cycles;
         self.cpu_hz = hz;
-        self.ps_per_cycle = whole_ps_per_cycle(hz);
+        (self.ps_num, self.ps_den) = ps_ratio(hz);
     }
 
     /// Virtual time since reset in picoseconds.
+    #[inline]
     pub fn time_ps(&self) -> u64 {
         self.ps_at_cycle(self.cycles)
     }
@@ -78,32 +89,34 @@ impl Clock {
         self.cpu_hz = other.cpu_hz;
         self.seg_cycles = other.seg_cycles;
         self.seg_ps = other.seg_ps;
-        self.ps_per_cycle = other.ps_per_cycle;
+        self.ps_num = other.ps_num;
+        self.ps_den = other.ps_den;
     }
 
     /// First cycle (not before the last frequency change) at which
     /// [`Self::time_ps`] reaches `ps`, assuming the frequency stays the same.
+    #[inline]
     pub fn cycle_at_ps(&self, ps: u64) -> u64 {
-        if self.ps_per_cycle != 0 {
-            // the same as below: dt * hz / 1e12 = dt / ps_per_cycle
-            let delta = ps.saturating_sub(self.seg_ps).div_ceil(self.ps_per_cycle);
-            return self.seg_cycles.saturating_add(delta);
+        let dt = ps.saturating_sub(self.seg_ps);
+        if self.ps_den == 1 {
+            return self.seg_cycles.saturating_add(dt.div_ceil(self.ps_num));
         }
-        let dt = u128::from(ps.saturating_sub(self.seg_ps));
-        let delta = (dt * u128::from(self.cpu_hz)).div_ceil(PS_PER_S);
+        if let Some(prod) = dt.checked_mul(self.ps_den) {
+            return self.seg_cycles.saturating_add(prod.div_ceil(self.ps_num));
+        }
+        let delta = (u128::from(dt) * u128::from(self.cpu_hz)).div_ceil(PS_PER_S);
         self.seg_cycles.saturating_add(u64::try_from(delta).unwrap_or(u64::MAX))
     }
 
     /// Virtual time (ps) at `cycle` (not before the last frequency change).
+    #[inline]
     pub fn ps_at_cycle(&self, cycle: u64) -> u64 {
-        if self.ps_per_cycle != 0
-            && let Some(ps) = cycle.saturating_sub(self.seg_cycles).checked_mul(self.ps_per_cycle)
-        {
-            // the same as below: delta * 1e12 / hz = delta * ps_per_cycle
+        let delta = cycle.saturating_sub(self.seg_cycles);
+        if let Some(prod) = delta.checked_mul(self.ps_num) {
+            let ps = if self.ps_den == 1 { prod } else { prod / self.ps_den };
             return self.seg_ps + ps;
         }
-        let delta = u128::from(cycle.saturating_sub(self.seg_cycles));
-        self.seg_ps + (delta * PS_PER_S / u128::from(self.cpu_hz)) as u64
+        self.seg_ps + (u128::from(delta) * PS_PER_S / u128::from(self.cpu_hz)) as u64
     }
 
     pub fn time_ns(&self) -> u64 {
@@ -138,7 +151,8 @@ mod tests {
             fast.advance(12_345);
             fast.set_cpu_hz(hz);
             let mut slow = fast.clone();
-            slow.ps_per_cycle = 0;
+            slow.ps_num = PS_PER_S as u64;
+            slow.ps_den = u64::from(hz);
             for n in [0u64, 1, 7, 124, 125, 126, 999_999, 1 << 33, 1 << 52, u64::MAX / 8000 + 12_346] {
                 let cycle = fast.cycles().saturating_add(n);
                 assert_eq!(fast.ps_at_cycle(cycle), slow.ps_at_cycle(cycle), "{hz} Hz, cycle +{n}");

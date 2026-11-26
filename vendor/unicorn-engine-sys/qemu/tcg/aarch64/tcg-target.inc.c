@@ -541,6 +541,7 @@ typedef enum {
 
     /* Logical shifted register instructions (with a shift).  */
     I3502S_AND_LSR  = I3510_AND | (1 << 22),
+    I3502S_EOR_LSR  = I3510_EOR | (1 << 22),
 
     /* AdvSIMD copy */
     I3605_DUP      = 0x0e000400,
@@ -1678,9 +1679,21 @@ static void tcg_out_tlb_read(TCGContext *s, TCGReg addr_reg, MemOp opc,
                  TLB_MASK_TABLE_OFS(mem_index), 1, 0);
 
     /* Extract the TLB index from the address into X0.  */
+#if (defined(__aarch64__) || defined(_M_ARM64)) && !defined(TLB_INDEX_FOLD)
+#error "TLB_INDEX_FOLD (exec/cpu-defs.h) must be visible: tlb_index() uses it"
+#endif
+#ifdef TLB_INDEX_FOLD
+    /* ITS-EMU: index of tlb_index(): addr ^ (addr >> TLB_INDEX_FOLD). */
+    tcg_out_insn(s, 3502S, EOR_LSR, TARGET_LONG_BITS == 64,
+                 TCG_REG_TMP, addr_reg, addr_reg, TLB_INDEX_FOLD);
+    tcg_out_insn(s, 3502S, AND_LSR, mask_type == TCG_TYPE_I64,
+                 TCG_REG_X0, TCG_REG_X0, TCG_REG_TMP,
+                 TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
+#else
     tcg_out_insn(s, 3502S, AND_LSR, mask_type == TCG_TYPE_I64,
                  TCG_REG_X0, TCG_REG_X0, addr_reg,
                  TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
+#endif
 
     /* Add the tlb_table pointer, creating the CPUTLBEntry address into X1.  */
     tcg_out_insn(s, 3502, ADD, 1, TCG_REG_X1, TCG_REG_X1, TCG_REG_X0);

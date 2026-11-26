@@ -375,10 +375,10 @@
 + * the first pages of flash (0x0800_0000), SRAM (0x2000_0000) and the
 + * peripherals share entries and evict each other on every alternating
 + * access (both then take the slow path). Folding higher address bits into
-+ * the index separates them. Only for 64-bit x86 hosts, whose TCG backend
-+ * computes the index the same way (tcg_out_tlb_load).
++ * the index separates them. For 64-bit x86 and AArch64 hosts, whose TCG
++ * backends compute the index the same way (tcg_out_tlb_load / tcg_out_tlb_read).
 + */
-+#if defined(__x86_64__) || defined(_M_X64)
++#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 +#define TLB_INDEX_FOLD 14
 +#endif
 +
@@ -840,6 +840,38 @@
      uc_common_init(uc);
 +    its_init_write_tracking(uc);
  }
+--- a/qemu/tcg/aarch64/tcg-target.inc.c
++++ b/qemu/tcg/aarch64/tcg-target.inc.c
+@@ -541,6 +541,7 @@
+ 
+     /* Logical shifted register instructions (with a shift).  */
+     I3502S_AND_LSR  = I3510_AND | (1 << 22),
++    I3502S_EOR_LSR  = I3510_EOR | (1 << 22),
+ 
+     /* AdvSIMD copy */
+     I3605_DUP      = 0x0e000400,
+@@ -1678,9 +1679,21 @@
+                  TLB_MASK_TABLE_OFS(mem_index), 1, 0);
+ 
+     /* Extract the TLB index from the address into X0.  */
++#if (defined(__aarch64__) || defined(_M_ARM64)) && !defined(TLB_INDEX_FOLD)
++#error "TLB_INDEX_FOLD (exec/cpu-defs.h) must be visible: tlb_index() uses it"
++#endif
++#ifdef TLB_INDEX_FOLD
++    /* ITS-EMU: index of tlb_index(): addr ^ (addr >> TLB_INDEX_FOLD). */
++    tcg_out_insn(s, 3502S, EOR_LSR, TARGET_LONG_BITS == 64,
++                 TCG_REG_TMP, addr_reg, addr_reg, TLB_INDEX_FOLD);
++    tcg_out_insn(s, 3502S, AND_LSR, mask_type == TCG_TYPE_I64,
++                 TCG_REG_X0, TCG_REG_X0, TCG_REG_TMP,
++                 TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
++#else
+     tcg_out_insn(s, 3502S, AND_LSR, mask_type == TCG_TYPE_I64,
+                  TCG_REG_X0, TCG_REG_X0, addr_reg,
+                  TARGET_PAGE_BITS - CPU_TLB_ENTRY_BITS);
++#endif
+ 
+     /* Add the tlb_table pointer, creating the CPUTLBEntry address into X1.  */
+     tcg_out_insn(s, 3502, ADD, 1, TCG_REG_X1, TCG_REG_X1, TCG_REG_X0);
 --- a/qemu/tcg/i386/tcg-target.inc.c
 +++ b/qemu/tcg/i386/tcg-target.inc.c
 @@ -1733,6 +1733,16 @@

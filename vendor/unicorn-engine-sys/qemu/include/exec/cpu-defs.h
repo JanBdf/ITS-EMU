@@ -90,10 +90,10 @@ typedef uint64_t target_ulong;
  * the first pages of flash (0x0800_0000), SRAM (0x2000_0000) and the
  * peripherals share entries and evict each other on every alternating
  * access (both then take the slow path). Folding higher address bits into
- * the index separates them. Only for 64-bit x86 hosts, whose TCG backend
- * computes the index the same way (tcg_out_tlb_load).
+ * the index separates them. For 64-bit x86 and AArch64 hosts, whose TCG
+ * backends compute the index the same way (tcg_out_tlb_load / tcg_out_tlb_read).
  */
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 #define TLB_INDEX_FOLD 14
 #endif
 
