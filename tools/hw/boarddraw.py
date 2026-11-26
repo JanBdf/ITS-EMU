@@ -70,7 +70,7 @@ GLASS = list(zip(_g[0::2], _g[1::2]))
 # the photo for 2.54 mm) and from the active area of the display (83.52 ×
 # 55.68 mm).  Coordinates measured in that photo are drawn inside layer(),
 # which undoes the scaling.
-NADIR = (690.0, 330.0)
+NADIR = (741.0, 410.0)
 M_NUCLEO = 1.0438
 M_SHIELD = 1.10
 CAM_H = 14.0 * M_NUCLEO / (M_NUCLEO - 1)      # height of the camera above the carrier, mm
@@ -456,17 +456,17 @@ def smd_r(x, y, w, h, body='#202022', vertical=False):
                       rect(x - w / 2 + e, y - h / 2, x + w / 2 - e, y + h / 2, body)])
 
 
-def lit_led(x, y, color='#ff9a1c'):
-    """0805 LED that is on (power LEDs D24/D25)."""
-    gid = f'glow{int(x)}{int(y)}'
-    svg.defs.append(f'<radialGradient id="{gid}"><stop offset="0" stop-color="#fffbe8"/>'
-                    f'<stop offset="0.5" stop-color="#ffe8a8"/>'
-                    f'<stop offset="0.67" stop-color="{color}" stop-opacity="0.95"/>'
-                    f'<stop offset="0.85" stop-color="{color}" stop-opacity="0.3"/>'
-                    f'<stop offset="1" stop-color="{color}" stop-opacity="0"/></radialGradient>')
-    return '\n'.join([rect(x - 4.5, y - 8.5, x + 4.5, y - 5.5, TIN, 0.5), rect(x - 4.5, y + 5.5, x + 4.5, y + 8.5, TIN, 0.5),
-                      rect(x - 4.8, y - 6.5, x + 4.8, y + 6.5, '#f7d27a', 1),
-                      circle(x, y, 5.4, f'url(#{gid})')])
+def led_0805(x, y):
+    """0805 SMD LED in its off state (power LEDs D24/D25, lit by board.rs)."""
+    return '\n'.join([
+        rect(x - 4.5, y - 8.5, x + 4.5, y - 5.5, TIN, 0.5),
+        rect(x - 4.5, y + 5.5, x + 4.5, y + 8.5, TIN, 0.5),
+        rect(x - 4.8, y - 6.5, x + 4.8, y + 6.5, '#e8dfc8', 0.9),
+        rect(x - 4.1, y - 5.6, x + 4.1, y + 5.6, LED_BODY, 0.6),
+        circle(x, y, 3.2, '#efe3c4'),
+        circle(x, y, 3.2, 'none', ' stroke="#d8c9a6" stroke-width="0.45"'),
+        rect(x - 1.1, y - 1.3, x + 1.1, y + 1.3, '#cdb68a', 0.25),
+    ])
 
 
 # ======================================================================
@@ -523,11 +523,10 @@ R_ARRAY_X = ([380.7, 391.3, 402.0, 412.6, 423.2, 433.9, 444.5, 454.8] +        #
 R24_X = [785.0, 795.7, 806.3, 816.6, 827.0, 837.7, 847.9, 858.5]               # R31..R24
 R41_X = [555.6 + i * 10.85 for i in range(7)]                                  # R47..R41
 R37_Y = 107.7
-# CN11 / CN12: 2 × 36 sockets the Nucleo's Morpho pins plug into; the Nucleo
-# uses columns 2..36
-MORPHO_SOCKET_X = [345.55 + i * 10.548 for i in range(36)]
-# rows: under the Nucleo's Morpho pins
-MORPHO_SOCKET_Y = [(75.98, 86.52), (328.0, 338.6)]
+# CN11 / CN12: 2 × 36 sockets (col 1 = GND, cols 2..36 = Nucleo Morpho pins)
+MORPHO_SOCKET_X = [350.31 + i * 10.548 for i in range(36)]
+# rows: under the Nucleo's Morpho + GND pins (measured on bare board 031521)
+MORPHO_SOCKET_Y = [(79.00, 89.54), (330.96, 341.50)]
 # holes under the Nucleo
 HIDDEN_HOLES = [(419.0, 115.4), (419.0, 303.0), (735.1, 110.6), (729.9, 311.0)]
 
@@ -874,7 +873,7 @@ def carrier():
     out.append(smd_r(281.7, 133.5, 11.5, 5.4, '#c9b48e'))
     for x in (925.9, 957.2):                         # R50, R49
         out.append(smd_r(x, 9.9, 13.6, 6.0, '#262628'))
-    out += [lit_led(925.9, 40.7), lit_led(957.2, 40.7)]
+    out += [led_0805(925.9, 40.7), led_0805(957.2, 40.7)]
     out.append(rs232())
     out.append(carrier_hidden())
     return '\n'.join(out)
@@ -962,11 +961,13 @@ def carrier_usb():
     """CN0 (micro USB, drawn outside the board clip so it overhangs into the notch like on the Nucleo)."""
     out = []
     for i in range(5):
-        out.append(rect(824.5, 139.0 + i * 2.7, 830.0, 140.3 + i * 2.7, TIN, 0.2))
+        out.append(rect(824.5, 140.0 + i * 2.7, 830.0, 141.3 + i * 2.7, TIN, 0.2))
+    for y in (128.5, 163.5):
+        out.append(rect(826.5, y - 1.8, 834.0, y + 3.0, TIN, 0.5))
     out.append(rect(828.0, 129.8, 856.0, 163.2, '#bdbab2', 0, ' stroke="#8f8c84" stroke-width="0.5"'))
     out.append(rect(831.0, 133.0, 853.0, 160.0, '#cfccc4', 0))
-    for y in (128.5, 160.5):
-        out.append(rect(826.5, y - 1.8, 834.0, y + 3.0, TIN, 0.5))
+    for y in (138.5, 151.5):
+        out.append(rect(843.2, y, 850.2, y + 2.0, '#949285', 0))
     return '\n'.join(out)
 
 
@@ -1049,7 +1050,7 @@ N_SILK = '#4d63a3'
 N_BLUE = '#1d6ad2'
 N_FONT = 'LiberationSans-Regular.ttf'
 N_BOLD = 'LiberationSans-Bold.ttf'
-MORPHO_X = [341.5 + i * 11.01 for i in range(35)]
+MORPHO_X = [344.2 + i * 11.01 for i in range(35)]
 
 
 def on_nucleo(h, s):
@@ -1077,7 +1078,7 @@ def chip(x0, y0, x1, y1, pins_lr=0, pins_tb=0, pitch=5.27, color='#232325', plen
     return '\n'.join(out)
 
 
-MORPHO_ROWS = (64.5, 76.3, 327.5, 339.3)
+MORPHO_ROWS = (64.5, 75.5, 327.5, 338.5)
 
 
 def morpho_pin(x, y):
@@ -1376,11 +1377,11 @@ def nucleo():
     for x in MORPHO_X:
         for y in MORPHO_ROWS:
             out.append(morpho_pin(x, y))
-    for y0 in (59.4, 320.6):
-        out.append(rect_stroke(328.2, y0, 338.6, y0 + 21.0, N_SILK, 0.5))
-        for dy in (6.6, 15.8):
-            out.append(circle(333.4, y0 + dy, 3.4, '#cfcbc2'))
-            out.append(circle(333.4, y0 + dy, 1.7, '#e8e5de'))
+    for rows in (MORPHO_ROWS[:2], MORPHO_ROWS[2:]):
+        out.append(rect_stroke(328.0, rows[0] - 5.1, 338.4, rows[1] + 5.1, N_SILK, 0.5))
+        for y in rows:
+            out.append(circle(333.2, y, 3.4, '#cfcbc2'))
+            out.append(circle(333.2, y, 1.7, '#e8e5de'))
     out.append(nt(323.6, 71.5, 'GND', 3.6))
     out.append(nt(323.6, 330.2, 'GND', 3.6))
     # ZIO sockets CN7 / CN10 (CN8 / CN9 are under the display)

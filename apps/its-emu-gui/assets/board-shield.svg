@@ -2,7 +2,7 @@
 <defs>
 
 </defs>
-<g transform="matrix(0.909091 0 0 0.909091 62.7273 30.0000)">
+<g transform="matrix(0.909091 0 0 0.909091 67.3636 37.2727)">
 <rect x="475.5" y="50.6" width="433.1" height="280.2" rx="0.8" fill="#191b1d" stroke="#6d6a62" stroke-width="0.5"/>
 <rect x="486" y="51.4" width="421.8" height="278.6" rx="0.5" fill="#cfc7b5"/>
 <rect x="489.2" y="54.6" width="415.4" height="272.2" rx="0.3" fill="#15191b"/>
@@ -22,5 +22,5 @@
 <rect x="479.8" y="127" width="6.4" height="3" rx="0.35" fill="#cfc7b5"/>
 <rect x="479.8" y="135.5" width="6.4" height="3" rx="0.35" fill="#cfc7b5"/>
 </g>
-<polygon points="532.1,86.5 878.9,86.5 878.9,317.7 532.1,317.7" fill="#08090a"/>
+<polygon points="536.7,93.8 883.5,93.8 883.5,325 536.7,325" fill="#08090a"/>
 </svg>

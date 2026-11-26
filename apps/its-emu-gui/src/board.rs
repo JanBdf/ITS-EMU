@@ -36,6 +36,9 @@ const RESIZE_SETTLE: f64 = 0.15;
 const LED_YELLOW: Color32 = Color32::from_rgb(0xFF, 0xC4, 0x10);
 const LED_BLUE: Color32 = Color32::from_rgb(0x30, 0x70, 0xFF);
 const LED_RED: Color32 = Color32::from_rgb(0xFF, 0x20, 0x30);
+const LED_AMBER: Color32 = Color32::from_rgb(0xFF, 0x9A, 0x1C);
+/// Always-on power LEDs D25 (5V) and D24 (3V3).
+const POWER_LEDS: [(&str, &str, f32, f32); 2] = [("5V", "D25", 925.9, 40.7), ("3V3", "D24", 957.2, 40.7)];
 /// A device's wire end on a pad and the tag beside it.
 pub const DEVICE_WIRE: Color32 = Color32::from_rgb(0x2F, 0xB8, 0x6E);
 const DEVICE_TAG: Color32 = Color32::from_rgba_premultiplied(0x10, 0x4a, 0x2c, 0xe0);
@@ -106,18 +109,18 @@ const SPI_PAD_X: f32 = 239.4;
 /// `ortho(x, y, M_NUCLEO)`): CN1 (ST-LINK USB, micro B, under the display,
 /// opening to the right), CN13 (USB OTG FS, micro B, opening to the left) and
 /// CN14 (Ethernet, RJ45, opening to the left).
-const CN1_OPENING: (f32, f32) = (852.9, 265.6);
-const CN13_OPENING: (f32, f32) = (287.1, 147.4);
-const CN14_OPENING: (f32, f32) = (273.7, 242.7);
+const CN1_OPENING: (f32, f32) = (855.0, 269.0);
+const CN13_OPENING: (f32, f32) = (289.2, 150.8);
+const CN14_OPENING: (f32, f32) = (275.8, 246.1);
 /// Right edge of the display module (where the ST-LINK cable comes out from under it).
-const SHIELD_RIGHT: f32 = 888.7;
+const SHIELD_RIGHT: f32 = 893.3;
 /// Nucleo buttons B1 (USER, blue) and B2 (RESET, black).
-const USER: (f32, f32) = (321.2, 92.4);
-const RESET: (f32, f32) = (321.2, 318.3);
+const USER: (f32, f32) = (323.3, 95.8);
+const RESET: (f32, f32) = (323.3, 321.7);
 /// Active area of the display (480 × 320, 83.52 × 55.68 mm): top left, top
 /// right, bottom right, bottom left.  The board is drawn as seen from straight
 /// above, so this is a rectangle.
-const GLASS: [(f32, f32); 4] = [(532.1, 86.5), (878.9, 86.5), (878.9, 317.7), (532.1, 317.7)];
+const GLASS: [(f32, f32); 4] = [(536.7, 93.8), (883.5, 93.8), (883.5, 325.0), (536.7, 325.0)];
 
 /// Signals of the timer pads, in the order of the pads after GND.
 const TIM_PINS: [(&str, char, u32); 10] = [
@@ -779,6 +782,18 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
     }
     mesh.indices.extend([0, 1, 2, 0, 2, 3]);
     painter.add(Shape::mesh(mesh));
+
+    // ---- Power LEDs: D25 (5V) and D24 (3V3)
+    for (rail, designator, x, y) in POWER_LEDS {
+        pcb.led(x, y, LED_AMBER, 1.0);
+        let text = format!("{rail} power (LED {designator}): on");
+        let resp = ui.interact(
+            pcb.r(x - 10.0, y - 14.0, x + 10.0, y + 14.0),
+            ui.scope_id().with(("pwr", designator)),
+            Sense::hover(),
+        );
+        tip(named(resp, egui::Role::Label, &text), text);
+    }
 
     // ---- Out: OUT15..OUT8 (PE7..PE0, yellow), OUT7..OUT0 (PD7..PD0, blue)
     for (bit, &x) in OUT_X.iter().enumerate() {
