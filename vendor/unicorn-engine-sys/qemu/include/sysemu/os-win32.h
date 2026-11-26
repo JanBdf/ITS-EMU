@@ -37,10 +37,13 @@
  * That is what we need for QEMU. Passing the value of register rsp (default)
  * lets longjmp try a stack unwinding which will crash with generated code. */
 #if defined(_MSC_VER)   // MSVC
-// See qemu/include/utils/setjmp-wrapper-win32.asm for details.
+// See qemu/util/setjmp-wrapper-win32.asm for details.
 extern int _setjmp_wrapper(jmp_buf);
+extern __declspec(noreturn) void _longjmp_wrapper(jmp_buf, int);
 #undef setjmp
 #define setjmp(env) _setjmp_wrapper(env)
+#undef longjmp
+#define longjmp(env, val) _longjmp_wrapper(env, val)
 
 #else // MingW
 

@@ -84,6 +84,12 @@ crates.io (GPL-2.0, see `unicorn-engine-sys/COPYING`), used through
   for `CONFIG_DEBUG_TCG` only. Together a third of the time of firmware
   that leaves the translated code often (I2cLm75: an interrupt pending
   while masked, slices of 1000 cycles).
+- On Win64 MSVC, `_setjmp_wrapper` / `_longjmp_wrapper`
+  (`qemu/util/setjmp-wrapper-win32.asm`, `qemu/include/sysemu/os-win32.h`)
+  save and restore the callee-saved registers directly instead of calling
+  UCRT's `_setjmp`/`longjmp`: on Windows on Arm under x64 emulation, UCRT's
+  `longjmp` still invokes SEH unwinding (`RtlUnwindEx`) even with a NULL
+  frame, unwinding into Rust's `nounwind` thread entry point and aborting.
 - Only the Arm guest: the other targets' sources are removed (`uc.c` still
   includes their `unicorn.h`).
 
