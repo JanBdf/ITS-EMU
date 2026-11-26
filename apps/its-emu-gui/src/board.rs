@@ -117,6 +117,9 @@ const SHIELD_RIGHT: f32 = 893.3;
 /// Nucleo buttons B1 (USER, blue) and B2 (RESET, black).
 const USER: (f32, f32) = (323.3, 95.8);
 const RESET: (f32, f32) = (323.3, 321.7);
+/// Inner body of Nucleo LED LD8 (VBUS), from tools/hw/boarddraw.py
+/// (`ortho(..., M_NUCLEO)` of `(324.0, 174.5) .. (335.5, 178.6)`).
+const LD8_BODY: (f32, f32, f32, f32) = (341.5, 184.4, 352.5, 188.3);
 /// Active area of the display (480 × 320, 83.52 × 55.68 mm): top left, top
 /// right, bottom right, bottom left.  The board is drawn as seen from straight
 /// above, so this is a rectangle.
@@ -901,6 +904,21 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
             ui.interact(pcb.r(x - 8.0, y - 22.0, x + 8.0, y + 8.0), ui.scope_id().with(("mark", i)), Sense::hover());
         tip(named(resp, egui::Role::Label, &text), text);
     }
+
+    // ---- Nucleo LED LD8 (VBUS, on when CN13 is plugged in)
+    let ld8_on = state.cables.otg == Plug::In;
+    if ld8_on && view.nucleo_opacity > 0.0 {
+        let alpha = (0.9 * view.nucleo_opacity * 255.0).round() as u8;
+        let fill = Color32::from_rgba_unmultiplied(LED_YELLOW.r(), LED_YELLOW.g(), LED_YELLOW.b(), alpha);
+        painter.rect_filled(pcb.r(LD8_BODY.0, LD8_BODY.1, LD8_BODY.2, LD8_BODY.3), pcb.len(0.5), fill);
+    }
+    let ld8_text = format!("USB VBUS (Nucleo LED LD8): {}", if ld8_on { "on" } else { "off" });
+    let ld8_resp = ui.interact(
+        pcb.r(LD8_BODY.0 - 4.0, LD8_BODY.1 - 5.0, LD8_BODY.2 + 4.0, LD8_BODY.3 + 5.0),
+        ui.scope_id().with("ld8"),
+        Sense::hover(),
+    );
+    tip(named(ld8_resp, egui::Role::Label, &ld8_text), ld8_text);
 
     // ---- Nucleo buttons
     let user = ui.interact(
