@@ -958,9 +958,19 @@ def carrier_usb():
     return '\n'.join(out)
 
 
-def d_shape(cx, cy, top, bottom, h, rt, rb):
+def d_shape(cx, cy, top, bottom, h, rt, rb, offset=0):
     """D-sub outline: trapezoid (half widths `top` and `bottom`, half height `h`)
-    with corner radii `rt` at the top and `rb` at the bottom."""
+    with corner radii `rt` at the top and `rb` at the bottom, optionally offset
+    outward by `offset` perpendicular to every edge."""
+    if offset:
+        theta = math.atan2(bottom - top, 2 * h)
+        kt = (1 - math.sin(theta)) / math.cos(theta)
+        kb = (1 + math.sin(theta)) / math.cos(theta)
+        top += offset * kt
+        bottom += offset * kb
+        h += offset
+        rt += offset * kt
+        rb += offset * kb
     pts = [(cx - top, cy - h), (cx + top, cy - h), (cx + bottom, cy + h), (cx - bottom, cy + h)]
     d = ''
     for i in range(4):
@@ -1014,8 +1024,9 @@ def rs232():
     out.append(rect(cx - 63.5, cy - 25.5, cx + 63.5, cy + 25.5, metal, 7.5,
                     f' stroke="{shade(metal, -0.3)}" stroke-width="0.8"'))
     out.append(rect_stroke(cx - 62.0, cy - 24.0, cx + 62.0, cy + 24.0, shade(metal, 0.25), 0.7, 6.2))
-    out.append(path(d_shape(cx, cy + 0.4, 31.8, 36.8, 19.6, 10.0, 7.0), shade(metal, -0.45)))    # flank
-    out.append(path(d_shape(cx, cy, 29.2, 34.7, 16.9, 8.4, 5.6), '#36352f'))                   # insulator
+    ins = (29.2, 34.7, 16.9, 8.4, 5.6)
+    out.append(path(d_shape(cx, cy, *ins, offset=2.7), shade(metal, -0.45)))                   # flank
+    out.append(path(d_shape(cx, cy, *ins), '#36352f'))                                         # insulator
     for i in range(4):
         out.append(circle(cx - 17.25 + i * 11.5, cy - 6.0, 2.7, '#0b0b0a', ' stroke="#57554c" stroke-width="0.5"'))
     for i in range(5):
