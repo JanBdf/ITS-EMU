@@ -1,6 +1,7 @@
 # ITS-Board Emulator
 
-[![CI](https://github.com/JanBdf/ITS-EMU/actions/workflows/ci.yml/badge.svg)](https://github.com/JanBdf/ITS-EMU/actions/workflows/ci.yml)
+[![CI (main)](https://img.shields.io/github/actions/workflow/status/JanBdf/ITS-EMU/ci.yml?branch=main&label=CI%20(main))](https://github.com/JanBdf/ITS-EMU/actions/workflows/ci.yml?query=branch%3Amain)
+[![CI (experimental)](https://img.shields.io/github/actions/workflow/status/JanBdf/ITS-EMU/ci.yml?branch=experimental&label=CI%20(experimental))](https://github.com/JanBdf/ITS-EMU/actions/workflows/ci.yml?query=branch%3Aexperimental)
 [![Release](https://img.shields.io/github/v/release/JanBdf/ITS-EMU)](https://github.com/JanBdf/ITS-EMU/releases)
 [![License](https://img.shields.io/badge/license-MIT%20(source)%20%2F%20GPL--2.0%20(binaries)-blue)](#license)
 
