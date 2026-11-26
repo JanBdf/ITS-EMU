@@ -129,9 +129,9 @@ pub struct UsbCore {
     pipe: SharedSerial,
     /// Highest id of the computer's transfers seen so far.
     seen_request: u64,
-    /// OUT bytes of the computer's transfer at the head of each endpoint's
-    /// queue already given to the device.
-    out_sent: [usize; 16],
+    /// `(transfer_id, bytes_sent)` for the computer's OUT transfer at the head
+    /// of each endpoint's queue already given to the device.
+    out_sent: [(u64, usize); 16],
 }
 
 /// Time between two looks at the endpoints while the host waits for something.
@@ -163,7 +163,7 @@ impl UsbCore {
             last_now: 0,
             pipe,
             seen_request: 0,
-            out_sent: [0; 16],
+            out_sent: [(0, 0); 16],
         }
     }
 
@@ -297,7 +297,8 @@ impl UsbCore {
             return None;
         }
         let len = (b & LEN_MASK) as usize;
-        let data = self.dpram[buf..buf + len].to_vec();
+        let slice = self.dpram.get(buf..buf.saturating_add(len))?;
+        let data = slice.to_vec();
         log::trace!("Pico USB IN bc@{bc_off:#x}={bc:#010x} buf@{buf:#x}: {data:02x?}");
         self.set_word(bc_off, bc & !((AVAILABLE | FULL) << half));
         Some(data)
@@ -311,8 +312,11 @@ impl UsbCore {
             return false;
         }
         let n = data.len().min((b & LEN_MASK) as usize).min(64);
+        let Some(dst) = self.dpram.get_mut(buf..buf.saturating_add(n)) else {
+            return false;
+        };
         log::trace!("Pico USB OUT bc@{bc_off:#x}={bc:#010x} buf@{buf:#x}: {:02x?}", &data[..n]);
-        self.dpram[buf..buf + n].copy_from_slice(&data[..n]);
+        dst.copy_from_slice(&data[..n]);
         let b = (b & !(LEN_MASK | AVAILABLE)) | n as u32 | FULL;
         let mask = 0xFFFF << half;
         self.set_word(bc_off, (bc & !mask) | ((b << half) & mask));
@@ -435,7 +439,7 @@ impl UsbCore {
         pipe.link.descriptors = None;
         let failed: Vec<u64> = pipe.link.requests.drain(..).map(|t| t.id).collect();
         pipe.link.done.extend(failed.into_iter().map(|id| (id, None)));
-        self.out_sent = [0; 16];
+        self.out_sent = [(0, 0); 16];
     }
 
     /// Starts the computer's first waiting control transfer; false if there is none.
@@ -509,8 +513,8 @@ impl UsbCore {
         if self.buff_status & bit != 0 {
             return None;
         }
-        let sent = &mut self.out_sent[usize::from(t.ep)];
-        let start = *sent;
+        let (last_id, sent) = self.out_sent[usize::from(t.ep)];
+        let start = if last_id == t.id { sent.min(t.data.len()) } else { 0 };
         let end = (start + 64).min(t.data.len());
         if !self.give_out(bc, buf, 0, &t.data[start..end]) {
             return None;
@@ -524,16 +528,16 @@ impl UsbCore {
         }
         self.buff_status |= bit;
         if sent_to >= t.data.len() {
-            self.out_sent[usize::from(t.ep)] = 0;
+            self.out_sent[usize::from(t.ep)] = (0, 0);
             Some(Vec::new())
         } else {
-            self.out_sent[usize::from(t.ep)] = sent_to;
+            self.out_sent[usize::from(t.ep)] = (t.id, sent_to);
             None
         }
     }
 
     fn ep_buffer(&self, ep: u8, out: bool) -> Option<(usize, usize, bool)> {
-        if ep == 0 {
+        if ep == 0 || ep >= 16 {
             return None;
         }
         let ctrl = self.word(0x08 + (usize::from(ep) - 1) * 8 + if out { 4 } else { 0 });
@@ -541,7 +545,7 @@ impl UsbCore {
             return None;
         }
         let bc = 0x80 + usize::from(ep) * 8 + if out { 4 } else { 0 };
-        Some((bc, (ctrl & 0xFFC0) as usize, ctrl & (1 << 30) != 0))
+        Some((bc, (ctrl & 0x0FC0) as usize, ctrl & (1 << 30) != 0))
     }
 
     /// Bulk transfers of the CDC data interface.
@@ -758,17 +762,23 @@ impl Peripheral for UsbDpram {
     fn read(&mut self, _ctx: &mut DeviceCtx, off: u32, size: u32) -> u32 {
         let u = self.0.borrow();
         let o = off as usize;
-        match size {
-            1 => u32::from(u.dpram[o]),
-            2 => u32::from(u16::from_le_bytes([u.dpram[o], u.dpram[o + 1]])),
-            _ => u.word(o),
-        }
+        let n = (size as usize).min(4);
+        let Some(slice) = u.dpram.get(o..o.saturating_add(n)) else {
+            return 0;
+        };
+        let mut b = [0u8; 4];
+        b[..n].copy_from_slice(slice);
+        u32::from_le_bytes(b)
     }
 
     fn write(&mut self, ctx: &mut DeviceCtx, off: u32, size: u32, value: u32) {
         let mut u = self.0.borrow_mut();
         let o = off as usize;
-        u.dpram[o..o + size as usize].copy_from_slice(&value.to_le_bytes()[..size as usize]);
+        let n = (size as usize).min(4);
+        let Some(dst) = u.dpram.get_mut(o..o.saturating_add(n)) else {
+            return;
+        };
+        dst.copy_from_slice(&value.to_le_bytes()[..n]);
         if (0x80..0x100).contains(&o) && u.host != Host::Detached {
             // a buffer control register: the host will see armed buffers
             let at = ctx.now() + 1;

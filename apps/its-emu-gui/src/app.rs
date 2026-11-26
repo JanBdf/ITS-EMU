@@ -163,13 +163,16 @@ struct SelfScreenshot {
 impl SelfScreenshot {
     fn from_env() -> Option<Self> {
         let spec = std::env::var("ITS_EMU_GUI_SCREENSHOT").ok()?;
-        let (path, secs) = match spec.rsplit_once(':') {
-            Some((p, s)) if s.parse::<f64>().is_ok() => (p.to_owned(), s.parse().unwrap()),
-            _ => (spec, 3.0),
+        let (path, delay) = match spec.rsplit_once(':') {
+            Some((p, s)) => match s.parse::<f64>().ok().and_then(|v| std::time::Duration::try_from_secs_f64(v).ok()) {
+                Some(d) => (p.to_owned(), d),
+                None => (spec, std::time::Duration::from_secs(3)),
+            },
+            _ => (spec, std::time::Duration::from_secs(3)),
         };
         Some(Self {
             path: path.into(),
-            at: std::time::Instant::now() + std::time::Duration::from_secs_f64(secs),
+            at: std::time::Instant::now() + delay,
             requested: false,
             done: Default::default(),
         })
@@ -349,12 +352,14 @@ fn menu_toggle(ui: &mut egui::Ui, on: &mut bool, text: &str, shortcut: Option<&K
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cc: &eframe::CreationContext,
         firmware: Option<PathBuf>,
         gdb: emu::GdbConfig,
         usb: emu::UsbConfig,
         bootrom_override: Option<PathBuf>,
+        devices_override: Option<Vec<itsboard::spec::DeviceSpec>>,
         settings: Settings,
         ideal_colors: bool,
     ) -> Self {
@@ -365,7 +370,8 @@ impl App {
         let gdb_addr = gdb.addr.clone();
         let pyocd_on = usb.pyocd;
         let bootrom = bootrom_override.clone().or_else(|| settings.pico_bootrom.clone());
-        let emu = emu::spawn(move || ctx.request_repaint(), gdb, usb, settings.devices.clone(), bootrom);
+        let initial_devices = devices_override.unwrap_or_else(|| settings.devices.clone());
+        let emu = emu::spawn(move || ctx.request_repaint(), gdb, usb, initial_devices, bootrom);
         if ideal_colors {
             emu.send(Command::IdealColors(true));
         }
@@ -1394,7 +1400,7 @@ impl eframe::App for App {
                 if self.lcd_focus {
                     board::show_lcd(ui, &board_state)
                 } else {
-                    let tex = self.board.get_or_insert_with(|| board::Textures::load(ui.ctx()));
+                    let tex = self.board.get_or_insert_with(board::Textures::load);
                     board::show(ui, tex, &board_state, &view, &mut self.board_view)
                 }
             });

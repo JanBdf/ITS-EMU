@@ -65,8 +65,17 @@ impl State {
     fn resync(&mut self) {
         self.offset = i128::from(self.board_ps) - i128::from(self.plugin_ps);
         let now = self.board_ps;
-        for e in &mut self.edges {
-            e.0 = now;
+        if !self.attached {
+            self.edges.clear();
+        } else if self.edges.len() > self.levels.len() {
+            self.edges.clear();
+            for (output, &level) in self.levels.iter().enumerate() {
+                self.edges.push_back((now, output, level));
+            }
+        } else {
+            for e in &mut self.edges {
+                e.0 = now;
+            }
         }
     }
 }
@@ -135,15 +144,26 @@ impl Link {
     pub fn publish(&self, plugin_ps: u64, edges: impl IntoIterator<Item = Edge>) {
         let mut st = self.lock();
         st.plugin_ps = plugin_ps;
-        if !st.board_running() {
+        let running = st.board_running();
+        if !running {
             // the board stands still: the changes happen at its present
             st.resync();
         }
+        let now = st.board_ps;
         for (ps, output, level) in edges {
             let Some(l) = st.levels.get_mut(output) else { continue };
             *l = level;
-            let at = st.board_time(ps);
-            st.edges.push_back((at, output, level));
+            if running {
+                let at = st.board_time(ps);
+                st.edges.push_back((at, output, level));
+            } else if st.attached {
+                if let Some(existing) = st.edges.iter_mut().find(|e| e.1 == output) {
+                    existing.0 = now;
+                    existing.2 = level;
+                } else {
+                    st.edges.push_back((now, output, level));
+                }
+            }
         }
         drop(st);
         self.changed.notify_all();
@@ -235,8 +255,7 @@ pub struct PluginPins {
     /// Board pin (port index, pin) of each plugin output, and its level when
     /// the output does not drive it.
     wiring: Vec<Option<Wire<(usize, u32)>>>,
-    next_ps: Option<u64>,
-    /// `next_ps` in cycles, at the last update.
+    /// Next event in cycles, at the last update.
     next_cycle: Option<u64>,
 }
 
@@ -246,7 +265,7 @@ impl PluginPins {
     pub fn new(link: Arc<Link>, gpio: SharedGpio, wiring: Vec<Option<Wire<(char, u32)>>>) -> Self {
         let wiring: Vec<_> = wiring.into_iter().map(|w| w.map(|((p, pin), idle)| ((port(p), pin), idle))).collect();
         let levels = link.attach();
-        let mut pins = Self { link, gpio, wiring, next_ps: Some(0), next_cycle: Some(0) };
+        let mut pins = Self { link, gpio, wiring, next_cycle: Some(0) };
         for (output, level) in levels.into_iter().enumerate() {
             pins.drive(output, level, 0);
         }
@@ -265,13 +284,13 @@ impl PinDevice for PluginPins {
         let now = ctx.now();
         let clock = &*ctx.clock;
         let mut changes = Vec::new();
-        self.next_ps = self.link.board_update(clock.time_ps(), |at, output, level| changes.push((at, output, level)));
+        let next_ps = self.link.board_update(clock.time_ps(), |at, output, level| changes.push((at, output, level)));
         for (at, output, level) in changes {
             log::trace!("plugin output {output} = {level:?} at {at} ps (board now {} ps)", clock.time_ps());
             let cycle = clock.cycle_at_ps(at).min(now);
             self.drive(output, level, cycle);
         }
-        self.next_cycle = self.next_ps.map(|ps| ctx.clock.cycle_at_ps(ps).max(now + 1));
+        self.next_cycle = next_ps.map(|ps| ctx.clock.cycle_at_ps(ps).max(now + 1));
     }
 
     fn next_event(&self) -> Option<u64> {

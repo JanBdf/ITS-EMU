@@ -206,7 +206,7 @@ impl Block for Clocks {
             0x98 => self.fc0_status,
             0x9C => self.fc0_result,
             0xB0 | 0xB4 => u32::MAX, // ENABLED0/1
-            _ => self.regs[(off / 4) as usize],
+            _ => self.regs.get((off / 4) as usize).copied().unwrap_or(0),
         }
     }
 

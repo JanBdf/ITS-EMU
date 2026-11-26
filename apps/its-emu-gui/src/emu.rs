@@ -187,13 +187,10 @@ pub struct Snapshot {
     pub state: RunState,
     pub display: Vec<u8>,
     pub display_generation: u64,
-    pub leds: u16,
     /// Time-averaged brightness of OUT0..15 since the previous snapshot.
     pub led_duty: [f32; 16],
     pub inputs: u8,
-    pub nucleo_leds: [bool; 3],
     pub nucleo_duty: [f32; 3],
-    pub backlight: f32,
     pub virtual_ns: u64,
     pub core_mhz: u32,
     /// Virtual seconds per wall-clock second over the last measurement.
@@ -224,12 +221,9 @@ impl Default for Snapshot {
             state: RunState::NoFirmware,
             display: vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * 4],
             display_generation: 0,
-            leds: 0,
             led_duty: [0.0; 16],
             inputs: 0xFF,
-            nucleo_leds: [false; 3],
             nucleo_duty: [0.0; 3],
-            backlight: 0.0,
             virtual_ns: 0,
             core_mhz: 0,
             speed: 0.0,
@@ -369,6 +363,8 @@ struct Worker {
     wake_pending: Arc<AtomicBool>,
     /// The core was halted by the debug probe at the last look.
     core_halted: bool,
+    /// The core was locked up at the last look.
+    core_locked_up: bool,
     /// Flash write count known to the worker: the probe's flash algorithm
     /// programs while the machine runs.
     seen_flash_writes: u64,
@@ -501,6 +497,7 @@ impl Worker {
             wake,
             wake_pending,
             core_halted: false,
+            core_locked_up: false,
             seen_flash_writes: 0,
             halted_since: None,
             auto_reload: true,
@@ -775,7 +772,7 @@ impl Worker {
                     d.starting = None;
                     match result {
                         Ok(pico) => {
-                            if self.usb.is_some() {
+                            if self.usb.as_mut().is_some_and(|u| u.server().is_some()) {
                                 d.pico_usb = Some(pico.usb_device(self.wake.clone()));
                             }
                             d.pico = Some(pico);
@@ -1104,6 +1101,7 @@ impl Worker {
         }
         let halted = sim.machine.is_halted();
         let locked_up = sim.machine.is_locked_up();
+        let was_locked_up = std::mem::replace(&mut self.core_locked_up, locked_up);
         if halted != self.core_halted {
             self.core_halted = halted;
             changed = true;
@@ -1116,6 +1114,7 @@ impl Worker {
             }
         }
         if let RunState::Stopped(_) = self.state
+            && was_locked_up
             && !locked_up
             && !halted
         {
@@ -1340,14 +1339,11 @@ impl Worker {
         }
         if let Some(sim) = &self.sim {
             let b = &sim.board;
-            changed |= set(&mut snap.leds, b.leds());
             changed |= set(&mut snap.dac1, sim.board.dac1());
             let duty = sim.take_led_duty();
             changed |= set(&mut snap.led_duty, duty.out);
             changed |= set(&mut snap.nucleo_duty, duty.nucleo);
             changed |= set(&mut snap.inputs, b.inputs());
-            changed |= set(&mut snap.nucleo_leds, b.nucleo_leds());
-            changed |= set(&mut snap.backlight, b.backlight());
             changed |= set(&mut snap.core_mhz, b.mcu().clocks.get().hclk / 1_000_000);
             if self.want_pins {
                 changed |= set(&mut snap.pins, crate::pins::view(&b.mcu().gpio.borrow().ports));

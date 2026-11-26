@@ -153,9 +153,12 @@ impl Peripheral for Rng {
         if off & !3 == 0x00 {
             let was_on = self.cr & 4 != 0;
             self.cr = merge_write(self.cr, off, size, value) & 0xC;
-            if self.cr & 4 != 0 && !was_on && self.ready_at.is_none() {
+            if self.cr & 4 == 0 {
+                self.ready_at = None;
+            } else if !was_on && self.ready_at.is_none() {
                 self.ready_at = Some(ctx.now() + Self::generation_cycles(ctx));
             }
+            ctx.set_irq(80, self.cr & 8 != 0 && self.ready(ctx.now()));
         }
     }
 

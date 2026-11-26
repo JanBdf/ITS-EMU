@@ -647,6 +647,10 @@ impl System {
 
             // as the block hook
             let entered_by_branch = self.enter_block(u64::from(pc));
+            if self.end_run_signalled() {
+                self.ended_for_wake = true;
+                return true;
+            }
             if self.clock.cycles() >= self.slice_end && !self.continue_after_events() {
                 return true;
             }

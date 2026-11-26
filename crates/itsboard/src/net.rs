@@ -142,6 +142,7 @@ struct TcpLink {
     socket: SocketHandle,
     to_host: Vec<u8>,
     host_closed: bool,
+    board_closed: bool,
 }
 
 /// A forwarded UDP port and where the last datagram from the computer came from.
@@ -260,7 +261,7 @@ impl VirtualNet {
                     continue;
                 }
                 let socket = self.sockets.add(s);
-                self.tcp.push(TcpLink { stream, socket, to_host: Vec::new(), host_closed: false });
+                self.tcp.push(TcpLink { stream, socket, to_host: Vec::new(), host_closed: false, board_closed: false });
             }
         }
         let mut buf = [0u8; 4096];
@@ -287,8 +288,8 @@ impl VirtualNet {
                     }
                 }
             }
-            // board -> computer
-            while s.can_recv() {
+            // board -> computer (bounded so host backpressure reaches smoltcp's TCP window)
+            while t.to_host.len() < 16 * 1024 && s.can_recv() {
                 match s.recv_slice(&mut buf) {
                     Ok(n) if n > 0 => t.to_host.extend_from_slice(&buf[..n]),
                     _ => break,
@@ -308,13 +309,14 @@ impl VirtualNet {
             }
             // the board closed its side (not: still connecting)
             let connecting = matches!(s.state(), tcp::State::SynSent | tcp::State::SynReceived);
-            let board_done = !s.is_active() || (!connecting && !s.may_recv() && t.to_host.is_empty());
-            if board_done {
+            if !s.is_active() {
                 let _ = t.stream.shutdown(std::net::Shutdown::Both);
-                if !s.is_active() {
-                    self.sockets.remove(t.socket);
-                    return false;
-                }
+                self.sockets.remove(t.socket);
+                return false;
+            }
+            if !t.board_closed && !connecting && !s.may_recv() && t.to_host.is_empty() {
+                t.board_closed = true;
+                let _ = t.stream.shutdown(std::net::Shutdown::Write);
             }
             true
         });
@@ -419,7 +421,7 @@ fn dhcp_reply(frame: &[u8], config: &NetConfig) -> Option<Vec<u8>> {
         3 => 5, // REQUEST -> ACK
         _ => return None,
     };
-    let mask = (!0u32 << (32 - u32::from(config.prefix))).to_be_bytes();
+    let mask = u32::MAX.checked_shl(32u32.saturating_sub(u32::from(config.prefix))).unwrap_or(0).to_be_bytes();
     let mut reply = vec![0u8; 240];
     reply[0] = 2;
     reply[1..3].copy_from_slice(&[1, 6]);

@@ -330,7 +330,7 @@ impl Pio {
 
         // delay / side-set field
         let sm = &self.sm[i];
-        let count = sm.pinctrl >> 29;
+        let count = (sm.pinctrl >> 29).min(5);
         let side_en = sm.execctrl & (1 << 30) != 0;
         let field = u32::from(instr >> 8) & 0x1F;
         let delay = field & ((1 << (5 - count)) - 1);
@@ -368,7 +368,7 @@ impl Pio {
                 let op = instr >> 13;
                 let cond = (instr >> 5) & 7;
                 let self_loop = forced.is_none() && u16::from(at) == instr & 0x1F;
-                if op == 0 && (cond == 2 || cond == 4) && jumped && self_loop && sm.exec.is_none() {
+                if op == 0 && (cond == 2 || cond == 4) && jumped && self_loop && sm.exec.is_none() && !apply {
                     let per = ticks * d;
                     let counter = if cond == 2 { &mut sm.x } else { &mut sm.y };
                     if sm.next < limit {
@@ -686,7 +686,7 @@ impl Pio {
                     let op = instr >> 13;
                     let cond = (instr >> 5) & 7;
                     if op == 0 && (cond == 2 || cond == 4) && u16::from(sm.pc) == instr & 0x1F && sm.current == instr {
-                        let count = sm.pinctrl >> 29;
+                        let count = (sm.pinctrl >> 29).min(5);
                         let side_en = sm.execctrl & (1 << 30) != 0;
                         let field = u32::from(instr >> 8) & 0x1F;
                         let side = field >> (5 - count);

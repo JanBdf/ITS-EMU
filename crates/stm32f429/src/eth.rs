@@ -183,7 +183,7 @@ impl EthState {
 
     /// DMASR with the summary bits and the process states.
     fn status(&self) -> u32 {
-        let mut sr = self.sr & 0x3FFF & !(DMASR_AIS | DMASR_NIS);
+        let mut sr = self.sr & 0x7FFF;
         if sr & self.ier & NORMAL != 0 {
             sr |= DMASR_NIS;
         }
@@ -208,12 +208,12 @@ impl EthState {
     /// The descriptor after `desc` (chained by DES3 or the ring's next).
     fn next_desc(&self, ram: &Ram, desc: u32, chained: bool, end_of_ring: bool, base: u32) -> u32 {
         if chained {
-            ram.read(desc + 12, 4).unwrap_or(0)
+            ram.read(desc.wrapping_add(12), 4).unwrap_or(0)
         } else if end_of_ring {
             base
         } else {
             let skip = (self.bmr >> 2) & 0x1F;
-            desc + 16 + 4 * skip
+            desc.wrapping_add(16 + 4 * skip)
         }
     }
 
@@ -234,8 +234,9 @@ impl EthState {
                 self.tx_poll = false;
                 return;
             }
-            let tdes1 = ram.read(desc + 4, 4).unwrap_or(0);
-            let (b1, b2) = (ram.read(desc + 8, 4).unwrap_or(0), ram.read(desc + 12, 4).unwrap_or(0));
+            let tdes1 = ram.read(desc.wrapping_add(4), 4).unwrap_or(0);
+            let (b1, b2) =
+                (ram.read(desc.wrapping_add(8), 4).unwrap_or(0), ram.read(desc.wrapping_add(12), 4).unwrap_or(0));
             let chained = tdes0 & (1 << 20) != 0;
             if tdes0 & (1 << 28) != 0 {
                 frame.clear();
@@ -243,10 +244,9 @@ impl EthState {
             }
             // buffers in RAM, or anywhere the DMA reads (flash)
             let mut take = |addr: u32, len: u32| {
-                let bytes = ram
-                    .writable_bytes(addr, len)
-                    .map(<[u8]>::to_vec)
-                    .or_else(|| (0..len).map(|i| ram.read(addr + i, 1).map(|b| b as u8)).collect::<Option<Vec<u8>>>());
+                let bytes = ram.writable_bytes(addr, len).map(<[u8]>::to_vec).or_else(|| {
+                    (0..len).map(|i| ram.read(addr.wrapping_add(i), 1).map(|b| b as u8)).collect::<Option<Vec<u8>>>()
+                });
                 if let Some(bytes) = bytes {
                     frame.extend_from_slice(&bytes);
                 }
@@ -257,7 +257,11 @@ impl EthState {
                 take(b2, (tdes1 >> 16) & 0x1FFF);
             }
             // hand the descriptor back: no errors
-            ram.write(desc, 4, tdes0 & !OWN & !0xFFFF);
+            if !ram.write(desc, 4, tdes0 & !OWN & !0xFFFF) {
+                self.sr |= 1 << 13; // FBES: bus error
+                self.tx_poll = false;
+                return;
+            }
             let last = tdes0 & (1 << 29) != 0;
             if last {
                 insert_checksums(&mut frame, (first_tdes0 >> 22) & 3);
@@ -322,8 +326,9 @@ impl EthState {
                 self.missed += 1;
                 return false;
             }
-            let rdes1 = ram.read(desc + 4, 4).unwrap_or(0);
-            let (b1, b2) = (ram.read(desc + 8, 4).unwrap_or(0), ram.read(desc + 12, 4).unwrap_or(0));
+            let rdes1 = ram.read(desc.wrapping_add(4), 4).unwrap_or(0);
+            let (b1, b2) =
+                (ram.read(desc.wrapping_add(8), 4).unwrap_or(0), ram.read(desc.wrapping_add(12), 4).unwrap_or(0));
             let chained = rdes1 & (1 << 14) != 0;
             let mut room = vec![(b1, rdes1 & 0x1FFF)];
             if !chained {
@@ -332,7 +337,7 @@ impl EthState {
             for (addr, size) in room {
                 let n = (size as usize).min(data.len() - done);
                 for (i, &b) in data[done..done + n].iter().enumerate() {
-                    ram.write(addr + i as u32, 1, u32::from(b));
+                    ram.write(addr.wrapping_add(i as u32), 1, u32::from(b));
                 }
                 if n > 0 {
                     self.chrbar = addr;
@@ -351,7 +356,11 @@ impl EthState {
                     status |= 1 << 5;
                 }
             }
-            ram.write(desc, 4, status);
+            if !ram.write(desc, 4, status) {
+                self.sr |= 1 << 13; // FBES: bus error
+                self.rx_suspended = true;
+                return false;
+            }
             self.chrdr = self.next_desc(ram, desc, chained, rdes1 & (1 << 15) != 0, self.rdlar);
             desc = self.chrdr;
             if last {
@@ -566,7 +575,8 @@ impl Peripheral for EthRegs {
             return;
         }
         let reg = off & !3;
-        let v = merge_write(self.reg(reg), off, size, value);
+        let old = if reg == 0x1014 { 0 } else { self.reg(reg) };
+        let v = merge_write(old, off, size, value);
         let link = self.eth.link.borrow().link_up;
         let mut s = self.eth.state.borrow_mut();
         match reg {

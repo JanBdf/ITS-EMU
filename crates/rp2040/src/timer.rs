@@ -58,7 +58,7 @@ impl Timer {
         let now = self.now_us(clock);
         // fires when the low word next equals the alarm value
         let delta = u64::from(self.alarm[n].wrapping_sub(now as u32));
-        self.fire_at[n] = Some(self.cycle_at_us(clock, now + delta).max(clock.cycles()));
+        self.fire_at[n] = Some(self.cycle_at_us(clock, now.wrapping_add(delta)).max(clock.cycles()));
     }
 
     fn sync_irqs(&self, ctx: &mut DeviceCtx) {
@@ -112,6 +112,9 @@ impl Block for Timer {
                 let target = (u64::from(value) << 32) | u64::from(self.lw);
                 let since_start = ctx.clock.time_ps() / 1_000_000;
                 self.offset = target.wrapping_sub(since_start);
+                for n in 0..4 {
+                    self.schedule(ctx.clock, n);
+                }
             }
             0x04 => self.lw = value,
             0x10..=0x1C => {

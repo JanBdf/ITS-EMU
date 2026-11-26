@@ -128,8 +128,9 @@ impl TcpServer {
                 }
                 self.owner = Some(id);
                 self.pending_in = None;
-                // like pyOCD's _flush_rx: a new user sees no stale response
+                // like pyOCD's _flush_rx: a new user sees no stale response or partial write
                 dev.response.clear();
+                dev.pending_write = None;
                 self.send(id, STATUS_OK, &[]);
             }
             OP_OUT if self.owner == Some(id) => {

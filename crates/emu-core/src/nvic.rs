@@ -154,9 +154,6 @@ impl Nvic {
         self.prigroup = g & 7;
     }
 
-    /// Sets the level of an external interrupt line. A high level pends the
-    /// interrupt unless it is already pending or active; on deactivation a still
-    /// asserted line pends it again.
     /// Sets the request of source `src` (0..8) of a shared interrupt line; the
     /// line is high while any of its sources requests.
     #[inline]
@@ -187,6 +184,9 @@ impl Nvic {
         (self.enabled.0[0] >> IRQ0) | (self.enabled.0[1] << (32 - IRQ0))
     }
 
+    /// Sets the level of an external interrupt line. A high level pends the
+    /// interrupt unless it is already pending or active; on deactivation a still
+    /// asserted line pends it again.
     #[inline]
     pub fn set_irq_level(&mut self, irq: u32, high: bool) {
         if irq >= NUM_IRQS {
@@ -240,10 +240,11 @@ impl Nvic {
         min
     }
 
-    pub fn execution_priority(&self, masks: MaskRegs) -> i16 {
-        let mut prio = self.active_priority();
+    /// Priority boost from PRIMASK, FAULTMASK and BASEPRI (unaffected by PRIGROUP).
+    fn mask_priority(masks: MaskRegs) -> i16 {
+        let mut prio = 256;
         if masks.basepri & PRIO_MASK != 0 {
-            prio = prio.min(i16::from(masks.basepri & PRIO_MASK) & self.group_mask());
+            prio = prio.min(i16::from(masks.basepri & PRIO_MASK));
         }
         if masks.primask {
             prio = prio.min(0);
@@ -252,6 +253,10 @@ impl Nvic {
             prio = prio.min(-1);
         }
         prio
+    }
+
+    pub fn execution_priority(&self, masks: MaskRegs) -> i16 {
+        self.active_priority().min(Self::mask_priority(masks))
     }
 
     fn is_enabled(&self, exc: u32) -> bool {
@@ -299,7 +304,8 @@ impl Nvic {
     /// The exception that preempts the current execution, if any.
     pub fn pending_to_take(&self, masks: MaskRegs) -> Option<u32> {
         let exc = self.highest_pending()?;
-        (self.group_priority(exc) < self.execution_priority(masks)).then_some(exc)
+        (self.group_priority(exc) < self.active_priority() && self.full_priority(exc) < Self::mask_priority(masks))
+            .then_some(exc)
     }
 
     /// True if an enabled exception is pending (even if masked): it is taken
@@ -338,7 +344,9 @@ impl Nvic {
     /// HardFault. Returns `None` on lockup (fault while at priority <= -1).
     pub fn route_fault(&self, exc: u32, masks: MaskRegs) -> Option<u32> {
         let exec = self.execution_priority(masks);
-        let escalate = !self.is_enabled(exc) || self.group_priority(exc) >= exec;
+        let escalate = !self.is_enabled(exc)
+            || self.group_priority(exc) >= self.active_priority()
+            || self.full_priority(exc) >= Self::mask_priority(masks);
         let target = if escalate { HARD_FAULT } else { exc };
         if target == HARD_FAULT && exec <= -1 {
             return None;

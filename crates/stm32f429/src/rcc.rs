@@ -331,7 +331,7 @@ impl Peripheral for Rcc {
             0x00 => self.write_cr(v, ctx.clock),
             0x04 => self.pllcfgr = v & 0x0F43_7FFF,
             0x08 => self.cfgr = v & !0xC,
-            0x0C => self.cir = v & 0x3F00 & !(v >> 16), // interrupt enables; flags never set
+            0x0C => self.cir = v & 0x7F00, // interrupt enables; flags never set
             0x10 => self.rstr[0] = v,
             0x14 => self.rstr[1] = v,
             0x18 => self.rstr[2] = v,

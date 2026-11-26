@@ -84,7 +84,7 @@ impl Block for Ssi {
             0x58 => 0x5153_5049, // IDR
             0x5C => 0x3430_312A, // SSI_VERSION_ID
             0x60..=0x9C => self.rx.pop_front().unwrap_or(0),
-            _ => self.regs[(off / 4) as usize],
+            _ => self.regs.get((off / 4) as usize).copied().unwrap_or(0),
         }
     }
 
@@ -106,8 +106,9 @@ impl Block for Ssi {
                 self.regs[2] = 0;
             }
             _ => {
-                let r = &mut self.regs[(off / 4) as usize];
-                *r = op.apply(*r, value);
+                if let Some(r) = self.regs.get_mut((off / 4) as usize) {
+                    *r = op.apply(*r, value);
+                }
             }
         }
     }

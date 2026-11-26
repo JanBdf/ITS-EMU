@@ -21,8 +21,9 @@ pub struct SysTick {
 }
 
 impl SysTick {
-    pub fn reset(&mut self) {
-        *self = Self::default();
+    /// Current raw CSR value without clearing COUNTFLAG.
+    pub fn raw_csr(&self) -> u32 {
+        self.csr
     }
 
     fn enabled(&self) -> bool {
@@ -128,9 +129,10 @@ impl SysTick {
             0x0 => {
                 let cur = self.value(now);
                 let was_enabled = self.enabled();
+                let old_div = self.div();
                 self.csr = (self.csr & CSR_COUNTFLAG) | (value & (CSR_ENABLE | CSR_TICKINT | CSR_CLKSOURCE));
                 if self.enabled() {
-                    if !was_enabled || self.div() != 1 {
+                    if !was_enabled || self.div() != old_div {
                         self.restart_from(now, cur);
                     }
                 } else {

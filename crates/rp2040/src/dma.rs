@@ -263,23 +263,42 @@ impl DmaCore {
 
     /// Starts channel `n` at cycle `at`.
     fn trigger(&mut self, ctx: &mut DeviceCtx, n: usize, at: u64) {
-        let c = &mut self.ch[n];
-        if c.ctrl & CTRL_EN == 0 || c.busy {
-            return;
+        let mut cur = n;
+        let mut visited = 0u32;
+        loop {
+            if visited & (1 << cur) != 0 {
+                break;
+            }
+            visited |= 1 << cur;
+            let c = &mut self.ch[cur];
+            if c.ctrl & CTRL_EN == 0 || c.busy {
+                break;
+            }
+            c.count = c.reload;
+            if c.count == 0 {
+                // nothing to move: done at once; follow chains iteratively to avoid recursion cycles
+                c.busy = false;
+                self.busy &= !(1 << cur);
+                if c.ctrl & CTRL_IRQ_QUIET == 0 {
+                    self.intr |= 1 << cur;
+                }
+                let chain = c.chain_to();
+                if chain != cur && chain < CHANNELS {
+                    cur = chain;
+                    continue;
+                }
+                break;
+            }
+            c.busy = true;
+            self.busy |= 1 << cur;
+            if matches!(self.pace(cur), Pace::Never) {
+                let treq = self.ch[cur].treq();
+                self.note(format!("DMA paced by DREQ {treq:#04x} (SPI, I2C or XIP), which is not emulated"));
+            }
+            self.repace(cur, at);
+            break;
         }
-        c.count = c.reload;
-        if c.count == 0 {
-            // nothing to move: done at once
-            self.complete(ctx, n, at);
-            return;
-        }
-        c.busy = true;
-        self.busy |= 1 << n;
-        if matches!(self.pace(n), Pace::Never) {
-            let treq = self.ch[n].treq();
-            self.note(format!("DMA paced by DREQ {treq:#04x} (SPI, I2C or XIP), which is not emulated"));
-        }
-        self.repace(n, at);
+        self.sync_irq(ctx);
     }
 
     /// A trigger register written: a value of zero is a null trigger (the
@@ -544,7 +563,12 @@ impl Block for Dma {
                 match reg {
                     0x00 | 0x14 | 0x28 | 0x3C => c.read_addr = op.apply(c.read_addr, value),
                     0x04 | 0x18 | 0x2C | 0x34 => c.write_addr = op.apply(c.write_addr, value),
-                    0x08 | 0x1C | 0x24 | 0x38 => c.reload = op.apply(c.reload, value),
+                    0x08 | 0x1C | 0x24 | 0x38 => {
+                        c.reload = op.apply(c.reload, value);
+                        if !c.busy {
+                            c.count = c.reload;
+                        }
+                    }
                     _ => {
                         let was = c.ctrl & CTRL_EN;
                         c.ctrl = op.apply(c.ctrl, value) & CTRL_WRITABLE;

@@ -45,15 +45,22 @@ impl Pty {
             if libc::grantpt(fd) != 0 || libc::unlockpt(fd) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            let name = libc::ptsname(fd);
-            if name.is_null() {
-                return Err(io::Error::last_os_error());
-            }
-            let path = std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned();
+            // `ptsname` returns a pointer to a static buffer; serialize access and copy it immediately.
+            static PTSNAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let (name_cstr, path) = {
+                let _guard = PTSNAME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                let name = libc::ptsname(fd);
+                if name.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                let cstr = std::ffi::CStr::from_ptr(name).to_owned();
+                let path = cstr.to_string_lossy().into_owned();
+                (cstr, path)
+            };
             // Put the slave side into raw mode so that on Linux (where termios
             // persists on the PTY while the master stays open) bytes written to
             // the master before a terminal connects are not echoed back as RX.
-            let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK);
+            let slave = libc::open(name_cstr.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK);
             if slave >= 0 {
                 let mut t: libc::termios = std::mem::zeroed();
                 if libc::tcgetattr(slave, &mut t) == 0 {
@@ -118,6 +125,7 @@ impl Pty {
         }
         while !self.to_host.is_empty() {
             match self.master.write(&self.to_host) {
+                Ok(0) => break,
                 Ok(n) => {
                     self.to_host.drain(..n);
                     progress = true;

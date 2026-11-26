@@ -303,8 +303,18 @@ impl Scs {
             return ScsAction::CheckPending;
         }
         let aligned = off & !3;
-        let old = self.read(nvic, now, 0, aligned, 4);
-        let v = merge_write(old, off, size, value);
+        let v = if size == 4 {
+            value
+        } else {
+            let old = match aligned {
+                // W1C / W1S registers: untouched byte lanes must stay 0.
+                0xE100..=0xE11C | 0xE180..=0xE19C | 0xE200..=0xE21C | 0xE280..=0xE29C | 0xED28 | 0xED2C => 0,
+                // Reading SYST_CSR clears COUNTFLAG; preserve it on narrow writes.
+                0xE010 => self.systick.raw_csr(),
+                _ => self.read(nvic, now, 0, aligned, 4),
+            };
+            merge_write(old, off, size, value)
+        };
         match aligned {
             0x1000 => self.dwt_ctrl = (self.dwt_ctrl & 0xF000_0000) | (v & 0x0FFF_FFFF),
             0x1004 => self.dwt_cyc_base = now.wrapping_sub(u64::from(v)),
@@ -312,10 +322,10 @@ impl Scs {
                 self.systick.write(aligned - 0xE010, v, now);
                 return ScsAction::CheckPending;
             }
-            0xE100..=0xE11C => self.irq_bits(value, aligned - 0xE100, |e| nvic.set_irq_enabled(e - nvic::IRQ0, true)),
-            0xE180..=0xE19C => self.irq_bits(value, aligned - 0xE180, |e| nvic.set_irq_enabled(e - nvic::IRQ0, false)),
-            0xE200..=0xE21C => self.irq_bits(value, aligned - 0xE200, |e| nvic.set_pending(e)),
-            0xE280..=0xE29C => self.irq_bits(value, aligned - 0xE280, |e| nvic.clear_pending(e)),
+            0xE100..=0xE11C => self.irq_bits(v, aligned - 0xE100, |e| nvic.set_irq_enabled(e - nvic::IRQ0, true)),
+            0xE180..=0xE19C => self.irq_bits(v, aligned - 0xE180, |e| nvic.set_irq_enabled(e - nvic::IRQ0, false)),
+            0xE200..=0xE21C => self.irq_bits(v, aligned - 0xE200, |e| nvic.set_pending(e)),
+            0xE280..=0xE29C => self.irq_bits(v, aligned - 0xE280, |e| nvic.clear_pending(e)),
             0xED04 => {
                 if v & (1 << 31) != 0 {
                     nvic.set_pending(nvic::NMI);

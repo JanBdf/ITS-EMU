@@ -213,14 +213,14 @@ impl Ili9486 {
         }
     }
 
-    /// Color shown at a position of the glass (`px` along the sources, `py`
-    /// along the gates, both in the panel's native portrait orientation),
-    /// as 0x00RRGGBB, before backlight.
     /// Display off or in sleep (shown black, like [`Self::panel_pixel`]).
     pub fn is_dark(&self) -> bool {
         self.sleeping || !self.display_on
     }
 
+    /// Color shown at a position of the glass (`px` along the sources, `py`
+    /// along the gates, both in the panel's native portrait orientation),
+    /// as 0x00RRGGBB, before backlight.
     pub fn panel_pixel(&self, px: usize, py: usize) -> u32 {
         if self.sleeping || !self.display_on {
             return 0;
@@ -294,9 +294,9 @@ pub struct PanelFrame {
 }
 
 impl PanelFrame {
-    /// Display off or in sleep.
+    /// Display off, in sleep, or not yet captured.
     pub fn is_dark(&self) -> bool {
-        self.dark
+        self.dark || self.gram.len() < GRAM_COLS * GRAM_ROWS
     }
 
     /// Calls `f(r, g, b)` for each glass position `(px, py)` that `at` yields,

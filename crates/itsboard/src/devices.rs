@@ -266,18 +266,14 @@ impl RotaryEncoder {
         self
     }
 
-    /// Turns the knob by `detents` (negative: counter-clockwise), a
-    /// transition every millisecond (a quick spin).
-    pub fn rotate(&mut self, detents: i32) {
-        self.rotate_paced(detents, TRANSITION_NS);
-    }
-
     /// Turns the knob by `detents` with `transition_ns` between the
     /// transitions (four per detent): a hand turns a detent in 10–50 ms.
     pub fn rotate_paced(&mut self, detents: i32, transition_ns: u64) {
-        self.pending += detents * TRANSITIONS_PER_DETENT;
+        self.pending = self.pending.saturating_add(detents.saturating_mul(TRANSITIONS_PER_DETENT));
         self.transition_ns = transition_ns.max(1);
-        if self.pending != 0 && self.next_at.is_none() {
+        if self.pending == 0 {
+            self.next_at = None;
+        } else if self.next_at.is_none() {
             self.next_at = Some(0);
         }
     }
@@ -512,7 +508,7 @@ impl Ds18b20 {
 
     fn alarm(&self) -> bool {
         let t = (self.temperature as i16 >> 4) as i8;
-        t > self.th as i8 || t <= self.tl as i8
+        t >= self.th as i8 || t <= self.tl as i8
     }
 
     /// Ends a conversion: the temperature register gets the measurement,
@@ -602,7 +598,7 @@ impl Ds18b20 {
             self.fell_at = Some(t);
             self.slot(t, ctx);
         } else if let Some(fell) = self.fell_at.take()
-            && t - fell >= ctx.clock.ns_to_cycles(RESET_MIN_NS)
+            && t.saturating_sub(fell) >= ctx.clock.ns_to_cycles(RESET_MIN_NS)
         {
             // reset: forget everything, answer with a presence pulse
             self.actions.clear();

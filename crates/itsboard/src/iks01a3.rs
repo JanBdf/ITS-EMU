@@ -285,8 +285,7 @@ impl Iks01a3 {
         let inc = match self.active {
             ActiveChip::Lsm6dso => self.lsm6dso_regs[0x12] & 0x04 != 0,
             ActiveChip::Lis2dw12 => self.lis2dw12_regs[0x21] & 0x04 != 0,
-            ActiveChip::Lis2mdl => true,
-            ActiveChip::Hts221 => self.auto_inc,
+            ActiveChip::Lis2mdl | ActiveChip::Hts221 => self.auto_inc,
             ActiveChip::Lps22hh => self.lps22hh_regs[0x11] & 0x10 != 0,
             ActiveChip::Stts751 | ActiveChip::None => false,
         };

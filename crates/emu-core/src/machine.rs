@@ -1905,7 +1905,6 @@ impl Machine {
         })
     }
 
-    /// Changes whenever flash is written, e.g. when a debugger loads a program.
     /// Analyzes a block seen for the first time and caches its timing.
     /// Returns `None` if the run has to stop to install timing hooks for
     /// its division instructions (the block is translated again with them).
@@ -2007,6 +2006,7 @@ impl Machine {
         let _ = self.uc.ctl_flush_tb();
     }
 
+    /// Changes whenever flash is written, e.g. when a debugger loads a program.
     pub fn flash_writes(&self) -> u64 {
         self.flash_writes
     }
@@ -2199,7 +2199,7 @@ impl Machine {
     /// AHB-AP, including the debug and peripheral registers.
     pub fn debug_read(&mut self, addr: u32, size: u32) -> Result<u32, DebugFault> {
         let fault = DebugFault { addr };
-        if !addr.is_multiple_of(size) {
+        if !matches!(size, 1 | 2 | 4) || !addr.is_multiple_of(size) {
             return Err(fault);
         }
         let sys = self.uc.get_data_mut();
@@ -2230,7 +2230,7 @@ impl Machine {
     /// the chip); halting, register transfers and resets happen at once.
     pub fn debug_write(&mut self, addr: u32, size: u32, value: u32) -> Result<(), DebugFault> {
         let fault = DebugFault { addr };
-        if !addr.is_multiple_of(size) {
+        if !matches!(size, 1 | 2 | 4) || !addr.is_multiple_of(size) {
             return Err(fault);
         }
         let sys = self.uc.get_data_mut();
@@ -2297,6 +2297,9 @@ impl Machine {
     /// Reads a block with accesses of `size` bytes (a debugger's memory
     /// read); stops at the first fault.
     pub fn debug_read_block(&mut self, addr: u32, buf: &mut [u8], size: u32) -> Result<(), DebugFault> {
+        if !matches!(size, 1 | 2 | 4) {
+            return Err(DebugFault { addr });
+        }
         if self.plain_memory(addr, buf.len() as u32) {
             return self.uc.mem_read(u64::from(addr), buf).map_err(|_| DebugFault { addr });
         }
@@ -2312,7 +2315,10 @@ impl Machine {
     /// Writes a block with accesses of `size` bytes (a debugger's memory
     /// write); stops at the first fault.
     pub fn debug_write_block(&mut self, addr: u32, data: &[u8], size: u32) -> Result<(), DebugFault> {
-        if self.plain_memory(addr, data.len() as u32) && self.ram_contains(addr, data.len() as u32) {
+        if !matches!(size, 1 | 2 | 4) {
+            return Err(DebugFault { addr });
+        }
+        if self.ram_contains(addr, data.len() as u32) {
             self.uc.mem_write(u64::from(addr), data).map_err(|_| DebugFault { addr })?;
             self.invalidate_code(addr, data.len() as u32);
             self.uc.get_data_mut().idle.dirty();
@@ -2546,6 +2552,12 @@ impl Machine {
         sys.locked_up = false;
         sys.asleep = false;
         sys.ended_for_wake = false;
+        sys.branch_from = None;
+        sys.fell_through = None;
+        sys.block = None;
+        sys.mmio_shift = 0;
+        sys.fast.edge = EDGE_SLOW;
+        sys.refresh_fast_limit();
         sys.idle = IdleDetector::default();
         // Halts at the reset vector with reset vector catch.
         sys.debug.on_reset();
@@ -2992,15 +3004,7 @@ impl Machine {
             }
             EXCP_SWI => {
                 // PC already points behind the SVC instruction.
-                let masks = UcCore(uc).masks();
-                let sys = uc.get_data_mut();
-                sys.nvic.set_pending(nvic::SVCALL);
-                if sys.nvic.pending_to_take(masks) == Some(nvic::SVCALL) {
-                    Self::enter_exception(uc, nvic::SVCALL, pc);
-                } else {
-                    uc.get_data_mut().nvic.clear_pending(nvic::SVCALL);
-                    Self::raise_fault(uc, nvic::HARD_FAULT, pc);
-                }
+                Self::raise_fault(uc, nvic::SVCALL, pc);
             }
             EXCP_BKPT => {
                 let sys = uc.get_data_mut();

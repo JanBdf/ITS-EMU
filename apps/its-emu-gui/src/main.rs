@@ -116,7 +116,8 @@ fn main() -> eframe::Result {
 fn run(args: Args, renderer: eframe::Renderer) -> eframe::Result {
     // the window as it was left last time (a laptop screen may be smaller
     // than the default size; the application clamps it to the monitor)
-    let saved = settings::Settings::load().window;
+    let settings = settings::Settings::load();
+    let saved = settings.window;
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("ITS-Board Emulator")
         // matches the desktop file of the Linux package (window icon, taskbar grouping)
@@ -141,10 +142,7 @@ fn run(args: Args, renderer: eframe::Renderer) -> eframe::Result {
         "ITS-Board Emulator",
         options,
         Box::new(move |cc| {
-            let mut settings = settings::Settings::load();
-            if !args.devices.is_empty() {
-                settings.devices = args.devices;
-            }
+            let devices_override = (!args.devices.is_empty()).then_some(args.devices);
             let gdb = emu::GdbConfig {
                 enabled: if args.no_gdb { false } else { args.gdb.is_some() || settings.gdb },
                 addr: args.gdb.unwrap_or_else(|| "127.0.0.1:3333".to_owned()),
@@ -157,8 +155,16 @@ fn run(args: Args, renderer: eframe::Renderer) -> eframe::Result {
                 addr: args.usb.unwrap_or_else(|| format!("127.0.0.1:{}", stlink::DEFAULT_PORT)),
                 attach: !args.no_usb_attach,
             };
-            let bootrom = args.pico_bootrom.or_else(|| settings.pico_bootrom.clone());
-            Ok(Box::new(app::App::new(cc, args.firmware, gdb, usb, bootrom, settings, args.ideal_colors)))
+            Ok(Box::new(app::App::new(
+                cc,
+                args.firmware,
+                gdb,
+                usb,
+                args.pico_bootrom,
+                devices_override,
+                settings,
+                args.ideal_colors,
+            )))
         }),
     )
 }

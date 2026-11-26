@@ -233,8 +233,8 @@ impl Peripheral for Sio {
         match off & !3 {
             // the PIOs and the board drive the pins
             0x004 => clock.cycles(),
-            // spinlocks change on reads, the divider's DIRTY too
-            0x070 | 0x100..=0x17C => 0,
+            // FIFO_RD pops the RX FIFO; spinlocks and the divider's DIRTY change on reads too
+            0x058 | 0x070 | 0x100..=0x17C => 0,
             // the FIFOs and spinlocks change when the other core runs, which
             // is after this core's turn (that idle skipping does not pass)
             _ => u64::MAX,

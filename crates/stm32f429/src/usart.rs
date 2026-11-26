@@ -244,6 +244,7 @@ impl Usart {
             }
         } else {
             self.rx_done_at = None;
+            self.idle_at = None;
         }
         if changed {
             self.sync_irq(ctx);

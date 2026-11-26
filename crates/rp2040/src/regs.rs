@@ -127,7 +127,7 @@ impl RegFile {
         r
     }
 
-    /// A peripheral whose function is not emulated (SPI, I2C, ADC, PWM, ...):
+    /// A peripheral whose function is not emulated (SPI, I2C, ...):
     /// it stores what is written, and the first write notes that firmware
     /// using it does not work as on the chip.
     pub fn unemulated(name: &'static str, size: u32, notices: Notices) -> Self {

@@ -414,7 +414,13 @@ impl Port {
 
 /// USBIP_RET_SUBMIT for `urb`.
 fn ret_submit(a: &mut Attached, urb: &Urb, status: i32, data: Vec<u8>) {
-    let actual = if urb.dir_in { data.len() } else { urb.data.len() };
+    let actual = if status != 0 {
+        0
+    } else if urb.dir_in {
+        data.len()
+    } else {
+        urb.data.len()
+    };
     let mut msg = urb_header(RET_SUBMIT, urb.seqnum);
     for v in [status, actual as i32, 0, 0, 0] {
         msg.extend_from_slice(&v.to_be_bytes());
@@ -555,21 +561,34 @@ fn read_loop(id: u64, mut r: TcpStream, tx: &Sender<Event>, wake: &dyn Fn()) -> 
         let seqnum = be32(&h, 4);
         match command {
             CMD_SUBMIT => {
+                const MAX_URB_LEN: usize = 16 * 1024 * 1024;
+                const MAX_ISO_PACKETS: usize = 1024;
                 let dir_in = be32(&h, 12) == DIR_IN;
-                let ep = be32(&h, 16) as u8;
+                let ep_raw = be32(&h, 16);
+                if ep_raw >= 16 {
+                    return Err(io::Error::new(ErrorKind::InvalidData, format!("invalid endpoint {ep_raw}")));
+                }
+                let ep = ep_raw as u8;
                 let length = be32(&h, 24) as i32;
                 let packets = be32(&h, 32) as i32;
                 let mut setup = [0u8; 8];
                 setup.copy_from_slice(&h[40..48]);
                 let length = length.max(0) as usize;
+                if length > MAX_URB_LEN {
+                    return Err(io::Error::new(ErrorKind::InvalidData, format!("URB too large: {length}")));
+                }
                 let mut data = Vec::new();
                 if !dir_in {
                     data.resize(length, 0);
                     r.read_exact(&mut data)?;
                 }
                 if packets > 0 {
+                    let packets = packets as usize;
+                    if packets > MAX_ISO_PACKETS {
+                        return Err(io::Error::new(ErrorKind::InvalidData, format!("too many ISO packets: {packets}")));
+                    }
                     // isochronous packet descriptors (no isochronous endpoints here)
-                    let mut iso = vec![0u8; packets as usize * 16];
+                    let mut iso = vec![0u8; packets * 16];
                     r.read_exact(&mut iso)?;
                 }
                 send(Event::Submit(id, Urb { seqnum, ep, dir_in, length, setup, data, submitted: false }))?;

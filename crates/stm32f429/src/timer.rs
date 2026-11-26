@@ -569,6 +569,11 @@ impl GpTimer {
         if let Some(l) = &self.itr {
             l.borrow_mut().lines[usize::from(self.number)].level = false;
         }
+        if let Some((triggers, index)) = &self.trgo {
+            let mut t = triggers.get();
+            t[*index] = 0;
+            triggers.set(t);
+        }
         self.update_itr_listen();
         self.update_watch();
     }
@@ -809,11 +814,12 @@ impl GpTimer {
                     let ps = &g.ports[p];
                     ps.mode(pin) == PinMode::Alternate && ps.af(pin) == pins.af
                 };
+                if !routed {
+                    continue;
+                }
                 for (_, level, cycle, _) in g.take_edges(p, 1 << pin) {
-                    if routed {
-                        let i = usize::from(!pins.pins[0].iter().any(|&(pp, pn)| port(pp) == p && pn == pin));
-                        edges.push((cycle, i, level));
-                    }
+                    let i = usize::from(!pins.pins[0].iter().any(|&(pp, pn)| port(pp) == p && pn == pin));
+                    edges.push((cycle, i, level));
                 }
             }
         }
@@ -967,13 +973,15 @@ impl GpTimer {
                 let ps = &mut g.ports[port(p)];
                 let bit = 1u16 << pin;
                 let routed = ps.mode(pin) == PinMode::Alternate && ps.af(pin) == pins.af;
-                if routed && (ps.cap_rise | ps.cap_fall) & bit != 0 {
-                    edges[src].0 |= ps.cap_rise & bit != 0;
-                    edges[src].1 |= ps.cap_fall & bit != 0;
-                    edges[src].2 = ps.cap_ps[pin as usize];
+                if routed {
+                    if (ps.cap_rise | ps.cap_fall) & bit != 0 {
+                        edges[src].0 |= ps.cap_rise & bit != 0;
+                        edges[src].1 |= ps.cap_fall & bit != 0;
+                        edges[src].2 = ps.cap_ps[pin as usize];
+                    }
+                    ps.cap_rise &= !bit;
+                    ps.cap_fall &= !bit;
                 }
-                ps.cap_rise &= !bit;
-                ps.cap_fall &= !bit;
             }
         }
         drop(g);
@@ -1466,7 +1474,7 @@ impl GpTimer {
     fn rebase(&mut self, now_ps: u64, cnt: u32) {
         let (_, rem) = self.elapsed_ticks(now_ps);
         let hz = u128::from(self.kernel_hz().max(1));
-        self.base_ps = now_ps - (rem / hz) as u64;
+        self.base_ps = now_ps.saturating_sub((rem / hz) as u64);
         self.cnt_base = cnt;
         self.checked = 0;
     }

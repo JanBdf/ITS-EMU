@@ -93,7 +93,6 @@ fn flag_shift(s: usize) -> u32 {
 #[derive(Default)]
 pub struct DmaState {
     streams: [[Stream; 8]; 2],
-    enables: [bool; 2],
 }
 
 /// The DMA controllers and the request lines of the peripherals (kept apart:
@@ -220,11 +219,21 @@ impl DmaState {
         let psize = Stream::size((st.cr >> 11) & 3);
         let msize = if st.fcr & FCR_DMDIS != 0 { Stream::size((st.cr >> 13) & 3) } else { psize };
         let periph = |a: u32| (0x4000_0000..0x6000_0000).contains(&a);
+        // DMA cannot access its own register windows (would also re-enter `self.state`).
+        let dma_regs = |a: u32| (0x4002_6000..0x4002_6800).contains(&a);
         let read = |addr: u32, size: u32, bus: &mut Bus, ctx: &mut DeviceCtx, ram: &Ram| {
-            if periph(addr) { Some(bus.read(ctx, addr, size)) } else { ram.read(addr, size) }
+            if dma_regs(addr) {
+                None
+            } else if periph(addr) {
+                Some(bus.read(ctx, addr, size))
+            } else {
+                ram.read(addr, size)
+            }
         };
         let write = |addr: u32, size: u32, v: u32, bus: &mut Bus, ctx: &mut DeviceCtx, ram: &mut Ram| {
-            if periph(addr) {
+            if dma_regs(addr) {
+                false
+            } else if periph(addr) {
                 bus.write(ctx, addr, size, v);
                 true
             } else {
@@ -338,7 +347,7 @@ impl BusMaster for DmaMaster {
         }
         let d = self.0.state.borrow();
         let r = self.0.pending();
-        (0..2).any(|c| d.enables[c] && (0..8).any(|s| d.due(c, s, &r)))
+        (0..2).any(|c| (0..8).any(|s| d.due(c, s, &r)))
     }
 
     fn service(&mut self, ctx: &mut DeviceCtx, bus: &mut Bus, ram: &mut Ram) {
@@ -432,7 +441,6 @@ impl Peripheral for DmaRegs {
         let reg = off & !3;
         let requests = self.state.pending()[self.index];
         let mut d = self.state.state.borrow_mut();
-        d.enables[self.index] = true;
         match reg {
             0x08 | 0x0C => {
                 let base = if reg == 0x0C { 4 } else { 0 };
@@ -453,8 +461,8 @@ impl Peripheral for DmaRegs {
                             v = v & !(CR_DBM | CR_CT) | st.cr & (CR_DBM | CR_CT);
                         }
                         if !enabled && v & CR_EN != 0 {
-                            // latch the transfer
-                            st.cr = st.cr & !CR_CT | v & CR_CT;
+                            // latch the transfer (DBM + CT both take effect on enable)
+                            st.cr = st.cr & !(CR_DBM | CR_CT) | v & (CR_DBM | CR_CT);
                             (st.total, st.p, st.m) = (st.ndtr, st.par, st.mem_base());
                             (st.fifo, st.fifo_len) = (0, 0);
                             // memory to peripheral in direct mode reports a FIFO
@@ -465,8 +473,7 @@ impl Peripheral for DmaRegs {
                             }
                             if st.ndtr == 0 {
                                 st.flags |= TEIF;
-                                st.cr = v & !CR_EN;
-                                return;
+                                v &= !CR_EN;
                             }
                         }
                         st.cr = v;
@@ -490,6 +497,17 @@ impl Peripheral for DmaRegs {
     }
 
     fn reset(&mut self) {
-        self.state.state.borrow_mut().streams[self.index] = [Stream { fcr: 1, ..Default::default() }; 8];
+        let mut d = self.state.state.borrow_mut();
+        d.streams[self.index] = [Stream { fcr: 1, ..Default::default() }; 8];
+        let clear = |cell: &Cell<[[u8; 8]; 2]>| {
+            let mut m = cell.get();
+            m[self.index] = [0; 8];
+            cell.set(m);
+        };
+        clear(&self.state.requests);
+        clear(&self.state.pulses);
+        clear(&self.state.ended);
+        clear(&self.state.one_left);
+        self.state.update_active(&d);
     }
 }

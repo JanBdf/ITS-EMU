@@ -221,6 +221,7 @@ impl DevicesPanel {
                         self.terminals.remove(&d.id);
                         if let Some(mut p) = self.programs.remove(&d.id) {
                             let _ = p.child.kill();
+                            let _ = p.child.wait();
                         }
                     }
                     if matches!(d.spec, DeviceSpec::Pico(_))
@@ -556,6 +557,7 @@ impl Drop for DevicesPanel {
     fn drop(&mut self) {
         for p in self.programs.values_mut() {
             let _ = p.child.kill();
+            let _ = p.child.wait();
         }
     }
 }
@@ -744,7 +746,10 @@ fn show_pico_usb(ui: &mut egui::Ui, usb: Option<&(String, bool)>) {
 /// Starts `program` with `python` on the Pico's serial port through
 /// `run_gui.py`; its output is collected.
 fn spawn_program(python: &str, port: &Path, program: &Path) -> std::io::Result<(Child, Arc<Mutex<String>>)> {
-    let launcher = std::env::temp_dir().join("its-emu-run_gui.py");
+    let launcher = rp2040::bootrom::cache_path().with_file_name("its-emu-run_gui.py");
+    if let Some(parent) = launcher.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(&launcher, RUN_GUI_PY)?;
     let mut child = std::process::Command::new(python)
         .arg(&launcher)

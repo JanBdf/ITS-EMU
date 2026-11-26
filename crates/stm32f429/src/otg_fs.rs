@@ -544,7 +544,7 @@ impl OtgFs {
             _ if t.setup[1] == 5 => {
                 self.own.push_back(own_request(OWN_ID + 2, [0x80, 6, 0, 2, 0, 0, 9, 0]));
             }
-            2 if data.len() == 9 => {
+            2 if t.id == OWN_ID + 2 && data.len() >= 4 && u16::from_le_bytes([data[2], data[3]]) > 9 => {
                 let [l0, l1] = [data[2], data[3]];
                 self.own.push_back(own_request(OWN_ID + 3, [0x80, 6, 0, 2, 0, 0, l0, l1]));
             }
@@ -888,8 +888,8 @@ impl OtgFs {
             0x804 => self.dctl,
             0x808 => {
                 // DSTS: full speed (48 MHz PHY clock), the frame number
-                let frame = if self.bus == BusState::Ready { (self.last_now - self.ready_at) as u32 } else { 0 };
-                let ms = frame / (self.clocks.get().hclk / 1000).max(1);
+                let cycles = if self.bus == BusState::Ready { self.last_now.saturating_sub(self.ready_at) } else { 0 };
+                let ms = (cycles / u64::from((self.clocks.get().hclk / 1000).max(1))) as u32;
                 (3 << 1) | ((ms & 0x3FFF) << 8)
             }
             0x810 => self.diepmsk,
@@ -1088,7 +1088,15 @@ impl Peripheral for OtgFs {
             }
         } else {
             let reg = off & !3;
-            let v = if size == 4 { value } else { merge_write(self.reg(reg), off, size, value) };
+            let w1c = matches!(reg, 0x004 | 0x014)
+                || ((0x900..=0x9FF).contains(&reg) && (reg - 0x900) % 0x20 == 0x08)
+                || ((0xB00..=0xBFF).contains(&reg) && (reg - 0xB00) % 0x20 == 0x08);
+            let v = if size == 4 {
+                value
+            } else {
+                let old = if w1c { 0 } else { self.reg(reg) };
+                merge_write(old, off, size, value)
+            };
             self.write_reg(reg, v);
         }
         self.kick = true;
@@ -1106,6 +1114,11 @@ impl Peripheral for OtgFs {
     fn reset(&mut self) {
         self.detach();
         self.reset_registers();
+        self.last_now = 0;
+        self.bus_free_at = 0;
+        self.ready_at = 0;
+        self.kick = false;
+        self.device_desc.clear();
         self.warned_clock = false;
     }
 }

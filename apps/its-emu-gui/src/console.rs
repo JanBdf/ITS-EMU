@@ -63,6 +63,8 @@ pub struct Console {
     len: usize,
     /// Tail of the received bytes that is not yet a complete UTF-8 character.
     pending: Vec<u8>,
+    /// Previous chunk ended with `\r`, so a leading `\n` in the next chunk is part of `\r\n`.
+    last_was_cr: bool,
     input: String,
     history: Vec<String>,
     /// Entry of `history` shown in the input line (Up/Down).
@@ -81,6 +83,7 @@ impl Console {
             lines: VecDeque::new(),
             len: 0,
             pending: Vec::new(),
+            last_was_cr: false,
             input: String::new(),
             history: Vec::new(),
             history_pos: None,
@@ -126,14 +129,23 @@ impl Console {
         // "\r\n" and "\r" end a line like "\n"; a lone "\r" does not return
         // the cursor (no overwriting in this console)
         let mut rest = text;
+        if self.last_was_cr {
+            self.last_was_cr = false;
+            if let Some(after) = rest.strip_prefix('\n') {
+                rest = after;
+            }
+        }
         while !rest.is_empty() {
             let end = rest.find(['\n', '\r']);
-            let (piece, newline) = match end {
+            let (piece, newline, ended_with_cr) = match end {
                 Some(i) => {
-                    let after = if rest[i..].starts_with("\r\n") { i + 2 } else { i + 1 };
-                    (&rest[..i], Some(after))
+                    if rest[i..].starts_with("\r\n") {
+                        (&rest[..i], Some(i + 2), false)
+                    } else {
+                        (&rest[..i], Some(i + 1), rest.as_bytes()[i] == b'\r' && i + 1 == rest.len())
+                    }
                 }
-                None => (rest, None),
+                None => (rest, None, false),
             };
             if self.lines.back().is_none_or(|l| l.complete) {
                 self.lines.push_back(Line::new(at_ns));
@@ -146,7 +158,8 @@ impl Console {
             match newline {
                 Some(after) => {
                     line.complete = true;
-                    self.len += after - piece.len();
+                    self.len += 1;
+                    self.last_was_cr = ended_with_cr;
                     rest = &rest[after..];
                 }
                 None => break,
@@ -187,6 +200,7 @@ impl Console {
         self.lines.clear();
         self.len = 0;
         self.pending.clear();
+        self.last_was_cr = false;
     }
 
     /// Sends `bytes` and shows them if echo is on.

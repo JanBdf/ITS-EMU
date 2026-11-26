@@ -164,8 +164,9 @@ impl Peripheral for Exti {
             0x08 => st.rtsr = v,
             0x0C => st.ftsr = v,
             0x10 => {
-                st.pr |= v & !st.swier & st.imr;
-                st.swier = v;
+                let set = merge_write(0, off, size, value) & LINES;
+                st.pr |= set & !st.swier & st.imr;
+                st.swier |= set;
             }
             0x14 => {
                 let clear = merge_write(0, off, size, value);

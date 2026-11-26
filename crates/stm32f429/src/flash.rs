@@ -173,11 +173,6 @@ impl FlashInterface {
         Self { state }
     }
 
-    /// Configured number of wait states.
-    pub fn latency(&self) -> u32 {
-        self.state.borrow().acr & 0xF
-    }
-
     fn write_cr(s: &mut FlashState, ctx: &mut DeviceCtx, v: u32) {
         let now = ctx.now();
         if s.cr & CR_LOCK != 0 {
@@ -349,6 +344,9 @@ impl FlashController for FlashProgrammer {
         if let Some(e) = error {
             log::debug!("flash: store of {value:#x} ({size} bytes) at offset {offset:#x} refused (SR {e:#x})");
             s.sr |= e;
+            if s.cr & CR_ERRIE != 0 {
+                s.sr |= SR_OPERR;
+            }
             return FlashStore::Ignore;
         }
         // programming a byte, half word or word: 14.1 µs (measured)

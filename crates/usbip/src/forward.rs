@@ -206,6 +206,7 @@ impl Queued for ForwardedDevice {
     fn submit(&mut self, seq: u32, ep: u8, dir_in: bool, setup: [u8; 8], data: &[u8], max_len: usize) {
         if ep != 0
             && dir_in
+            && !self.pending.values().any(|p| p.ep == ep && p.dir_in)
             && let Some(left) = self.leftover.get_mut(&ep)
         {
             let n = left.len().min(max_len);

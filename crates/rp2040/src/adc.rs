@@ -6,7 +6,7 @@
 //! THRESH, OVER/UNDER, the FIFO interrupt). An input reads the voltage set
 //! with [`SharedAnalog`], or else what is on the pin (0 or 3.3 V); the
 //! temperature sensor follows the datasheet's 0.706 V at 27 °C, -1.721
-//! mV/°C. The DMA request (DREQ_EN) is not modelled (noted when used).
+//! mV/°C. DMA pacing via `DREQ_EN` is supported.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -52,8 +52,6 @@ pub struct Adc {
     pins: SharedPins,
     tree: SharedClockTree,
     analog: SharedAnalog,
-    notices: Notices,
-    noted: bool,
     cs: u32,
     result: u32,
     fcs: u32,
@@ -69,13 +67,11 @@ pub struct Adc {
 }
 
 impl Adc {
-    pub fn new(pins: SharedPins, tree: SharedClockTree, analog: SharedAnalog, notices: Notices) -> Self {
+    pub fn new(pins: SharedPins, tree: SharedClockTree, analog: SharedAnalog, _notices: Notices) -> Self {
         Self {
             pins,
             tree,
             analog,
-            notices,
-            noted: false,
             cs: 0,
             result: 0,
             fcs: 0,
@@ -160,8 +156,9 @@ impl Adc {
             if let Some(next) = self.end_ps
                 && self.interval_ps > 0
                 && now_ps > next + 8 * self.interval_ps
+                && (self.fcs & FCS_EN == 0 || self.fifo.len() == 4)
             {
-                if self.fcs & FCS_EN != 0 && self.fifo.len() == 4 {
+                if self.fcs & FCS_EN != 0 {
                     self.fcs |= FCS_OVER;
                 }
                 self.end_ps = Some(next + (now_ps - next) / self.interval_ps * self.interval_ps);
@@ -240,10 +237,6 @@ impl Block for Adc {
             0x08 => {
                 let v = op.apply(self.fcs, value);
                 self.fcs = (v & 0x0F00_000F) | (self.fcs & !op.clears(value) & (FCS_UNDER | FCS_OVER));
-                if self.fcs & FCS_DREQ_EN != 0 && !self.noted {
-                    self.noted = true;
-                    self.notices.note("The firmware uses the ADC's DMA request, which is not emulated".to_owned());
-                }
             }
             0x10 => self.div = op.apply(self.div, value) & 0x00FF_FFFF,
             0x18 => self.inte = op.apply(self.inte, value) & 1,
@@ -258,8 +251,10 @@ impl Block for Adc {
     }
 
     fn next_event(&self) -> Option<u64> {
-        // only the FIFO interrupt needs the conversions on time
-        self.end_ps.filter(|_| self.inte != 0 && self.fcs & FCS_EN != 0).map(|_| self.end_cycle)
+        // FIFO interrupt or DMA DREQ needs the conversions on time
+        self.end_ps
+            .filter(|_| (self.inte != 0 || self.fcs & FCS_DREQ_EN != 0) && self.fcs & FCS_EN != 0)
+            .map(|_| self.end_cycle)
     }
 
     fn read_stable_until(&self, off: u32, clock: &Clock) -> u64 {
@@ -275,9 +270,8 @@ impl Block for Adc {
     }
 
     fn reset(&mut self) {
-        let (pins, tree, analog, notices) =
-            (self.pins.clone(), self.tree.clone(), self.analog.clone(), self.notices.clone());
-        *self = Self::new(pins, tree, analog, notices);
+        let (pins, tree, analog) = (self.pins.clone(), self.tree.clone(), self.analog.clone());
+        *self = Self::new(pins, tree, analog, Notices::default());
     }
 }
 

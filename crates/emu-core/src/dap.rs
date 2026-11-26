@@ -35,7 +35,6 @@ pub enum DapError {
 #[derive(Debug, Clone)]
 pub struct Dap {
     ctrl_stat: u32,
-    select: u32,
     rdbuff: u32,
     csw: u32,
     tar: u32,
@@ -49,12 +48,12 @@ impl Default for Dap {
 
 impl Dap {
     pub fn new() -> Self {
-        Self { ctrl_stat: 0, select: 0, rdbuff: 0, csw: CSW_RESET, tar: 0 }
+        Self { ctrl_stat: 0, rdbuff: 0, csw: CSW_RESET, tar: 0 }
     }
 
-    /// Debug and system power are up (CDBGPWRUPACK, CSYSPWRUPACK).
+    /// Debug and system power are up (CDBGPWRUPREQ/ACK).
     pub fn powered(&self) -> bool {
-        self.ctrl_stat & (1 << 29) != 0
+        self.ctrl_stat & (1 << 28) != 0
     }
 
     /// Reads DP register `addr` (bits 7:4 select the bank, as with DPBANKSEL).
@@ -94,7 +93,7 @@ impl Dap {
                 let sticky = self.ctrl_stat & CTRL_STICKY & !value;
                 self.ctrl_stat = (value & CTRL_WRITABLE) | sticky;
             }
-            0x08 => self.select = value,
+            0x08 => {} // SELECT: apsel is passed explicitly to read_ap/write_ap
             _ => {}
         }
     }

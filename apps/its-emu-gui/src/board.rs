@@ -213,7 +213,7 @@ pub struct Textures {
 }
 
 impl Textures {
-    pub fn load(_ctx: &egui::Context) -> Self {
+    pub fn load() -> Self {
         let layers = LAYERS
             .iter()
             .map(|svg| {
@@ -901,7 +901,7 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
             Sense::click(),
         );
         let resp = tip(named(resp, egui::Role::Button, hover.replace('\n', ", ")), hover);
-        if resp.hovered() {
+        if !ctrl && resp.hovered() {
             let scroll: f32 = ui.input(|i| {
                 i.raw
                     .events
@@ -955,7 +955,7 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
         Sense::click_and_drag(),
     );
     let user = named(user, egui::Role::Button, "USER button B1").on_hover_text("USER button B1 (PC13)");
-    input.user = user.is_pointer_button_down_on();
+    input.user = user.is_pointer_button_down_on() && primary_down(ui);
     if input.user {
         pcb.pressed(USER.0, USER.1, 8.5);
     }
@@ -966,7 +966,7 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
     );
     let reset = named(reset, egui::Role::Button, "RESET button B2").on_hover_text("RESET button B2 · Ctrl+R");
     input.reset_clicked = reset.clicked();
-    if reset.is_pointer_button_down_on() {
+    if reset.is_pointer_button_down_on() && primary_down(ui) {
         pcb.pressed(RESET.0, RESET.1, 8.5);
     }
 

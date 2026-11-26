@@ -52,11 +52,17 @@ impl Connection for Conn {
 
     fn flush(&mut self) -> io::Result<()> {
         let mut data = &self.out[..];
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !data.is_empty() {
             match Write::write(&mut self.stream, data) {
                 Ok(0) => return Err(ErrorKind::WriteZero.into()),
                 Ok(n) => data = &data[n..],
-                Err(e) if e.kind() == ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(1)),
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(ErrorKind::TimedOut.into());
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }

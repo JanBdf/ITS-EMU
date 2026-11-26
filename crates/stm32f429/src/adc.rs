@@ -214,7 +214,8 @@ impl Unit {
     }
 
     fn conversion_adc_clocks(&self, ch: u32) -> u64 {
-        let smp = if ch >= 10 { self.smpr[0] >> (3 * (ch - 10)) } else { self.smpr[1] >> (3 * ch) };
+        let smp =
+            if ch >= 10 { self.smpr[0].checked_shr(3 * (ch - 10)).unwrap_or(0) } else { self.smpr[1] >> (3 * ch) };
         SMP_CYCLES[(smp & 7) as usize] + u64::from(self.resolution_bits())
     }
 
@@ -619,6 +620,9 @@ impl Peripheral for Adc {
     fn reset(&mut self) {
         self.units = [Unit::reset(), Unit::reset(), Unit::reset()];
         self.ccr = 0;
+        for line in &DMA_LINES {
+            line.set(&self.dma, false);
+        }
     }
 }
 
@@ -766,8 +770,8 @@ impl Dac {
     }
 
     /// Loads DOR from DHR unless the channel waits for a trigger.
-    fn load(&mut self, ch: usize, triggered: bool) {
-        if self.ch_cr(ch) & 0x4 == 0 || triggered {
+    fn load(&mut self, ch: usize) {
+        if self.ch_cr(ch) & 0x4 == 0 {
             self.dor[ch] = self.dhr[ch];
         }
     }
@@ -885,8 +889,8 @@ impl Peripheral for Dac {
                     *request = false;
                 }
             }
-            self.load(0, false);
-            self.load(1, false);
+            self.load(0);
+            self.load(1);
         }
         self.output();
         self.sync(ctx);
@@ -904,6 +908,9 @@ impl Peripheral for Dac {
         (self.cr, self.dhr, self.dor, self.sr) = (0, [0; 2], [0; 2], 0);
         (self.trigger_seen, self.lfsr, self.triangle) = ([0; 2], [LFSR_RESET; 2], [0; 2]);
         (self.falling, self.dma_request) = ([false; 2], [false; 2]);
+        for line in &DAC_DMA_LINES {
+            line.set(&self.dma, false);
+        }
         self.output();
     }
 }

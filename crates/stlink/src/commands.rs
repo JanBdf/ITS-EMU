@@ -35,6 +35,7 @@ pub struct PendingWrite {
     len: usize,
     size: u32,
     increment: bool,
+    apsel: u8,
     data: Vec<u8>,
 }
 
@@ -282,20 +283,20 @@ impl Stlink {
     fn start_write(&mut self, cmd: &[u8; 16], size: u32, increment: bool) {
         let addr = le32(cmd, 2);
         let len = le16(cmd, 6) as usize;
-        if cmd[8] != 0 {
-            self.last_rw = (STATUS_BAD_AP, addr);
-        }
-        let w = PendingWrite { addr, len, size, increment, data: Vec::with_capacity(len) };
+        let apsel = cmd[8];
+        let w = PendingWrite { addr, len, size, increment, apsel, data: Vec::with_capacity(len) };
         if len == 0 {
-            self.last_rw = (STATUS_OK, 0);
+            self.last_rw = if apsel != 0 { (STATUS_BAD_AP, addr) } else { (STATUS_OK, 0) };
         } else {
             self.pending_write = Some(w);
         }
     }
 
     fn finish_write(&mut self, m: &mut Machine, w: PendingWrite) {
-        let PendingWrite { addr, size, increment, data, .. } = w;
-        self.last_rw = if size > 1 && (!addr.is_multiple_of(size) || !(data.len() as u32).is_multiple_of(size)) {
+        let PendingWrite { addr, size, increment, apsel, data, .. } = w;
+        self.last_rw = if apsel != 0 {
+            (STATUS_BAD_AP, addr)
+        } else if size > 1 && (!addr.is_multiple_of(size) || !(data.len() as u32).is_multiple_of(size)) {
             (STATUS_ALIGNMENT_ERROR, addr)
         } else {
             let result = if increment {

@@ -296,7 +296,7 @@ impl Browser {
                     ui.checkbox(&mut self.all_files, "All files")
                         .on_hover_text("Show all files, not only firmware (.axf, .elf)");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let chosen = self.selected.and_then(|i| self.entries.get(i));
+                        let chosen = self.selected.and_then(|i| self.entries.get(i)).filter(|e| self.visible(e));
                         if ui.add_enabled(chosen.is_some(), egui::Button::new(RichText::new("Open").strong())).clicked()
                             && let Some(e) = chosen
                         {

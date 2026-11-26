@@ -231,7 +231,13 @@ fn run(
                         log::info!("Pico serial: {}", String::from_utf8_lossy(&line).trim_end());
                         line.clear();
                     }
-                    _ => line.push(b),
+                    _ => {
+                        line.push(b);
+                        if line.len() >= 4096 {
+                            log::info!("Pico serial: {}", String::from_utf8_lossy(&line));
+                            line.clear();
+                        }
+                    }
                 }
             }
             if let Some(t) = &mut tty {
@@ -256,9 +262,8 @@ fn run(
         if !notices.is_empty() {
             status.lock().unwrap().notices.extend(notices);
         }
-        let edges = pico.take_edges().into_iter().filter_map(|e| {
-            let output = gpios.iter().position(|&g| g == e.pin)?;
-            Some((e.ps, output, e.level))
+        let edges = pico.take_edges().into_iter().flat_map(|e| {
+            gpios.iter().enumerate().filter(move |&(_, &g)| g == e.pin).map(move |(output, _)| (e.ps, output, e.level))
         });
         link.publish(pico.time_ps(), edges);
     }

@@ -94,7 +94,7 @@ pub fn enter<C: CoreAccess>(
     let mut frame = sp.wrapping_sub(frame_size);
     let mut stacked_xpsr = xpsr;
     if stkalign && frame & 4 != 0 {
-        frame -= 4;
+        frame = frame.wrapping_sub(4);
         stacked_xpsr |= 1 << 9;
     } else {
         stacked_xpsr &= !(1 << 9);
@@ -111,14 +111,14 @@ pub fn enter<C: CoreAccess>(
         stacked_xpsr,
     ];
     for (i, v) in basic.iter().enumerate() {
-        core.write_u32(frame + 4 * i as u32, *v)?;
+        core.write_u32(frame.wrapping_add(4 * i as u32), *v)?;
     }
     if fpca {
         // Non-lazy FP stacking: S0..S15, FPSCR.
         for i in 0..16u8 {
-            core.write_u32(frame + 0x20 + 4 * u32::from(i), core.reg(CoreReg::S(i)))?;
+            core.write_u32(frame.wrapping_add(0x20 + 4 * u32::from(i)), core.reg(CoreReg::S(i)))?;
         }
-        core.write_u32(frame + 0x60, core.reg(CoreReg::Fpscr))?;
+        core.write_u32(frame.wrapping_add(0x60), core.reg(CoreReg::Fpscr))?;
     }
 
     let mut exc_return = 0xFFFF_FFE1;
@@ -162,22 +162,26 @@ pub fn exit<C: CoreAccess>(core: &mut C, nvic: &mut Nvic, exc_return: u32) -> Re
 
     let current = core.reg(CoreReg::Xpsr) & XPSR_IPSR_MASK;
     nvic.deactivate(current);
+    // ARMv7-M B1.5.8: returning from any exception other than NMI clears FAULTMASK.
+    if current != crate::nvic::NMI && core.reg(CoreReg::Faultmask) & 1 != 0 {
+        core.set_reg(CoreReg::Faultmask, 0);
+    }
 
     let frame = if use_psp { core.reg(CoreReg::Psp) } else { core.reg(CoreReg::Msp) };
     let mut vals = [0u32; 8];
     for (i, v) in vals.iter_mut().enumerate() {
-        *v = core.read_u32(frame + 4 * i as u32)?;
+        *v = core.read_u32(frame.wrapping_add(4 * i as u32))?;
     }
     let mut fp = [0u32; 17];
     if fp_frame {
         for (i, v) in fp.iter_mut().enumerate() {
-            *v = core.read_u32(frame + 0x20 + 4 * i as u32)?;
+            *v = core.read_u32(frame.wrapping_add(0x20 + 4 * i as u32))?;
         }
     }
     let stacked_xpsr = vals[7];
-    let mut new_sp = frame + if fp_frame { EXTENDED_FRAME } else { BASIC_FRAME };
+    let mut new_sp = frame.wrapping_add(if fp_frame { EXTENDED_FRAME } else { BASIC_FRAME });
     if stacked_xpsr & (1 << 9) != 0 {
-        new_sp += 4;
+        new_sp = new_sp.wrapping_add(4);
     }
 
     let mut ipsr = stacked_xpsr & XPSR_IPSR_MASK;

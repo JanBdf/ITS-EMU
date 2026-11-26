@@ -197,14 +197,16 @@ impl Settings {
                 }
                 "console_side" => self.console_side = by_name(&ConsoleSide::ALL, value).unwrap_or(self.console_side),
                 "line_ending" => self.line_ending = by_name(&LineEnding::ALL, value).unwrap_or(self.line_ending),
-                "recent" if self.recent.len() < MAX_RECENT => self.recent.push(PathBuf::from(value.trim())),
-                "device" => match DeviceSpec::parse(value.trim()) {
+                "recent" if self.recent.len() < MAX_RECENT && !value.is_empty() => {
+                    self.recent.push(PathBuf::from(value))
+                }
+                "device" => match DeviceSpec::parse(value) {
                     Ok(d) => self.devices.push(d),
-                    Err(e) => log::warn!("settings: device {}: {e}", value.trim()),
+                    Err(e) => log::warn!("settings: device {value}: {e}"),
                 },
-                "pico_bootrom" => self.pico_bootrom = Some(PathBuf::from(value.trim())),
-                "python" => self.python = value.trim().to_owned(),
-                "python_program" => self.python_program = Some(PathBuf::from(value.trim())),
+                "pico_bootrom" if !value.is_empty() => self.pico_bootrom = Some(PathBuf::from(value)),
+                "python" if !value.is_empty() => self.python = value.to_owned(),
+                "python_program" if !value.is_empty() => self.python_program = Some(PathBuf::from(value)),
                 _ => {}
             }
         }

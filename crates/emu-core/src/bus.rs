@@ -9,7 +9,6 @@ use std::collections::HashSet;
 use crate::clock::Clock;
 use crate::nvic::Nvic;
 
-/// Context handed to peripherals on every access and update.
 /// Memory as a bus master (DMA) sees it: RAM and flash, without Unicorn.
 #[derive(Clone, Default)]
 pub struct Ram {
@@ -25,15 +24,6 @@ impl Ram {
     /// `Ram` is used.
     pub unsafe fn add(&mut self, base: u32, ptr: *mut u8, size: u32, writable: bool) {
         self.regions.push((base, ptr, size, writable));
-    }
-
-    /// The writable regions' contents, in the order they were added.
-    pub fn writable(&self) -> impl Iterator<Item = &[u8]> {
-        // SAFETY: valid while the `Ram` is used (see `add`)
-        self.regions
-            .iter()
-            .filter(|r| r.3)
-            .map(|&(_, ptr, len, _)| unsafe { std::slice::from_raw_parts(ptr, len as usize) })
     }
 
     /// The contents of the region that starts at `base`.
@@ -60,17 +50,23 @@ impl Ram {
 
     /// Reads `size` bytes (1, 2, 4), little endian.
     pub fn read(&self, addr: u32, size: u32) -> Option<u32> {
+        if !matches!(size, 1 | 2 | 4) {
+            return None;
+        }
         let (p, _) = self.locate(addr, size)?;
         let mut b = [0u8; 4];
-        // SAFETY: `locate` checked the bounds
+        // SAFETY: `locate` checked the bounds and `size <= 4`
         unsafe { std::ptr::copy_nonoverlapping(p, b.as_mut_ptr(), size as usize) };
         Some(u32::from_le_bytes(b))
     }
 
     pub fn write(&mut self, addr: u32, size: u32, value: u32) -> bool {
+        if !matches!(size, 1 | 2 | 4) {
+            return false;
+        }
         match self.locate(addr, size) {
             Some((p, true)) => {
-                // SAFETY: `locate` checked the bounds
+                // SAFETY: `locate` checked the bounds and `size <= 4`
                 unsafe { std::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), p, size as usize) };
                 true
             }
@@ -103,6 +99,7 @@ pub enum ResetKind {
     Watchdog,
 }
 
+/// Context handed to peripherals on every access and update.
 pub struct DeviceCtx<'a> {
     pub clock: &'a mut Clock,
     pub nvic: &'a mut Nvic,

@@ -186,6 +186,9 @@ fn parse_inputs(s: &str) -> Result<InputScript, String> {
         let (time, rest) = item.split_once(':').ok_or_else(|| format!("missing ':' in {item:?}"))?;
         let (name, value) = rest.split_once('=').ok_or_else(|| format!("missing '=' in {item:?}"))?;
         let seconds: f64 = time.parse().map_err(|_| format!("bad time in {item:?}"))?;
+        if !seconds.is_finite() || seconds < 0.0 {
+            return Err(format!("bad time in {item:?}"));
+        }
         let flag = || match value {
             "1" => Ok(true),
             "0" => Ok(false),
@@ -526,7 +529,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// One line of JSON with the result of the run (for scripts and autograders).
 type UsbDevices = (stlink::UsbProbe, Vec<itsboard::pico_usb::PicoUsbDevice>, stm32f429::otg_fs::OtgUsbDevice);
 
 /// Serves the USB host: the ST-LINK's commands, the devices of CN13 and the
@@ -557,6 +559,7 @@ fn poll_usb((probe, pico_usb, otg): &mut UsbDevices, machine: &mut Machine, atta
     }
 }
 
+/// One line of JSON with the result of the run (for scripts and autograders).
 fn json_summary(
     machine: &Machine,
     image: &ElfImage,

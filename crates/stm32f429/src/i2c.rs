@@ -87,8 +87,8 @@ pub struct I2c {
     fltr: u32,
     /// SR1 was read since the flag that needs SR1 + DR/SR2 to clear.
     sr1_read: bool,
-    /// A device acknowledged the address (it takes part in the transfer).
-    addressed: bool,
+    /// Index of the device that acknowledged the address (it takes part in the transfer).
+    addressed: Option<usize>,
     /// The byte being sent is an address.
     addr_phase: bool,
     /// A received byte waiting in the shift register (DR is full) and
@@ -137,7 +137,7 @@ impl I2c {
             trise: 0,
             fltr: 0,
             sr1_read: false,
-            addressed: false,
+            addressed: None,
             addr_phase: false,
             shift: None,
             next_ack: true,
@@ -165,7 +165,7 @@ impl I2c {
     fn reset_regs(&mut self) {
         (self.cr1, self.cr2, self.oar1, self.oar2, self.dr, self.sr1) = (0, 0, 0, 0, 0, 0);
         (self.sr2, self.ccr, self.trise, self.fltr) = (SR2_BUSY, 0, 2, 0);
-        (self.sr1_read, self.addressed, self.addr_phase, self.pending) = (false, false, false, None);
+        (self.sr1_read, self.addressed, self.addr_phase, self.pending) = (false, None, false, None);
         (self.shift, self.next_ack) = (None, true);
     }
 
@@ -178,7 +178,7 @@ impl I2c {
         let g = self.gpio.borrow();
         let af4 = |&(p, pin): &(char, u32)| {
             let ps = &g.ports[port(p)];
-            ps.mode(pin) == PinMode::Alternate && (ps.afr[(pin / 8) as usize] >> (4 * (pin % 8))) & 0xF == 4
+            ps.mode(pin) == PinMode::Alternate && ps.af(pin) == 4
         };
         self.scl.iter().any(af4) && self.sda.iter().any(af4)
     }
@@ -224,10 +224,16 @@ impl I2c {
                 self.addr_phase = false;
                 let (addr, read) = (byte >> 1, byte & 1 != 0);
                 let mut devices = self.devices.borrow_mut();
-                let ack = devices.iter_mut().any(|d| d.start(addr, read));
+                // Notify every device so a repeated START deselects any previously active one.
+                let mut matched = None;
+                for (i, d) in devices.iter_mut().enumerate() {
+                    if d.start(addr, read) && matched.is_none() {
+                        matched = Some(i);
+                    }
+                }
                 drop(devices);
-                if ack {
-                    self.addressed = true;
+                if matched.is_some() {
+                    self.addressed = matched;
                     self.sr1 |= SR1_ADDR;
                     self.sr1_read = false;
                     if read {
@@ -236,11 +242,15 @@ impl I2c {
                         self.sr2 |= SR2_TRA;
                     }
                 } else {
+                    self.addressed = None;
                     self.sr1 |= SR1_AF;
                 }
             }
             Pending::Byte(byte) => {
-                let ack = self.addressed && self.devices.borrow_mut().iter_mut().any(|d| d.write(byte));
+                let ack = self
+                    .addressed
+                    .and_then(|i| self.devices.borrow_mut().get_mut(i).map(|d| d.write(byte)))
+                    .unwrap_or(false);
                 if ack {
                     self.sr1 |= SR1_TXE | SR1_BTF;
                 } else {
@@ -251,7 +261,10 @@ impl I2c {
                 let acked = self.cr1 & CR1_ACK != 0;
                 let ack = if self.cr1 & CR1_POS != 0 { std::mem::replace(&mut self.next_ack, acked) } else { acked };
                 let ack = ack && !self.dma_last();
-                let byte = self.devices.borrow_mut().iter_mut().map(|d| d.read(ack)).next().unwrap_or(0xFF);
+                let byte = self
+                    .addressed
+                    .and_then(|i| self.devices.borrow_mut().get_mut(i).map(|d| d.read(ack)))
+                    .unwrap_or(0xFF);
                 if self.sr1 & SR1_RXNE != 0 {
                     // waits in the shift register (SCL held low) until DR is read
                     self.shift = Some((byte, ack));
@@ -266,7 +279,7 @@ impl I2c {
                 self.cr1 &= !CR1_STOP;
                 self.sr2 &= !(SR2_MSL | SR2_BUSY | SR2_TRA);
                 self.sr1 &= !(SR1_TXE | SR1_BTF);
-                self.addressed = false;
+                self.addressed = None;
                 for d in self.devices.borrow_mut().iter_mut() {
                     d.stop();
                 }
@@ -276,7 +289,7 @@ impl I2c {
 
     /// After an acknowledged byte the device sends the next one.
     fn receive_next(&mut self, acked: bool, ctx: &DeviceCtx) {
-        if acked && self.cr1 & CR1_STOP == 0 && self.addressed {
+        if acked && self.cr1 & CR1_STOP == 0 && self.addressed.is_some() {
             self.schedule(Pending::Receive, ctx);
         }
     }
@@ -401,6 +414,10 @@ impl Peripheral for I2c {
                     self.sr1 = 0;
                     self.sr2 &= SR2_BUSY;
                     self.pending = None;
+                    self.addressed = None;
+                    self.shift = None;
+                    self.addr_phase = false;
+                    self.sr1_read = false;
                     self.sync_irq(ctx);
                     return;
                 }
@@ -421,7 +438,7 @@ impl Peripheral for I2c {
             0x10 => {
                 self.dr = v & 0xFF;
                 let addressing = self.sr1 & SR1_SB != 0 && self.sr1_read;
-                let sending = self.sr2 & SR2_TRA != 0 && self.sr1 & SR1_ADDR == 0 && self.addressed;
+                let sending = self.sr2 & SR2_TRA != 0 && self.sr1 & SR1_ADDR == 0 && self.addressed.is_some();
                 if (addressing || sending) && self.pending.is_none() {
                     self.addr_phase = addressing;
                     self.sr1 &= !(SR1_SB | SR1_TXE | SR1_BTF);

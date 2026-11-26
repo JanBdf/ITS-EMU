@@ -35,7 +35,7 @@ pub fn interfaces(config: &[u8]) -> Vec<(u8, u8, u8)> {
 
 /// String descriptor (UTF-16LE).
 pub fn string(s: &str) -> Vec<u8> {
-    let units: Vec<u16> = s.encode_utf16().collect();
+    let units: Vec<u16> = s.encode_utf16().take(126).collect();
     let mut v = vec![(2 + 2 * units.len()) as u8, DESC_STRING];
     for u in units {
         v.extend_from_slice(&u.to_le_bytes());

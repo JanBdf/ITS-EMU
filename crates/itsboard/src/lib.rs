@@ -311,14 +311,19 @@ impl ItsBoard {
         Ok(bound)
     }
 
+    fn pin_idle_level(p: char, pin: u32) -> Option<bool> {
+        let external = EXTERNAL_LEVELS.iter().find(|&&(ep, epin, _)| (ep, epin) == (p, pin)).map(|e| e.2);
+        external.or((p == 'F' && pin < 8).then_some(true))
+    }
+
     /// Wires the outputs of a [`plugin`] to header pins (`wiring[n]`: the pin
     /// of output `n`, if any). Where an output does not drive its pin, the
-    /// board does: the buttons' pull-ups hold PF0–7 high, other pins float.
+    /// board does: the buttons' pull-ups hold PF0–7 high, external pull-ups
+    /// hold their pins, and other pins float.
     /// (A plugin driving a button pin wins over the button.)
     pub fn add_plugin(&self, link: std::sync::Arc<plugin::Link>, wiring: &[Option<(char, u32)>]) {
         self.device_pins.borrow_mut().extend(wiring.iter().flatten());
-        let wiring =
-            wiring.iter().map(|w| w.map(|(p, pin)| ((p, pin), (p == 'F' && pin < 8).then_some(true)))).collect();
+        let wiring = wiring.iter().map(|w| w.map(|(p, pin)| ((p, pin), Self::pin_idle_level(p, pin)))).collect();
         let pins = plugin::PluginPins::new(link, self.mcu.gpio.clone(), wiring);
         self.devices.borrow_mut().push(Rc::new(RefCell::new(pins)));
         self.has_extra_devices.set(true);
@@ -335,15 +340,13 @@ impl ItsBoard {
         self.mcu.i2c1.borrow_mut().clear();
         let mut g = self.mcu.gpio.borrow_mut();
         for (p, pin) in self.device_pins.take() {
-            let external = EXTERNAL_LEVELS.iter().find(|&&(ep, epin, _)| (ep, epin) == (p, pin)).map(|e| e.2);
-            let level = external.or((p == 'F' && pin < 8).then_some(true));
-            g.drive(port(p), pin, level);
+            g.drive(port(p), pin, Self::pin_idle_level(p, pin));
             g.ports[port(p)].log_watch &= !(1 << pin);
         }
     }
 
-    /// Temperature at sensor `n` (DS18B20 or LM75, °C, -55..125); the next
-    /// conversion measures it.
+    /// Temperature at sensor `n` (DS18B20, LM75, or IKS01A3, °C, -55..125);
+    /// the next conversion measures it.
     pub fn set_temperature(&self, n: usize, celsius: f32) -> Result<(), String> {
         match self.sensors.borrow().get(n).ok_or_else(|| format!("there is no temperature sensor {n}"))? {
             Sensor::OneWire(bus, i) => bus.borrow_mut().sensors[*i].set_celsius(celsius),
@@ -530,6 +533,7 @@ impl DisplayFrame {
     /// See [`ItsBoard::render_display_as_seen`].
     pub fn render_as_seen(&self, rgba: &mut [u8]) {
         if self.panel.is_dark() {
+            assert_eq!(rgba.len(), SCREEN_WIDTH * SCREEN_HEIGHT * 4);
             rgba.as_chunks_mut::<4>().0.fill([0, 0, 0, 0xFF]);
             return;
         }
