@@ -49,19 +49,18 @@ enum CableKind {
     Ethernet,
 }
 
-/// Body, strain relief, cable and highlight of the cables.
-const CABLE_BLACK: [Color32; 4] = [
+/// Body, strain relief and cable colors.
+const CABLE_BLACK: [Color32; 3] = [
     Color32::from_rgb(0x26, 0x26, 0x28),
     Color32::from_rgb(0x1d, 0x1d, 0x1f),
     Color32::from_rgb(0x1a, 0x1a, 0x1c),
-    Color32::from_rgb(0x48, 0x48, 0x4c),
 ];
-const CABLE_GREY: [Color32; 4] = [
+const CABLE_GREY: [Color32; 3] = [
     Color32::from_rgb(0xc9, 0xcd, 0xd1),
     Color32::from_rgb(0x8d, 0x93, 0x99),
     Color32::from_rgb(0x96, 0x9c, 0xa2),
-    Color32::from_rgb(0xc4, 0xc9, 0xce),
 ];
+const CABLE_GREY_SHINE: Color32 = Color32::from_rgb(0xc4, 0xc9, 0xce);
 
 /// OUT0..OUT15 LEDs (D8..D23), x of the package centre; all at `LED_Y`.
 /// These positions are shared with tools/hw/boarddraw.py, which reads them from here.
@@ -459,15 +458,15 @@ impl Pcb<'_> {
         let x0 = at.0 + dir * gap;
         let y = at.1;
         // body (overmold or the RJ45's clear plug and its boot), strain relief, cable
-        let (body, relief, w_body, w_relief, w_cable, colors) = match kind {
-            CableKind::MicroUsb => (60.0, 43.0, 20.0, (15.0, 8.0), 6.5, CABLE_BLACK),
-            CableKind::Ethernet => (22.0, 30.0, 22.0, (17.0, 11.0), 11.0, CABLE_GREY),
+        let (body, relief, w_body, w_relief, w_cable, colors, shine) = match kind {
+            CableKind::MicroUsb => (60.0, 43.0, 20.0, (15.0, 8.0), 6.5, CABLE_BLACK, None),
+            CableKind::Ethernet => (22.0, 30.0, 22.0, (17.0, 11.0), 11.0, CABLE_GREY, Some(CABLE_GREY_SHINE)),
         };
         let r = |a: f32, b: f32, h: f32| {
             let (xa, xb) = (x0 + dir * a, x0 + dir * b);
             self.r(xa.min(xb), y - h, xa.max(xb), y + h)
         };
-        let [body_color, relief_color, cable_color, shine] = colors;
+        let [body_color, relief_color, cable_color] = colors;
         // the cable first, so that the plug lies on its end
         let start = self.p(x0 + dir * (body + relief - 2.0), y);
         let [c1, c2, e] = end.map(|(x, y)| self.p(x, y));
@@ -481,7 +480,9 @@ impl Pcb<'_> {
             )
         };
         self.painter.add(cable(2.0 * w_cable, c(cable_color), 0.0));
-        self.painter.add(cable(w_cable * 0.5, c(shine), -w_cable * 0.4));
+        if let Some(shine) = shine {
+            self.painter.add(cable(w_cable * 0.5, c(shine), -w_cable * 0.4));
+        }
         // strain relief: tapering, with ribs
         let steps = 6;
         for i in 0..steps {
@@ -495,12 +496,14 @@ impl Pcb<'_> {
             }
         }
         self.painter.rect_filled(r(0.0, body, w_body), self.len(2.0), c(body_color));
-        // highlight along the top of the body
-        self.painter.rect_filled(
-            r(1.5, body - 1.5, 1.2).translate(Vec2::new(0.0, -self.len(w_body - 3.0))),
-            0.0,
-            c(shine),
-        );
+        if let Some(shine) = shine {
+            // highlight along the top of the body
+            self.painter.rect_filled(
+                r(1.5, body - 1.5, 1.2).translate(Vec2::new(0.0, -self.len(w_body - 3.0))),
+                0.0,
+                c(shine),
+            );
+        }
         if kind == CableKind::Ethernet {
             // the clear plug shows its gold contacts and the latch
             for i in 0..8 {
@@ -663,17 +666,14 @@ pub fn show(ui: &mut egui::Ui, tex: &mut Textures, state: &BoardState, view: &Vi
     );
     let stlink = named(stlink, egui::Role::Button, "ST-LINK USB cable (CN1)");
     input.stlink_clicked = stlink.clicked();
-    let stlink_ghost = state.cables.stlink == Plug::Out && stlink.hovered();
     tip(stlink.on_hover_cursor(egui::CursorIcon::PointingHand), state.stlink_text);
     for (n, (id, at)) in tex.layers(ui.ctx(), size).into_iter().enumerate() {
         if n == SHIELD {
             // cables on the Nucleo's jacks, under the display
             let c = &state.cables;
-            if c.stlink != Plug::Out || stlink_ghost {
-                let (plug, alpha) = if stlink_ghost { (Plug::In, 0.35) } else { (c.stlink, 1.0) };
-                let end = [(960.0, 265.6), (990.0, 266.5), (1030.0, 268.0)];
-                pcb.cable(CableKind::MicroUsb, plug, CN1_OPENING, 1.0, end, alpha);
-            }
+            let (plug, alpha) = if c.stlink == Plug::Out { (Plug::In, 0.35) } else { (c.stlink, 1.0) };
+            let end = [(960.0, 265.6), (990.0, 266.5), (1030.0, 268.0)];
+            pcb.cable(CableKind::MicroUsb, plug, CN1_OPENING, 1.0, end, alpha);
             if c.otg != Plug::Out {
                 // to the top edge, over the RS232 jack
                 pcb.cable(
