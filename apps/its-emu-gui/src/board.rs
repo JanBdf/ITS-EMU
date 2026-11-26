@@ -10,9 +10,7 @@
 //! orthographic top view, the parts on the Nucleo and the display were moved
 //! from where the camera saw them to where they are.
 
-use eframe::egui::{
-    self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2,
-};
+use eframe::egui::{self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2};
 
 /// The drawing (the board outline) spans `BOARD_W` × `BOARD_H` design units
 /// from `BOARD_ORIGIN`.  The design units were set up on a photo that shows
