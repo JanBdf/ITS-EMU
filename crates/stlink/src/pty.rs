@@ -2,11 +2,10 @@
 //! `/dev/pts/…` on Linux), where it cannot be a USB CDC-ACM device. Terminal
 //! programs open the path like `/dev/ttyACM0` of the USB probe.
 //!
-//! The emulator keeps only the controlling side open: while no program has
-//! the terminal open, writes fail and the output stays in the USART's
-//! mirror buffer, as with the USB port nobody reads. Each open starts with
-//! the system's default terminal settings (echo, line editing), like
-//! `/dev/ttyACM0`; terminal programs set raw mode themselves.
+//! The emulator keeps only the controlling side open. The terminal side is
+//! put into raw mode on creation so that on Linux, where writes to the
+//! controlling side succeed even before a program opens the terminal, the
+//! kernel line discipline does not echo MCU output back into the USART RX.
 
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -51,6 +50,18 @@ impl Pty {
                 return Err(io::Error::last_os_error());
             }
             let path = std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned();
+            // Put the slave side into raw mode so that on Linux (where termios
+            // persists on the PTY while the master stays open) bytes written to
+            // the master before a terminal connects are not echoed back as RX.
+            let slave = libc::open(name, libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK);
+            if slave >= 0 {
+                let mut t: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(slave, &mut t) == 0 {
+                    libc::cfmakeraw(&mut t);
+                    libc::tcsetattr(slave, libc::TCSANOW, &t);
+                }
+                libc::close(slave);
+            }
             let flags = libc::fcntl(fd, libc::F_GETFL);
             if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
                 return Err(io::Error::last_os_error());
