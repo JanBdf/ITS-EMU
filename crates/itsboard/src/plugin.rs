@@ -319,6 +319,11 @@ mod tests {
         let link = Link::new(1);
         let gpio = SharedGpio::default();
         let mut pins = PluginPins::new(link.clone(), gpio.clone(), vec![Some((('F', 1), Some(true)))]);
+        let mut clock = emu_core::Clock::new(1_000_000);
+        let mut nvic = emu_core::nvic::Nvic::new();
+        // Start the board at t = 0 before spawning the plugin so the plugin
+        // runs against board time rather than real time.
+        pins.update(&mut DeviceCtx { clock: &mut clock, nvic: &mut nvic });
         let plugin = {
             let link = link.clone();
             std::thread::spawn(move || {
@@ -331,9 +336,6 @@ mod tests {
                 link.end();
             })
         };
-        let mut clock = emu_core::Clock::new(1_000_000);
-        let mut nvic = emu_core::nvic::Nvic::new();
-        pins.update(&mut DeviceCtx { clock: &mut clock, nvic: &mut nvic });
         clock.advance(10);
         pins.update(&mut DeviceCtx { clock: &mut clock, nvic: &mut nvic });
         plugin.join().unwrap();
