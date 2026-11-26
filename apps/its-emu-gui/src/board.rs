@@ -11,7 +11,7 @@
 //! from where the camera saw them to where they are.
 
 use eframe::egui::{
-    self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2, epaint::Vertex,
+    self, Color32, Mesh, Pos2, Rect, Sense, Shape, Stroke, TextureHandle, TextureOptions, Vec2,
 };
 
 /// The drawing (the board outline) spans `BOARD_W` × `BOARD_H` design units
@@ -33,10 +33,10 @@ const SHIELD: usize = 2;
 /// A new size is rendered once the board has kept it for this long (seconds).
 const RESIZE_SETTLE: f64 = 0.15;
 
-const LED_YELLOW: Color32 = Color32::from_rgb(0xFF, 0xC4, 0x10);
-const LED_BLUE: Color32 = Color32::from_rgb(0x30, 0x70, 0xFF);
-const LED_RED: Color32 = Color32::from_rgb(0xFF, 0x20, 0x30);
-const LED_AMBER: Color32 = Color32::from_rgb(0xFF, 0x9A, 0x1C);
+const LED_YELLOW: Color32 = Color32::from_rgb(0xFF, 0xC4, 0x00);
+const LED_BLUE: Color32 = Color32::from_rgb(0x00, 0x89, 0xFF);
+const LED_RED: Color32 = Color32::from_rgb(0xFF, 0x00, 0x00);
+const LED_AMBER: Color32 = Color32::from_rgb(0xFF, 0x98, 0x21);
 /// Always-on power LEDs D25 (5V) and D24 (3V3).
 const POWER_LEDS: [(&str, &str, f32, f32); 2] = [("5V", "D25", 925.9, 40.7), ("3V3", "D24", 957.2, 40.7)];
 /// A device's wire end on a pad and the tag beside it.
@@ -435,77 +435,16 @@ impl Pcb<'_> {
         v * self.s
     }
 
-    /// A round light spot of radius `r` units: concentric rings blended over
-    /// the board, colours (with alpha) given at relative radii `stops`
-    /// (increasing, the first at 0, the last at 1).
-    fn light(&self, x: f32, y: f32, r: f32, stops: &[(f32, Color32)]) {
-        const RINGS: usize = 16;
-        const SEGMENTS: usize = 48;
-        let at_radius = |t: f32| {
-            let i = stops.iter().rposition(|s| s.0 <= t).unwrap_or(0).min(stops.len() - 2);
-            let ((t0, c0), (t1, c1)) = (stops[i], stops[i + 1]);
-            let u = ((t - t0) / (t1 - t0)).clamp(0.0, 1.0);
-            let m = |a: u8, b: u8| f32::from(a) + (f32::from(b) - f32::from(a)) * u;
-            // interpolated unmultiplied (Color32 holds premultiplied values),
-            // then premultiplied for the mesh
-            let (mut c0, mut c1) = (c0.to_srgba_unmultiplied(), c1.to_srgba_unmultiplied());
-            // a transparent stop has no colour of its own: fade in its neighbour's
-            if c0[3] == 0 {
-                c0 = [c1[0], c1[1], c1[2], 0];
-            }
-            if c1[3] == 0 {
-                c1 = [c0[0], c0[1], c0[2], 0];
-            }
-            let alpha = m(c0[3], c1[3]) / 255.0;
-            let px = |k: usize| (m(c0[k], c1[k]) * alpha) as u8;
-            Color32::from_rgba_premultiplied(px(0), px(1), px(2), (alpha * 255.0) as u8)
-        };
-        let mut mesh = Mesh::default();
-        mesh.vertices.push(Vertex { pos: self.p(x, y), uv: egui::epaint::WHITE_UV, color: at_radius(0.0) });
-        for ring in 1..=RINGS {
-            let t = ring as f32 / RINGS as f32;
-            for seg in 0..SEGMENTS {
-                let a = seg as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
-                let pos = self.p(x + a.cos() * r * t, y + a.sin() * r * t);
-                mesh.vertices.push(Vertex { pos, uv: egui::epaint::WHITE_UV, color: at_radius(t) });
-            }
-        }
-        let at = |ring: usize, seg: usize| (1 + (ring - 1) * SEGMENTS + seg % SEGMENTS) as u32;
-        for seg in 0..SEGMENTS {
-            mesh.indices.extend([0, at(1, seg), at(1, seg + 1)]);
-        }
-        for ring in 1..RINGS {
-            for seg in 0..SEGMENTS {
-                let (a, b) = (at(ring, seg), at(ring, seg + 1));
-                let (c, d) = (at(ring + 1, seg), at(ring + 1, seg + 1));
-                mesh.indices.extend([a, c, b, b, c, d]);
-            }
-        }
-        self.painter.add(Shape::mesh(mesh));
-    }
-
-    /// SMD LED lit with `brightness`: a round glow like the one of the power
-    /// LEDs D24/D25 in the drawing (a white-hot lens fading into the colour).
+    /// SMD LED lit with `brightness`: a flat circle matching the inner lens
+    /// of the PLCC-2 package (`r = 4.6`, offset `(-0.2, -0.2)`), opacity 0.9 at full brightness.
     fn led(&self, x: f32, y: f32, color: Color32, brightness: f32) {
         let b = brightness.clamp(0.0, 1.0).powf(1.0 / 2.2); // perceived brightness
         if b < 0.01 {
             return;
         }
-        let a = |v: f32| (v * b * 255.0) as u8;
-        let tint = |c: Color32, alpha: u8| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha);
-        self.light(
-            x,
-            y,
-            5.8,
-            // bright lens with a tight coloured rim over the package
-            &[
-                (0.0, tint(lerp(color, Color32::WHITE, 0.85), a(1.0))),
-                (0.28, tint(lerp(color, Color32::WHITE, 0.55), a(1.0))),
-                (0.55, tint(color, a(0.95))),
-                (0.78, tint(color, a(0.30))),
-                (1.0, tint(color, 0)),
-            ],
-        );
+        let alpha = (0.9 * b * 255.0).round() as u8;
+        let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+        self.painter.circle_filled(self.p(x - 0.2, y - 0.2), self.len(4.6), fill);
     }
 
     /// A cable plugged into the jack whose opening is at `at` (the plug points

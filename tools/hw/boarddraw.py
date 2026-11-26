@@ -456,19 +456,6 @@ def smd_r(x, y, w, h, body='#202022', vertical=False):
                       rect(x - w / 2 + e, y - h / 2, x + w / 2 - e, y + h / 2, body)])
 
 
-def led_0805(x, y):
-    """0805 SMD LED in its off state (power LEDs D24/D25, lit by board.rs)."""
-    return '\n'.join([
-        rect(x - 4.5, y - 8.5, x + 4.5, y - 5.5, TIN, 0.5),
-        rect(x - 4.5, y + 5.5, x + 4.5, y + 8.5, TIN, 0.5),
-        rect(x - 4.8, y - 6.5, x + 4.8, y + 6.5, '#e8dfc8', 0.9),
-        rect(x - 4.1, y - 5.6, x + 4.1, y + 5.6, LED_BODY, 0.6),
-        circle(x, y, 3.2, '#efe3c4'),
-        circle(x, y, 3.2, 'none', ' stroke="#d8c9a6" stroke-width="0.45"'),
-        rect(x - 1.1, y - 1.3, x + 1.1, y + 1.3, '#cdb68a', 0.25),
-    ])
-
-
 # ======================================================================
 # Carrier board
 
@@ -628,7 +615,7 @@ def carrier_labels():
     out.append(L('CN4', 526.0, 401.1, anchor='r'))
     for x, t in zip(cn4, ['DAC1', 'AGND', 'ADC123_13', 'ADC123_12', 'ADC123_10', 'ADC12_9', 'ADC3_8', 'ADC3_7',
                           'ADC3_6', 'AGND']):
-        out.append(L(t, x + 1.5, 408.0, P, 'l', 45))
+        out.append(L(t, x - 0.5, 409.0, P, 'l', 45))
     # ---- Aux
     out.append(L('Aux', 925.0, 232.5, 16.0, 'l', sw=2.4))
     for n, y in enumerate(AUX_PADS):
@@ -654,8 +641,8 @@ def carrier_labels():
 
 def hidden_labels():
     """Labels under the Nucleo and the display (measured on the bare board)."""
-    out = [L('C8', 335.6, 81.2), L('C6', 335.6, 102.4), L('C5', 335.8, 123.0), L('CN11', 356.5, 101.5),
-           L('CN12', 357.0, 316.6), L('U4', 356.1, 153.2), L('C4', 340.6, 191.8), L('U3', 415.1, 170.0),
+    out = [L('C8', 335.6, 81.2), L('C6', 335.6, 102.4), L('C5', 335.8, 123.0), L('CN11', 359.5, 101.5),
+           L('CN12', 359.0, 316.6), L('U4', 356.1, 153.2), L('C4', 340.6, 191.8), L('U3', 415.1, 170.0),
            L('U2', 509.9, 170.0), L('U1', 603.7, 170.6), L('C3', 476.0, 202.0), L('C2', 570.4, 202.5),
            L('C1', 664.0, 188.0), L('C12', 707.7, 134.8), L('C13', 691.2, 177.0), L('C11', 759.4, 131.5),
            L('C10', 775.4, 177.3), L('VR1', 732.8, 193.8), L('R48', 815.0, 120.3), L('CN0', 832.4, 173.0)]
@@ -799,8 +786,8 @@ def carrier():
     out.append(polyline([(159.6, 58.6), (159.6, 64.7), (289.5, 64.7), (289.5, 12.4), (282.7, 12.4)], SILK, sw))
     for x in (196.0, 254.0):                       # the D-sub's board locks
         out.append(polyline([(x, 58.6), (x, 64.7)], SILK, sw))
-    # CN8: tight silkscreen outline around the socket (header covers left/right, top and bottom peek out)
-    out.append(rect_stroke(711.0, 23.0, 837.2, 35.0, SILK, sw))
+    # CN8: tight silkscreen outline around the socket
+    out.append(rect_stroke(711.0, 24.0, 837.2, 34.0, SILK, sw))
     # U6, JP1, JP2 (C9 has no silkscreen box on the real board)
     out.append(rect_stroke(68.5, 82.9, 90.1, 96.9, SILK, sw))
     out.append(circle(72.8, 91.6, 1.7, SILK))
@@ -813,7 +800,7 @@ def carrier():
     out.append(rect_stroke(J3_X - 33.5, 316.9, J3_X + 33.5, 379.3, SILK, sw))
     out.append(line(129.4, 332.6, 129.4, 375.4, SILK, sw))
     out.append(line(129.4, 405.8, 129.4, 449.6, SILK, sw))
-    out.append(line(319.0, 385.0, 319.0, 449.0, SILK, sw))
+    out.append(rect_stroke(307.0, 384.8, 318.8, 448.8, SILK, sw))
     out.append(line(919.6, 306.0, 919.6, 369.7, SILK, sw))
     # outlines along the long headers
     # LED outlines (thin frames around the packages)
@@ -873,7 +860,7 @@ def carrier():
     out.append(smd_r(281.7, 133.5, 11.5, 5.4, '#c9b48e'))
     for x in (925.9, 957.2):                         # R50, R49
         out.append(smd_r(x, 9.9, 13.6, 6.0, '#262628'))
-    out += [led_0805(925.9, 40.7), led_0805(957.2, 40.7)]
+    out += [led_smd(925.9, 40.7), led_smd(957.2, 40.7)]
     out.append(rs232())
     out.append(carrier_hidden())
     return '\n'.join(out)
@@ -1027,10 +1014,8 @@ def rs232():
     out.append(rect(cx - 63.5, cy - 25.5, cx + 63.5, cy + 25.5, metal, 7.5,
                     f' stroke="{shade(metal, -0.3)}" stroke-width="0.8"'))
     out.append(rect_stroke(cx - 62.0, cy - 24.0, cx + 62.0, cy + 24.0, shade(metal, 0.25), 0.7, 6.2))
-    out.append(path(d_shape(cx, cy + 0.4, 31.8, 36.8, 19.6, 10.0, 7.0), shade(metal, -0.22)))    # flank
-    out.append(path(d_shape(cx, cy, 29.6, 34.6, 17.6, 9.0, 6.2), shade(metal, 0.2),
-                    f' stroke="{shade(metal, -0.15)}" stroke-width="0.5"'))                   # rim
-    out.append(path(d_shape(cx, cy, 26.6, 31.6, 14.8, 7.5, 5.0), '#36352f'))                  # insulator
+    out.append(path(d_shape(cx, cy + 0.4, 31.8, 36.8, 19.6, 10.0, 7.0), shade(metal, -0.45)))    # flank
+    out.append(path(d_shape(cx, cy, 29.2, 34.7, 16.9, 8.4, 5.6), '#36352f'))                   # insulator
     for i in range(4):
         out.append(circle(cx - 17.25 + i * 11.5, cy - 6.0, 2.7, '#0b0b0a', ' stroke="#57554c" stroke-width="0.5"'))
     for i in range(5):
